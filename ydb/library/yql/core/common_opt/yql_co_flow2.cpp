@@ -1,4 +1,5 @@
 #include "yql_co_extr_members.h"
+#include "yql_flatmap_over_join.h"
 #include "yql_co.h"
 
 #include <ydb/library/yql/core/yql_expr_type_annotation.h>
@@ -50,7 +51,16 @@ TExprNode::TPtr AggregateSubsetFieldsAnalyzer(const TCoAggregate& node, TExprCon
         }
         else {
             auto traits = x.Ref().Child(1);
-            auto structType = traits->Child(0)->GetTypeAnn()->Cast<TTypeExprType>()->GetType()->Cast<TStructExprType>();
+            ui32 index;
+            if (traits->IsCallable("AggregationTraits")) {
+                index = 0;
+            } else if (traits->IsCallable("AggApply")) {
+                index = 1;
+            } else {
+                return node.Ptr();
+            }
+
+            auto structType = traits->Child(index)->GetTypeAnn()->Cast<TTypeExprType>()->GetType()->Cast<TStructExprType>();
             for (const auto& item : structType->GetItems()) {
                 usedFields.insert(item->GetName());
             }
@@ -111,496 +121,6 @@ TExprNode::TPtr AggregateSubsetFieldsAnalyzer(const TCoAggregate& node, TExprCon
 
     auto ret = ctx.ChangeChild(node.Ref(), 0, std::move(newInput));
     return ret;
-}
-
-void GatherAndTerms(TExprNode::TPtr&& predicate, TExprNode::TListType& andTerms) {
-    if (!predicate->IsCallable("And")) {
-        andTerms.emplace_back(std::move(predicate));
-        return;
-    }
-
-    for (auto& child : predicate->ChildrenList()) {
-        GatherAndTerms(std::move(child), andTerms);
-    }
-}
-
-TExprNode::TPtr FuseAndTerms(TPositionHandle position, const TExprNode::TListType& andTerms, TExprNode::TPtr exclude, TExprContext& ctx) {
-    TExprNode::TPtr prevAndNode = nullptr;
-    TNodeSet added;
-    for (const auto& otherAndTerm : andTerms) {
-        if (otherAndTerm == exclude) {
-            continue;
-        }
-
-        if (!added.insert(otherAndTerm.Get()).second) {
-            continue;
-        }
-
-        if (!prevAndNode) {
-            prevAndNode = otherAndTerm;
-        }
-        else {
-            prevAndNode = ctx.NewCallable(position, "And", { prevAndNode, otherAndTerm });
-        }
-    }
-
-    return prevAndNode;
-}
-
-TExprNode::TPtr ConstantPredicatePushdownOverEquiJoin(TExprNode::TPtr equiJoin, TExprNode::TPtr predicate, bool ordered, TExprContext& ctx) {
-    auto lambda = ctx.Builder(predicate->Pos())
-        .Lambda()
-            .Param("row")
-            .Set(predicate)
-        .Seal()
-        .Build();
-
-    auto ret = ctx.ShallowCopy(*equiJoin);
-    auto inputsCount = ret->ChildrenSize() - 2;
-    for (ui32 i = 0; i < inputsCount; ++i) {
-        ret->ChildRef(i) = ctx.ShallowCopy(*ret->Child(i));
-        ret->Child(i)->ChildRef(0) = ctx.Builder(predicate->Pos())
-            .Callable(ordered ? "OrderedFilter" : "Filter")
-                .Add(0, ret->Child(i)->ChildPtr(0))
-                .Add(1, lambda)
-            .Seal()
-            .Build();
-    }
-
-    return ret;
-}
-
-void GatherKeyAliases(const TExprNode::TPtr& joinTree, TMap<TString, TSet<TString>>& aliases, const TJoinLabels& labels) {
-    auto left = joinTree->ChildPtr(1);
-    if (!left->IsAtom()) {
-        GatherKeyAliases(left, aliases, labels);
-    }
-
-    auto right = joinTree->ChildPtr(2);
-    if (!right->IsAtom()) {
-        GatherKeyAliases(right, aliases, labels);
-    }
-
-    auto leftColumns = joinTree->Child(3);
-    auto rightColumns = joinTree->Child(4);
-    for (ui32 i = 0; i < leftColumns->ChildrenSize(); i += 2) {
-        auto leftColumn = FullColumnName(leftColumns->Child(i)->Content(), leftColumns->Child(i + 1)->Content());
-        auto rightColumn = FullColumnName(rightColumns->Child(i)->Content(), rightColumns->Child(i + 1)->Content());
-        auto leftType = *labels.FindColumn(leftColumn);
-        auto rightType = *labels.FindColumn(rightColumn);
-        if (IsSameAnnotation(*leftType, *rightType)) {
-            aliases[leftColumn].insert(rightColumn);
-            aliases[rightColumn].insert(leftColumn);
-        }
-    }
-}
-
-void MakeTransitiveClosure(TMap<TString, TSet<TString>>& aliases) {
-    for (;;) {
-        bool hasChanges = false;
-        for (auto& x : aliases) {
-            for (auto& y : x.second) {
-                // x.first->y
-                for (auto& z : aliases[y]) {
-                    // add x.first->z
-                    if (x.first != z) {
-                        hasChanges = x.second.insert(z).second || hasChanges;
-                    }
-                }
-            }
-        }
-
-        if (!hasChanges) {
-            return;
-        }
-    }
-}
-
-void GatherOptionalKeyColumnsFromEquality(TExprNode::TPtr columns, const TJoinLabels& labels, ui32 inputIndex,
-    TSet<TString>& optionalKeyColumns) {
-    for (ui32 i = 0; i < columns->ChildrenSize(); i += 2) {
-        auto table = columns->Child(i)->Content();
-        auto column = columns->Child(i + 1)->Content();
-        if (*labels.FindInputIndex(table) == inputIndex) {
-            auto type = *labels.FindColumn(table, column);
-            if (type->GetKind() == ETypeAnnotationKind::Optional) {
-                optionalKeyColumns.insert(FullColumnName(table, column));
-            }
-        }
-    }
-}
-
-void GatherOptionalKeyColumns(TExprNode::TPtr joinTree, const TJoinLabels& labels, ui32 inputIndex,
-    TSet<TString>& optionalKeyColumns) {
-    auto left = joinTree->Child(1);
-    auto right = joinTree->Child(2);
-    if (!left->IsAtom()) {
-        GatherOptionalKeyColumns(left, labels, inputIndex, optionalKeyColumns);
-    }
-
-    if (!right->IsAtom()) {
-        GatherOptionalKeyColumns(right, labels, inputIndex, optionalKeyColumns);
-    }
-
-    auto joinType = joinTree->Child(0)->Content();
-    if (joinType == "Inner" || joinType == "LeftSemi") {
-        GatherOptionalKeyColumnsFromEquality(joinTree->Child(3), labels, inputIndex, optionalKeyColumns);
-    }
-
-    if (joinType == "Inner" || joinType == "RightSemi") {
-        GatherOptionalKeyColumnsFromEquality(joinTree->Child(4), labels, inputIndex, optionalKeyColumns);
-    }
-}
-
-TExprNode::TPtr SingleInputPredicatePushdownOverEquiJoin(TExprNode::TPtr equiJoin, TExprNode::TPtr predicate,
-    const TSet<TStringBuf>& usedFields, TExprNode::TPtr args, const TJoinLabels& labels,
-    ui32 firstCandidate, const TMap<TStringBuf, TVector<TStringBuf>>& renameMap, bool ordered, TExprContext& ctx) {
-    auto inputsCount = equiJoin->ChildrenSize() - 2;
-    auto joinTree = equiJoin->Child(inputsCount);
-    TMap<TString, TSet<TString>> aliases;
-    GatherKeyAliases(joinTree, aliases, labels);
-    MakeTransitiveClosure(aliases);
-    TSet<ui32> candidates;
-    candidates.insert(firstCandidate);
-    // check whether some used fields are not aliased
-    bool onlyKeys = true;
-    for (auto& x : usedFields) {
-        if (!aliases.contains(TString(x))) {
-            onlyKeys = false;
-            break;
-        }
-    }
-
-    THashMap<ui32, THashMap<TString, TString>> aliasedKeys;
-    if (onlyKeys) {
-        // try to extend inputs
-        for (ui32 i = 0; i < inputsCount; ++i) {
-            if (i == firstCandidate) {
-                continue;
-            }
-
-            TSet<TString> coveredKeys;
-            for (auto field : labels.Inputs[i].EnumerateAllColumns()) {
-                if (auto aliasSet = aliases.FindPtr(field)) {
-                    for (auto alias : *aliasSet) {
-                        if (usedFields.contains(alias)) {
-                            coveredKeys.insert(TString(alias));
-                            aliasedKeys[i].insert({ field, TString(alias) });
-                        }
-                    }
-                }
-            }
-
-            if (coveredKeys.size() == usedFields.size()) {
-                candidates.insert(i);
-            }
-        }
-    }
-
-    if (!IsRequiredSide(joinTree, labels, firstCandidate).first) {
-        return equiJoin;
-    }
-
-    auto ret = ctx.ShallowCopy(*equiJoin);
-    for (auto& inputIndex : candidates) {
-        auto x = IsRequiredSide(joinTree, labels, inputIndex);
-        if (!x.first) {
-            continue;
-        }
-
-        auto prevInput = equiJoin->Child(inputIndex)->ChildPtr(0);
-        auto newInput = prevInput;
-        if (x.second) {
-            // skip null key columns
-            TSet<TString> optionalKeyColumns;
-            GatherOptionalKeyColumns(joinTree, labels, inputIndex, optionalKeyColumns);
-            newInput = FilterOutNullJoinColumns(predicate->Pos(),
-                prevInput, labels.Inputs[inputIndex], optionalKeyColumns, ctx);
-        }
-
-        // then apply predicate
-        newInput = ctx.Builder(predicate->Pos())
-            .Callable(ordered ? "OrderedFilter" : "Filter")
-                .Add(0, newInput)
-                .Lambda(1)
-                    .Param("row")
-                    .ApplyPartial(args, predicate).With(0)
-                        .Callable("AsStruct")
-                            .Do([&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
-                                ui32 index = 0;
-                                const auto& label = labels.Inputs[inputIndex];
-                                for (auto column : label.EnumerateAllColumns()) {
-                                    TVector<TString> targetColumns;
-                                    targetColumns.push_back(column);
-                                    if (onlyKeys && inputIndex != firstCandidate) {
-                                        if (auto aliasedKey = aliasedKeys[inputIndex].FindPtr(column)) {
-                                            targetColumns[0] = *aliasedKey;
-                                        } else {
-                                            continue;
-                                        }
-                                    }
-
-                                    TStringBuf part1;
-                                    TStringBuf part2;
-                                    SplitTableName(column, part1, part2);
-                                    auto memberName = label.MemberName(part1, part2);
-
-                                    if (auto renamed = renameMap.FindPtr(targetColumns[0])) {
-                                        if (renamed->empty()) {
-                                            continue;
-                                        }
-
-                                        targetColumns.clear();
-                                        for (auto& r : *renamed) {
-                                            targetColumns.push_back(TString(r));
-                                        }
-                                    }
-
-                                    for (auto targetColumn : targetColumns) {
-                                        parent.List(index++)
-                                                .Atom(0, targetColumn)
-                                                .Callable(1, "Member")
-                                                    .Arg(0, "row")
-                                                    .Atom(1, memberName)
-                                                .Seal()
-                                            .Seal();
-                                    }
-                                }
-
-                                return parent;
-                            })
-                        .Seal()
-                    .Done().Seal()
-                .Seal()
-            .Seal()
-            .Build();
-
-        // then return reassembled join
-        ret->ChildRef(inputIndex) = ctx.ShallowCopy(*ret->Child(inputIndex));
-        ret->Child(inputIndex)->ChildRef(0) = newInput;
-    }
-
-    return ret;
-}
-
-TExprNode::TPtr FlatMapOverEquiJoin(const TCoFlatMapBase& node, TExprContext& ctx, const TParentsMap& parentsMap) {
-    auto equiJoin = node.Input();
-    auto structType = equiJoin.Ref().GetTypeAnn()->Cast<TListExprType>()->GetItemType()
-        ->Cast<TStructExprType>();
-    if (structType->GetSize() == 0) {
-        return node.Ptr();
-    }
-
-    TExprNode::TPtr structNode;
-    if (IsRenameFlatMap(node, structNode)) {
-        YQL_CLOG(DEBUG, Core) << "Rename in " << node.CallableName() << " over EquiJoin";
-        auto joinSettings = equiJoin.Ref().ChildPtr(equiJoin.Ref().ChildrenSize() - 1);
-        auto renameMap = LoadJoinRenameMap(*joinSettings);
-        joinSettings = RemoveSetting(*joinSettings, "rename", ctx);
-        auto structType = equiJoin.Ref().GetTypeAnn()->Cast<TListExprType>()->GetItemType()
-            ->Cast<TStructExprType>();
-        THashSet<TStringBuf> usedFields;
-        TMap<TStringBuf, TVector<TStringBuf>> memberUsageMap;
-        for (auto& child : structNode->Children()) {
-            auto item = child->Child(1);
-            usedFields.insert(item->Child(1)->Content());
-            memberUsageMap[item->Child(1)->Content()].push_back(child->Child(0)->Content());
-        }
-
-        TMap<TStringBuf, TStringBuf> reversedRenameMap;
-        TMap<TStringBuf, TVector<TStringBuf>> newRenameMap;
-        for (auto& x : renameMap) {
-            if (!x.second.empty()) {
-                for (auto& y : x.second) {
-                    reversedRenameMap[y] = x.first;
-                }
-            }
-            else {
-                // previous drops
-                newRenameMap[x.first].clear();
-            }
-        }
-
-        for (auto& x : structType->GetItems()) {
-            if (!usedFields.contains(x->GetName())) {
-                // new drops
-                auto name = x->GetName();
-                if (auto renamed = reversedRenameMap.FindPtr(name)) {
-                    name = *renamed;
-                }
-
-                newRenameMap[name].clear();
-            }
-        }
-
-        for (auto& x : memberUsageMap) {
-            auto prevName = x.first;
-            if (auto renamed = reversedRenameMap.FindPtr(prevName)) {
-                prevName = *renamed;
-            }
-
-            for (auto& y : x.second) {
-                newRenameMap[prevName].push_back(y);
-            }
-        }
-
-        TExprNode::TListType joinSettingsNodes = joinSettings->ChildrenList();
-        AppendEquiJoinRenameMap(node.Pos(), newRenameMap, joinSettingsNodes, ctx);
-        joinSettings = ctx.ChangeChildren(*joinSettings, std::move(joinSettingsNodes));
-        auto ret = ctx.ShallowCopy(equiJoin.Ref());
-        ret->ChildRef(ret->ChildrenSize() - 1) = joinSettings;
-        return ret;
-    }
-
-    TSet<TStringBuf> usedFields;
-    auto& arg = node.Lambda().Args().Arg(0).Ref();
-    auto body = node.Lambda().Body().Ptr();
-    if (HaveFieldsSubset(body, arg, usedFields, parentsMap)) {
-        YQL_CLOG(DEBUG, Core) << "FieldsSubset in " << node.CallableName() << " over EquiJoin";
-        auto joinSettings = equiJoin.Ref().ChildPtr(equiJoin.Ref().ChildrenSize() - 1);
-        auto renameMap = LoadJoinRenameMap(*joinSettings);
-        joinSettings = RemoveSetting(*joinSettings, "rename", ctx);
-        auto newRenameMap = UpdateUsedFieldsInRenameMap(renameMap, usedFields, structType);
-        auto newLambda = ctx.Builder(node.Pos())
-            .Lambda()
-            .Param("item")
-                .ApplyPartial(node.Lambda().Args().Ptr(), body).With(0, "item").Seal()
-            .Seal()
-            .Build();
-
-        TExprNode::TListType joinSettingsNodes = joinSettings->ChildrenList();
-        AppendEquiJoinRenameMap(node.Pos(), newRenameMap, joinSettingsNodes, ctx);
-        joinSettings = ctx.ChangeChildren(*joinSettings, std::move(joinSettingsNodes));
-        auto updatedEquiJoin = ctx.ShallowCopy(equiJoin.Ref());
-        updatedEquiJoin->ChildRef(updatedEquiJoin->ChildrenSize() - 1) = joinSettings;
-
-        return ctx.Builder(node.Pos())
-            .Callable(node.CallableName())
-                .Add(0, updatedEquiJoin)
-                .Add(1, newLambda)
-            .Seal()
-            .Build();
-    }
-
-    if (IsPredicateFlatMap(node.Lambda().Body().Ref())) {
-        // predicate pushdown
-        const auto& row = node.Lambda().Args().Arg(0).Ref();
-        auto predicate = node.Lambda().Body().Ref().ChildPtr(0);
-        auto value = node.Lambda().Body().Ref().ChildPtr(1);
-        TJoinLabels labels;
-        for (ui32 i = 0; i < equiJoin.Ref().ChildrenSize() - 2; ++i) {
-            auto err = labels.Add(ctx, *equiJoin.Ref().Child(i)->Child(1),
-                equiJoin.Ref().Child(i)->Child(0)->GetTypeAnn()->Cast<TListExprType>()
-                ->GetItemType()->Cast<TStructExprType>());
-            if (err) {
-                ctx.AddError(*err);
-                return nullptr;
-            }
-        }
-
-        TExprNode::TListType andTerms;
-        GatherAndTerms(std::move(predicate), andTerms);
-        TExprNode::TPtr ret;
-        TExprNode::TPtr extraPredicate;
-        auto joinSettings = equiJoin.Ref().Child(equiJoin.Ref().ChildrenSize() - 1);
-        auto renameMap = LoadJoinRenameMap(*joinSettings);
-        THashMap<TString, TString> backRenameMap;
-        for (auto& x : renameMap) {
-            if (!x.second.empty()) {
-                for (auto& y : x.second) {
-                    backRenameMap[y] = x.first;
-                }
-            }
-        }
-
-        const bool ordered = node.Maybe<TCoOrderedFlatMap>().IsValid();
-
-        for (auto& andTerm : andTerms) {
-            if (andTerm->IsCallable("Likely")) {
-                continue;
-            }
-
-            TSet<TStringBuf> usedFields;
-            TSet<ui32> inputs;
-            if (!HaveFieldsSubset(andTerm, row, usedFields, parentsMap, false)) {
-                continue;
-            }
-
-            for (auto x : usedFields) {
-                // rename used fields
-                if (auto renamed = backRenameMap.FindPtr(x)) {
-                    x = *renamed;
-                }
-
-                TStringBuf part1;
-                TStringBuf part2;
-                SplitTableName(x, part1, part2);
-                inputs.insert(*labels.FindInputIndex(part1));
-                if (inputs.size() == labels.Inputs.size()) {
-                    break;
-                }
-            }
-
-            // all inputs are touched
-            if (inputs.size() == labels.Inputs.size()) {
-                continue;
-            }
-
-            if (inputs.size() == 0) {
-                YQL_CLOG(DEBUG, Core) << "ConstantPredicatePushdownOverEquiJoin";
-                ret = ConstantPredicatePushdownOverEquiJoin(equiJoin.Ptr(), andTerm, ordered, ctx);
-                extraPredicate = FuseAndTerms(node.Pos(), andTerms, andTerm, ctx);
-                break;
-            }
-
-            if (inputs.size() == 1) {
-                auto newJoin = SingleInputPredicatePushdownOverEquiJoin(equiJoin.Ptr(), andTerm, usedFields,
-                    node.Lambda().Args().Ptr(), labels, *inputs.begin(), renameMap, ordered, ctx);
-                if (newJoin != equiJoin.Ptr()) {
-                    YQL_CLOG(DEBUG, Core) << "SingleInputPredicatePushdownOverEquiJoin";
-                    ret = newJoin;
-                    extraPredicate = FuseAndTerms(node.Pos(), andTerms, andTerm, ctx);
-                    break;
-                }
-            }
-        }
-
-        if (!ret) {
-            return node.Ptr();
-        }
-
-        if (extraPredicate) {
-            ret = ctx.Builder(node.Pos())
-                .Callable(ordered ? "OrderedFilter" : "Filter")
-                    .Add(0, std::move(ret))
-                    .Lambda(1)
-                        .Param("item")
-                        .ApplyPartial(node.Lambda().Args().Ptr(), std::move(extraPredicate)).WithNode(row, "item").Seal()
-                    .Seal()
-                .Seal()
-                .Build();
-        }
-
-        if (value != &row) {
-            TString name = node.Lambda().Body().Ref().Content().StartsWith("Flat") ? "FlatMap" : "Map";
-            if (ordered) {
-                name.prepend("Ordered");
-            }
-            ret = ctx.Builder(node.Pos())
-                .Callable(name)
-                    .Add(0, std::move(ret))
-                    .Lambda(1)
-                        .Param("item")
-                        .ApplyPartial(node.Lambda().Args().Ptr(), std::move(value)).With(0, "item").Seal()
-                    .Seal()
-                .Seal()
-                .Build();
-        }
-
-        return ret;
-    }
-
-    return node.Ptr();
 }
 
 TExprNode::TPtr FlatMapSubsetFields(const TCoFlatMapBase& node, TExprContext& ctx, const TParentsMap& parentsMap) {
@@ -1546,17 +1066,21 @@ void RegisterCoFlowCallables2(TCallableOptimizerMap& map) {
     map["FromFlow"] = std::bind(&OptimizeFromFlow, _1, _2, _3);
     map["Collect"] = std::bind(&OptimizeCollect, _1, _2, _3);
 
-    map["FlatMap"] = map["OrderedFlatMap"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+    map["FlatMap"] = map["OrderedFlatMap"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) -> TExprNode::TPtr {
         TCoFlatMapBase self(node);
         if (!optCtx.IsSingleUsage(self.Input().Ref())) {
             return node;
         }
 
         if (self.Input().Ref().IsCallable("EquiJoin")) {
-            auto ret = FlatMapOverEquiJoin(self, ctx, *optCtx.ParentsMap);
-            if (ret != node) {
+            auto ret = FlatMapOverEquiJoin(self, ctx, *optCtx.ParentsMap, false);
+            if (!ret.Raw()) {
+                return nullptr;
+            }
+
+            if (ret.Raw() != self.Raw()) {
                 YQL_CLOG(DEBUG, Core) << node->Content() << "OverEquiJoin";
-                return ret;
+                return ret.Ptr();
             }
         }
 
@@ -2109,6 +1633,38 @@ void RegisterCoFlowCallables2(TCallableOptimizerMap& map) {
                 .Add(7, node->Child(7)->IsLambda() ? ctx.DeepCopyLambda(*node->Child(7)) : node->ChildPtr(7))
             .Seal()
             .Build();
+    };
+
+    map["AggApply"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+        auto type = node->Child(1)->GetTypeAnn()->Cast<TTypeExprType>()->GetType();
+        if (type->GetKind() != ETypeAnnotationKind::Struct) {
+            // usually distinct, type of column is used instead
+            return node;
+        }
+
+        auto structType = type->Cast<TStructExprType>();
+        TSet<TStringBuf> usedFields;
+        auto extractor = node->Child(2);
+        TSet<TStringBuf> lambdaSubset;
+        if (!HaveFieldsSubset(extractor->ChildPtr(1), *extractor->Child(0)->Child(0), lambdaSubset, *optCtx.ParentsMap)) {
+            return node;
+        }
+
+        usedFields.insert(lambdaSubset.cbegin(), lambdaSubset.cend());
+        if (usedFields.size() == structType->GetSize()) {
+            return node;
+        }
+
+        TVector<const TItemExprType*> subsetItems;
+        for (const auto& item : structType->GetItems()) {
+            if (usedFields.contains(item->GetName())) {
+                subsetItems.push_back(item);
+            }
+        }
+
+        auto subsetType = ctx.MakeType<TStructExprType>(subsetItems);
+        YQL_CLOG(DEBUG, Core) << "FieldSubset for AggApply";
+        return ctx.ChangeChild(*node, 1, ExpandType(node->Pos(), *subsetType, ctx));
     };
 
     map["SessionWindowTraits"] = map["SortTraits"] = map["Lag"] = map["Lead"] = map["RowNumber"] = map["Rank"] = map["DenseRank"] =

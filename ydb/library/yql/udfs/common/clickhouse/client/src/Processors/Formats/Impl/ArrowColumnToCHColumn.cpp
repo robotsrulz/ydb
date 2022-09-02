@@ -29,31 +29,31 @@
 #include <algorithm>
 #include <arrow/builder.h>
 #include <arrow/array.h>
-
+#include <fmt/ranges.h>
 
 /// UINT16 and UINT32 are processed separately, see comments in readColumnFromArrowColumn.
 #define FOR_ARROW_NUMERIC_TYPES(M) \
-        M(arrow::Type::UINT8, DB::UInt8) \
-        M(arrow::Type::INT8, DB::Int8) \
-        M(arrow::Type::INT16, DB::Int16) \
-        M(arrow::Type::INT32, DB::Int32) \
-        M(arrow::Type::UINT64, DB::UInt64) \
-        M(arrow::Type::INT64, DB::Int64) \
-        M(arrow::Type::HALF_FLOAT, DB::Float32) \
-        M(arrow::Type::FLOAT, DB::Float32) \
-        M(arrow::Type::DOUBLE, DB::Float64)
+        M(arrow::Type::UINT8, NDB::UInt8) \
+        M(arrow::Type::INT8, NDB::Int8) \
+        M(arrow::Type::INT16, NDB::Int16) \
+        M(arrow::Type::INT32, NDB::Int32) \
+        M(arrow::Type::UINT64, NDB::UInt64) \
+        M(arrow::Type::INT64, NDB::Int64) \
+        M(arrow::Type::HALF_FLOAT, NDB::Float32) \
+        M(arrow::Type::FLOAT, NDB::Float32) \
+        M(arrow::Type::DOUBLE, NDB::Float64)
 
 #define FOR_ARROW_INDEXES_TYPES(M) \
-        M(arrow::Type::UINT8, DB::UInt8) \
-        M(arrow::Type::INT8, DB::UInt8) \
-        M(arrow::Type::UINT16, DB::UInt16) \
-        M(arrow::Type::INT16, DB::UInt16) \
-        M(arrow::Type::UINT32, DB::UInt32) \
-        M(arrow::Type::INT32, DB::UInt32) \
-        M(arrow::Type::UINT64, DB::UInt64) \
-        M(arrow::Type::INT64, DB::UInt64)
+        M(arrow::Type::UINT8, NDB::UInt8) \
+        M(arrow::Type::INT8, NDB::UInt8) \
+        M(arrow::Type::UINT16, NDB::UInt16) \
+        M(arrow::Type::INT16, NDB::UInt16) \
+        M(arrow::Type::UINT32, NDB::UInt32) \
+        M(arrow::Type::INT32, NDB::UInt32) \
+        M(arrow::Type::UINT64, NDB::UInt64) \
+        M(arrow::Type::INT64, NDB::UInt64)
 
-namespace DB
+namespace NDB
 {
 
 namespace ErrorCodes
@@ -561,7 +561,7 @@ void ArrowColumnToCHColumn::arrowTableToCHChunk(Chunk & res, std::shared_ptr<arr
 
             // TODO: What if some columns were not presented? Insert NULLs? What if a column is not nullable?
             if (!read_from_nested)
-                throw Exception{ErrorCodes::THERE_IS_NO_COLUMN, "Column '{}' is not presented in input data.", header_column.name};
+                throw Exception{ErrorCodes::THERE_IS_NO_COLUMN, "Column \"{}\" is not presented in input data. Available columns: {}", header_column.name, table->ColumnNames()};
         }
 
         std::shared_ptr<arrow::ChunkedArray> arrow_column = name_to_column_ptr[header_column.name];

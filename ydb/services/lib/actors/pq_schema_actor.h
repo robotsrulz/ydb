@@ -18,18 +18,45 @@ namespace NKikimr::NGRpcProxy::V1 {
         NKikimrSchemeOp::TModifyScheme& modifyScheme,
         const TActorContext& ctx,
         bool alter,
-        TString& error
+        TString& error,
+        const TString& path,
+        const TString& database = TString(),
+        const TString& localDc = TString()
     );
+
+    Ydb::StatusIds::StatusCode FillProposeRequestImpl(
+        const TString& name,
+        const Ydb::Topic::CreateTopicRequest& request,
+        NKikimrSchemeOp::TModifyScheme& modifyScheme,
+        const TActorContext& ctx,
+        TString& error,
+        const TString& path,
+        const TString& database = TString(),
+        const TString& localDc = TString()
+
+    );
+
+    Ydb::StatusIds::StatusCode FillProposeRequestImpl(
+        const Ydb::Topic::AlterTopicRequest& request,
+        NKikimrSchemeOp::TPersQueueGroupDescription& pqDescr,
+        const TActorContext& ctx,
+        TString& error,
+        bool isCdcStream
+    );
+
 
     struct TClientServiceType {
         TString Name;
         ui32 MaxCount;
+        TVector<TString> PasswordHashes;
     };
     typedef std::map<TString, TClientServiceType> TClientServiceTypes;
     TClientServiceTypes GetSupportedClientServiceTypes(const TActorContext& ctx);
 
     // Returns true if have duplicated read rules
-    bool CheckReadRulesConfig(const NKikimrPQ::TPQTabletConfig& config, const TClientServiceTypes& supportedReadRuleServiceTypes, TString& error);
+    Ydb::StatusIds::StatusCode CheckConfig(const NKikimrPQ::TPQTabletConfig& config, const TClientServiceTypes& supportedReadRuleServiceTypes,
+                                            TString& error, const TActorContext& ctx,
+                                            const Ydb::StatusIds::StatusCode dubsStatus = Ydb::StatusIds::BAD_REQUEST);
 
     TString AddReadRuleToConfig(
         NKikimrPQ::TPQTabletConfig *config,
@@ -82,6 +109,10 @@ namespace NKikimr::NGRpcProxy::V1 {
                 path = JoinPath(ChildPath(NKikimr::SplitPath(path), *PrivateTopicName));
             }
             return path;
+        }
+
+        const TMaybe<TString>& GetCdcStreamName() const {
+            return CdcStreamName;
         }
 
     protected:
@@ -178,6 +209,11 @@ namespace NKikimr::NGRpcProxy::V1 {
                         if (static_cast<TDerived*>(this)->IsCdcStreamCompatible()) {
                             Y_VERIFY(response.ListNodeEntry->Children.size() == 1);
                             PrivateTopicName = response.ListNodeEntry->Children.at(0).Name;
+
+                            if (response.Self) {
+                                CdcStreamName = response.Self->Info.GetName();
+                            }
+
                             return SendDescribeProposeRequest(ctx);
                         }
                     }
@@ -280,6 +316,7 @@ namespace NKikimr::NGRpcProxy::V1 {
         bool IsDead = false;
         const TString TopicPath;
         TMaybe<TString> PrivateTopicName;
+        TMaybe<TString> CdcStreamName;
     };
 
     //-----------------------------------------------------------------------------------
@@ -339,9 +376,25 @@ namespace NKikimr::NGRpcProxy::V1 {
             return this->SendProposeRequest(ctx);
         }
 
+        void Handle(TEvTxUserProxy::TEvProposeTransactionStatus::TPtr& ev, const TActorContext& ctx) {
+            auto msg = ev->Get();
+            const auto status = static_cast<TEvTxUserProxy::TEvProposeTransactionStatus::EStatus>(ev->Get()->Record.GetStatus());
+
+            if (status ==  TEvTxUserProxy::TResultStatus::ExecError && msg->Record.GetSchemeShardStatus() == NKikimrScheme::EStatus::StatusPreconditionFailed)
+            {
+                return TBase::ReplyWithError(Ydb::StatusIds::OVERLOADED,
+                                                         Ydb::PersQueue::ErrorCode::ERROR,
+                                                         TStringBuilder() << "Topic with name " << TBase::GetTopicPath(ctx) << " has another alter in progress",
+                                                         ctx);
+            }
+
+            return TBase::TBase::Handle(ev, ctx);
+        }
+
         void StateWork(TAutoPtr<IEventHandle>& ev, const TActorContext& ctx) {
             switch (ev->GetTypeRewrite()) {
-            default: TBase::StateWork(ev, ctx);
+                HFunc(TEvTxUserProxy::TEvProposeTransactionStatus, Handle);
+                default: TBase::StateWork(ev, ctx);
             }
         }
 

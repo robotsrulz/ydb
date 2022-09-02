@@ -47,49 +47,50 @@ private:
 
 
 struct THttpResponseData {
-    NYdb::EStatus Status = NYdb::EStatus::SUCCESS;
-    NJson::TJsonValue ResponseBody;
+    NYdb::EStatus Status{NYdb::EStatus::SUCCESS};
+    NJson::TJsonValue Body;
     TString ErrorText;
+
+    TString DumpBody(MimeTypes contentType);
 };
 
 struct THttpRequestContext {
-    THttpRequestContext( const NKikimrConfig::TServerlessProxyConfig& config,
-                        std::shared_ptr<NYdb::ICredentialsProvider> serviceAccountCredentialsProvider)
-        : ServiceConfig(config)
-        , ServiceAccountCredentialsProvider(serviceAccountCredentialsProvider)
-    {}
+    THttpRequestContext(const NKikimrConfig::TServerlessProxyConfig& config,
+                        NHttp::THttpIncomingRequestPtr request,
+                        NActors::TActorId sender,
+                        NYdb::TDriver* driver,
+                        std::shared_ptr<NYdb::ICredentialsProvider> serviceAccountCredentialsProvider);
+    const NKikimrConfig::TServerlessProxyConfig& ServiceConfig;
+    NHttp::THttpIncomingRequestPtr Request;
+    NActors::TActorId Sender;
+    NYdb::TDriver* Driver;
+    std::shared_ptr<NYdb::ICredentialsProvider> ServiceAccountCredentialsProvider;
 
     THttpResponseData ResponseData;
-    NJson::TJsonValue RequestBody;
     TString ServiceAccountId;
     TString RequestId;
     TString DiscoveryEndpoint;
     TString DatabaseName;
-    TString DatabaseId;
-    TString FolderId;
-    TString CloudId;
-    TString StreamName;
+    TString DatabaseId; // not in context
+    TString FolderId;   // not in context
+    TString CloudId;    // not in context
+    TString StreamName; // not in context
     TString SourceAddress;
-    TString MethodName;
-    TString ApiVersion;
-
-    NHttp::THttpIncomingRequestPtr Request;
-    NActors::TActorId Sender;
-
+    TString MethodName; // used once
+    TString ApiVersion; // used once
+    MimeTypes ContentType{MIME_UNKNOWN};
     TString IamToken;
     TString SerializedUserToken;
-    const NKikimrConfig::TServerlessProxyConfig& ServiceConfig;
-    NYdb::TDriver* Driver;
-    std::shared_ptr<NYdb::ICredentialsProvider> ServiceAccountCredentialsProvider;
 
-    TStringBuilder LogPrefix() const
-    {
+    TStringBuilder LogPrefix() const {
         return TStringBuilder() << "http request [" << MethodName << "] requestId [" << RequestId << "]";
     }
 
-    void ParseHeaders(TStringBuf headers);
-    void DoReply(const TActorContext& ctx);
+    THolder<NKikimr::NSQS::TAwsRequestSignV4> GetSignature();
     void SendBadRequest(NYdb::EStatus status, const TString& errorText, const TActorContext& ctx);
+    void DoReply(const TActorContext& ctx);
+    void ParseHeaders(TStringBuf headers);
+    void RequestBodyToProto(NProtoBuf::Message* request);
 };
 
 class IHttpRequestProcessor {
@@ -97,7 +98,9 @@ public:
     virtual ~IHttpRequestProcessor() = default;
 
     virtual const TString& Name() const = 0;
-    virtual void Execute(THttpRequestContext&& context, THolder<NKikimr::NSQS::TAwsRequestSignV4> signature, const TActorContext& ctx) = 0;
+    virtual void Execute(THttpRequestContext&& context,
+                         THolder<NKikimr::NSQS::TAwsRequestSignV4> signature,
+                         const TActorContext& ctx) = 0;
 };
 
 class THttpRequestProcessors {
@@ -107,7 +110,9 @@ public:
 
 public:
     void Initialize();
-    bool Execute(const TString& name, THttpRequestContext&& params, THolder<NKikimr::NSQS::TAwsRequestSignV4> signature, const TActorContext& ctx);
+    bool Execute(const TString& name, THttpRequestContext&& params,
+                 THolder<NKikimr::NSQS::TAwsRequestSignV4> signature,
+                 const TActorContext& ctx);
 
 private:
     THashMap<TString, THolder<IHttpRequestProcessor>> Name2Processor;

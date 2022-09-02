@@ -145,7 +145,7 @@ void TCommandExportToYt::Parse(TConfig& config) {
 
     Items = TItem::Parse(config, "item");
     if (Items.empty()) {
-        throw TMissUseException() << "At least one item should be provided";
+        throw TMisuseException() << "At least one item should be provided";
     }
 
     for (auto& item : Items) {
@@ -262,6 +262,13 @@ void TCommandExportToS3::Config(TConfig& config) {
     config.Opts->AddLongOption("retries", "Number of retries")
         .RequiredArgument("NUM").StoreResult(&NumberOfRetries).DefaultValue(NumberOfRetries);
 
+    config.Opts->AddLongOption("compression", TStringBuilder()
+            << "Codec used to compress data" << Endl
+            << "  Available options:" << Endl
+            << "    - zstd" << Endl
+            << "    - zstd-N (N is compression level, e.g. zstd-3)" << Endl)
+        .RequiredArgument("STRING").StoreResult(&Compression);
+
     AddDeprecatedJsonOption(config);
     AddFormats(config, { EOutputFormat::Pretty, EOutputFormat::ProtoJsonBase64 });
     config.Opts->MutuallyExclusive("json", "format");
@@ -276,7 +283,7 @@ void TCommandExportToS3::Parse(TConfig& config) {
 
     Items = TItem::Parse(config, "item");
     if (Items.empty()) {
-        throw TMissUseException() << "At least one item should be provided";
+        throw TMisuseException() << "At least one item should be provided";
     }
 
     for (auto& item : Items) {
@@ -306,6 +313,10 @@ int TCommandExportToS3::Run(TConfig& config) {
     }
 
     settings.NumberOfRetries(NumberOfRetries);
+
+    if (Compression) {
+        settings.Compression(Compression);
+    }
 
     const TDriver driver = CreateDriver(config);
 

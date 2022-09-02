@@ -10,7 +10,7 @@
 #include <ydb/library/yql/providers/dq/provider/yql_dq_gateway.h>
 #include <ydb/library/yql/providers/dq/worker_manager/interface/counters.h>
 #include <ydb/library/yql/providers/solomon/provider/yql_solomon_gateway.h>
-#include <ydb/library/yql/providers/pq/cm_client/interface/client.h>
+#include <ydb/library/yql/providers/pq/cm_client/client.h>
 
 #include <library/cpp/actors/core/actorsystem.h>
 #include <library/cpp/time_provider/time_provider.h>
@@ -34,6 +34,7 @@ struct TRunActorParams { // TODO2 : Change name
         const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
         const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
         const ::NYq::NConfig::TPingerConfig& pingerConfig,
+        const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
         const TString& sql,
         const TScope& scope,
         const TString& authToken,
@@ -56,13 +57,16 @@ struct TRunActorParams { // TODO2 : Change name
         TVector<YandexQuery::ResultSetMeta> resultSetMetas,
         TVector<TString> dqGraphs,
         int32_t dqGraphIndex,
-        TVector<Yq::Private::TopicConsumer> createdTopicConsumers,
+        TVector<Fq::Private::TopicConsumer> createdTopicConsumers,
         bool automatic,
         const TString& queryName,
         const TInstant& deadline,
-        const NMonitoring::TDynamicCounterPtr& clientCounters,
+        const ::NMonitoring::TDynamicCounterPtr& clientCounters,
         TInstant createdAt,
-        const TString& tenantName
+        const TString& tenantName,
+        uint64_t resultBytesLimit,
+        TDuration executionTtl,
+        TInstant requestStartedAt
     );
 
     TRunActorParams(const TRunActorParams& params) = default;
@@ -83,6 +87,7 @@ struct TRunActorParams { // TODO2 : Change name
     const ::NYq::NConfig::TPrivateApiConfig PrivateApiConfig;
     const ::NYq::NConfig::TGatewaysConfig GatewaysConfig;
     const ::NYq::NConfig::TPingerConfig PingerConfig;
+    const ::NYq::NConfig::TRateLimiterConfig RateLimiterConfig;
     const TString Sql;
     const TScope Scope;
     const TString AuthToken;
@@ -105,15 +110,18 @@ struct TRunActorParams { // TODO2 : Change name
     const TVector<YandexQuery::ResultSetMeta> ResultSetMetas;
     const TVector<TString> DqGraphs;
     const int32_t DqGraphIndex;
-    TVector<Yq::Private::TopicConsumer> CreatedTopicConsumers;
+    TVector<Fq::Private::TopicConsumer> CreatedTopicConsumers;
 
     bool Automatic = false;
     TString QueryName;
     TInstant Deadline;
 
-    const NMonitoring::TDynamicCounterPtr ClientCounters;
+    const ::NMonitoring::TDynamicCounterPtr ClientCounters;
     const TInstant CreatedAt;
     const TString TenantName;
+    uint64_t ResultBytesLimit;
+    TDuration ExecutionTtl;
+    TInstant RequestStartedAt;
 };
 
 } /* NYq */

@@ -27,10 +27,13 @@ class TDqDataProviderSink: public TDataProviderBase {
 public:
     TDqDataProviderSink(const TDqStatePtr& state)
         : State(state)
-        , LogOptTransformer([state] () { return CreateDqsLogOptTransformer(/*TODO: State->TypeCtx);*/nullptr, state->Settings); })
-        , PhyOptTransformer([] () { return CreateDqsPhyOptTransformer(/*TODO: State->TypeCtx*/nullptr); })
+        , LogOptTransformer([state] () { return CreateDqsLogOptTransformer(state->TypeCtx, state->Settings); })
+        , PhyOptTransformer([state] () { return CreateDqsPhyOptTransformer(/*TODO*/nullptr, state->Settings); })
         , PhysicalFinalizingTransformer([] () { return CreateDqsFinalizingOptTransformer(); })
-        , TypeAnnotationTransformer([state] () { return CreateDqsDataSinkTypeAnnotationTransformer(state->TypeCtx); })
+        , TypeAnnotationTransformer([state] () {
+            return CreateDqsDataSinkTypeAnnotationTransformer(
+                state->TypeCtx, state->Settings->EnableDqReplicate.Get().GetOrElse(TDqSettings::TDefault::EnableDqReplicate));
+        })
         , RecaptureTransformer([state] () { return CreateDqsRecaptureTransformer(state); })
     { }
 

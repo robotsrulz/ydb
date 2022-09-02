@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(common)
+add_subdirectory(fat)
 
 add_executable(ydb-core-kqp-ut)
 target_compile_options(ydb-core-kqp-ut PRIVATE
@@ -17,7 +19,8 @@ target_include_directories(ydb-core-kqp-ut PRIVATE
 target_link_libraries(ydb-core-kqp-ut PUBLIC
   contrib-libs-cxxsupp
   yutil
-  library-cpp-lfalloc
+  cpp-malloc-tcmalloc
+  libs-tcmalloc-no_percpu_cache
   library-cpp-cpuid_check
   cpp-testing-unittest_main
   ydb-core-kqp
@@ -29,6 +32,7 @@ target_link_libraries(ydb-core-kqp-ut PUBLIC
   kqp-ut-common
   cpp-client-draft
   cpp-client-ydb_proto
+  re2_udf
 )
 target_link_options(ydb-core-kqp-ut PRIVATE
   -ldl

@@ -6,12 +6,13 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(tzdata)
 
 add_library(contrib-libs-cctz)
-target_include_directories(contrib-libs-cctz PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/libs/cctz/include
+target_compile_options(contrib-libs-cctz PRIVATE
+  -Wno-everything
 )
-target_include_directories(contrib-libs-cctz PRIVATE
+target_include_directories(contrib-libs-cctz PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/cctz/include
 )
 target_link_libraries(contrib-libs-cctz PUBLIC

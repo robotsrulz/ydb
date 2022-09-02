@@ -13,6 +13,9 @@ TSet<ui32> AllIncomingEvents();
 void IncParentDirAlterVersionWithRepublishSafeWithUndo(const TOperationId& opId, const TPath& path, TSchemeShard* ss, TSideEffects& onComplete);
 void IncParentDirAlterVersionWithRepublish(const TOperationId& opId, const TPath& path, TOperationContext& context);
 
+NKikimrSchemeOp::TModifyScheme MoveTableTask(NKikimr::NSchemeShard::TPath& src, NKikimr::NSchemeShard::TPath& dst);
+NKikimrSchemeOp::TModifyScheme MoveTableIndexTask(NKikimr::NSchemeShard::TPath& src, NKikimr::NSchemeShard::TPath& dst);
+
 namespace NTableState {
 
 bool CollectProposeTransactionResults(const TOperationId& operationId, const TEvDataShard::TEvProposeTransactionResult::TPtr& ev, TOperationContext& context);
@@ -459,7 +462,6 @@ public:
 
 }
 
-
 class TCreateParts: public TSubOperationState {
 private:
     TOperationId OperationId;
@@ -662,15 +664,15 @@ public:
             auto it = context.SS->BlockStoreVolumes.FindPtr(targetPath->PathId);
             Y_VERIFY(it, "Missing BlockStoreVolume while creating BlockStorePartition tablet");
             auto volume = *it;
-            const auto* volumeConfig = &volume->VolumeConfig;
+            /*const auto* volumeConfig = &volume->VolumeConfig;
             if (volume->AlterData) {
                 volumeConfig = &volume->AlterData->VolumeConfig;
-            }
+            }*/
         }
 
         THolder<TEvHive::TEvCreateTablet> ev = MakeHolder<TEvHive::TEvCreateTablet>(ui64(shardIdx.GetOwnerId()), ui64(shardIdx.GetLocalId()), shard.TabletType, shard.BindedChannels);
 
-        TPathId domainId = context.SS->ResolveDomainId(targetPath);
+        TPathId domainId = context.SS->ResolvePathIdForDomain(targetPath);
 
         TPathElement::TPtr domainEl = context.SS->PathsById.at(domainId);
         auto objectDomain = ev->Record.MutableObjectDomain();
@@ -881,11 +883,11 @@ public:
         }
 
         // OlapStore tracks all tables that are under operation, make sure to unlink
-        if (context.SS->OlapTables.contains(pathId)) {
-            auto tableInfo = context.SS->OlapTables.at(pathId);
+        if (context.SS->ColumnTables.contains(pathId)) {
+            auto tableInfo = context.SS->ColumnTables.at(pathId);
             if (context.SS->OlapStores.contains(tableInfo->OlapStorePathId)) {
                 auto storeInfo = context.SS->OlapStores.at(tableInfo->OlapStorePathId);
-                storeInfo->OlapTablesUnderOperation.erase(pathId);
+                storeInfo->ColumnTablesUnderOperation.erase(pathId);
             }
         }
 
@@ -1379,7 +1381,7 @@ public:
         volume->FinishAlter();
         auto newVolumeSpace = volume->GetVolumeSpace();
         // Decrease in occupied space is appled on tx finish
-        auto domainDir = context.SS->PathsById.at(context.SS->ResolveDomainId(path));
+        auto domainDir = context.SS->PathsById.at(context.SS->ResolvePathIdForDomain(path));
         Y_VERIFY(domainDir);
         domainDir->ChangeVolumeSpaceCommit(newVolumeSpace, oldVolumeSpace);
 

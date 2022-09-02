@@ -14,12 +14,13 @@
 #include <ydb/core/protos/blobstorage_config.pb.h>
 #include <ydb/core/util/yverify_stream.h>
 
-#include <ydb/library/wilson/wilson_event.h>
-
+#include <library/cpp/actors/wilson/wilson_trace.h>
 #include <library/cpp/lwtrace/shuttle.h>
 
 #include <util/stream/str.h>
 #include <util/generic/xrange.h>
+
+#include <optional>
 
 namespace NKikimr {
 
@@ -84,108 +85,113 @@ struct TStorageStatusFlags {
     }
 };
 
-NKikimrBlobStorage::EPDiskType PDiskTypeToPDiskType(const TPDiskCategory::EDeviceType type);
+NKikimrBlobStorage::EPDiskType PDiskTypeToPDiskType(const NPDisk::EDeviceType type);
 
-TPDiskCategory::EDeviceType PDiskTypeToPDiskType(const NKikimrBlobStorage::EPDiskType type);
+NPDisk::EDeviceType PDiskTypeToPDiskType(const NKikimrBlobStorage::EPDiskType type);
 
-enum EGroupConfigurationType {
-    GroupConfigurationTypeStatic = 0,
-    GroupConfigurationTypeDynamic = 1
+enum class EGroupConfigurationType : ui32 {
+    Static = 0,
+    Dynamic = 1,
+    Virtual = 2,
 };
 
 struct TGroupID {
-    TGroupID() { Set((EGroupConfigurationType)0x1, 0x3f, InvalidLocalId); }
+    TGroupID() = default;
+    TGroupID(const TGroupID&) = default;
+
     TGroupID(EGroupConfigurationType configurationType, ui32 dataCenterId, ui32 groupLocalId) {
         Set(configurationType, dataCenterId, groupLocalId);
     }
-    TGroupID(const TGroupID& group) { Raw.X = group.GetRaw(); }
-    explicit TGroupID(ui32 raw) { Raw.X = raw; }
-    EGroupConfigurationType ConfigurationType() const { return (EGroupConfigurationType)Raw.N.ConfigurationType; }
-    ui32 AvailabilityDomainID() const { return Raw.N.AvailabilityDomainID; }
-    ui32 GroupLocalID() const { return Raw.N.GroupLocalID; }
-    ui32 GetRaw() const { return Raw.X; }
-    bool operator==(const TGroupID &x) const { return GetRaw() == x.GetRaw(); }
-    bool operator!=(const TGroupID &x) const { return GetRaw() != x.GetRaw(); }
 
-    TGroupID operator++() {
+    explicit TGroupID(ui32 raw)
+        : Raw(raw)
+    {}
+
+    EGroupConfigurationType ConfigurationType() const {
+        const auto type = static_cast<EGroupConfigurationType>(Raw >> TypeShift & TypeMask);
+        if (type == EGroupConfigurationType::Static) {
+            return type;
+        } else {
+            const ui32 domainId = Raw >> DomainShift & DomainMask;
+            return domainId == VirtualGroupDomain
+                ? EGroupConfigurationType::Virtual
+                : EGroupConfigurationType::Dynamic;
+        }
+    }
+
+    ui32 AvailabilityDomainID() const {
+        const auto type = static_cast<EGroupConfigurationType>(Raw >> TypeShift & TypeMask);
+        const ui32 domainId = Raw >> DomainShift & DomainMask;
+        return type == EGroupConfigurationType::Static ? domainId :
+            domainId == VirtualGroupDomain ? 1 :
+            domainId;
+    }
+
+    ui32 GroupLocalID() const {
+        return Raw & GroupMask;
+    }
+
+    ui32 GetRaw() const {
+        return Raw;
+    }
+
+    friend bool operator ==(const TGroupID& x, const TGroupID& y) { return x.Raw == y.Raw; }
+    friend bool operator !=(const TGroupID& x, const TGroupID& y) { return x.Raw != y.Raw; }
+
+    TGroupID& operator++() {
         Set(ConfigurationType(), AvailabilityDomainID(), NextValidLocalId());
         return *this;
     }
+
     TGroupID operator++(int) {
         TGroupID old(*this);
-        ++(*this);
+        ++*this;
         return old;
     }
 
     TString ToString() const;
-private:
-    union {
-        struct {
-            ui32 GroupLocalID : 25;
-            ui32 AvailabilityDomainID : 6;
-            ui32 ConfigurationType : 1;
-        } N;
 
-        ui32 X;
-    } Raw;
+private:
+    static constexpr ui32 TypeWidth = 1;
+    static constexpr ui32 TypeMask = (1 << TypeWidth) - 1;
+    static constexpr ui32 TypeShift = 32 - TypeWidth;
+
+    static constexpr ui32 DomainWidth = 6;
+    static constexpr ui32 DomainMask = (1 << DomainWidth) - 1;
+    static constexpr ui32 DomainShift = TypeShift - DomainWidth;
+    static constexpr ui32 VirtualGroupDomain = DomainMask;
+    static constexpr ui32 MaxValidDomain = DomainMask - 1;
+
+    static constexpr ui32 GroupWidth = 25;
+    static constexpr ui32 GroupMask = (1 << GroupWidth) - 1;
+    static constexpr ui32 InvalidLocalId = GroupMask;
+    static constexpr ui32 MaxValidGroup = GroupMask - 1;
+
+    ui32 Raw = Max<ui32>();
 
     void Set(EGroupConfigurationType configurationType, ui32 availabilityDomainID, ui32 groupLocalId) {
-        Y_VERIFY(ui32(configurationType) < (1 << 2));
-        Y_VERIFY(ui32(availabilityDomainID) < (1 << 7));
-        Y_VERIFY(ui32(groupLocalId) < (1 << 26));
-        Raw.N.ConfigurationType = configurationType;
-        Raw.N.AvailabilityDomainID = availabilityDomainID;
-        Raw.N.GroupLocalID = groupLocalId;
+        Y_VERIFY(groupLocalId <= MaxValidGroup);
+
+        switch (configurationType) {
+            case EGroupConfigurationType::Static:
+            case EGroupConfigurationType::Dynamic:
+                Y_VERIFY(availabilityDomainID <= MaxValidDomain);
+                Raw = static_cast<ui32>(configurationType) << TypeShift | availabilityDomainID << DomainShift | groupLocalId;
+                break;
+
+            case EGroupConfigurationType::Virtual:
+                Y_VERIFY(availabilityDomainID == 1);
+                Raw = static_cast<ui32>(EGroupConfigurationType::Dynamic) << TypeShift | VirtualGroupDomain << DomainShift | groupLocalId;
+                break;
+        }
     }
 
     ui32 NextValidLocalId() {
         const ui32 localId = GroupLocalID();
-        if (localId == InvalidLocalId) {
-            return localId;
-        }
-        if (localId == InvalidLocalId - 1) {
-            return 0;
-        }
-        return localId + 1;
+        return localId == InvalidLocalId ? localId :
+            localId == MaxValidGroup ? 0 :
+            localId + 1;
     }
-
-    static constexpr ui32 InvalidLocalId = 0x1ffffff;
-    static_assert(sizeof(decltype(Raw)) == sizeof(ui32), "TGroupID Raw value must be binary compatible with ui32");
-};
-
-struct TPDiskID {
-    TPDiskID() { Set((EGroupConfigurationType)0x1, 0x3f, 0x1ffffff); }
-    explicit TPDiskID(EGroupConfigurationType configurationType, ui32 availabilityDomainID, ui32 pDiskLocalId) {
-        Set(configurationType, availabilityDomainID, pDiskLocalId);
-    }
-    explicit TPDiskID(ui32 raw) { Raw.X = raw; }
-    EGroupConfigurationType ConfigurationType() const { return (EGroupConfigurationType)Raw.N.ConfigurationType; }
-    ui32 AvailabilityDomainID() const { return Raw.N.AvailabilityDomainID; }
-    ui32 PDiskLocalID() const { return Raw.N.PDiskLocalID; }
-    ui32 GetRaw() const { return Raw.X; }
-    bool operator==(const TPDiskID &x) const { return GetRaw() == x.GetRaw(); }
-
-    TString ToString() const;
-private:
-    union {
-        struct {
-            ui32 PDiskLocalID : 25;
-            ui32 AvailabilityDomainID : 6;
-            ui32 ConfigurationType : 1;
-        } N;
-
-        ui32 X;
-    } Raw;
-
-    void Set(EGroupConfigurationType configurationType, ui32 availabilityDomainID, ui32 pDiskLocalId) {
-        Y_VERIFY(ui32(configurationType) < (1 << 2));
-        Y_VERIFY(ui32(availabilityDomainID) < (1 << 7));
-        Y_VERIFY(ui32(pDiskLocalId) < (1 << 26));
-        Raw.N.ConfigurationType = configurationType;
-        Raw.N.AvailabilityDomainID = availabilityDomainID;
-        Raw.N.PDiskLocalID = pDiskLocalId;
-    }
-    static_assert(sizeof(decltype(Raw)) == sizeof(ui32), "TPDiskID Raw value must be binary compatible with ui32");
 };
 
 // channel info for tablet
@@ -315,7 +321,7 @@ public:
     //
     TTabletStorageInfo()
         : TabletID(Max<ui64>())
-        , TabletType(TTabletTypes::TYPE_INVALID)
+        , TabletType(TTabletTypes::TypeInvalid)
         , Version(0)
     {}
     TTabletStorageInfo(ui64 tabletId, TTabletTypes::EType tabletType)
@@ -455,6 +461,7 @@ struct TEvBlobStorage {
         EvVBaldSyncLog,
         EvPatch,
         EvInplacePatch,
+        EvAssimilate,
 
         //
         EvPutResult = EvPut + 512,                              /// 268 632 576
@@ -468,6 +475,7 @@ struct TEvBlobStorage {
         EvVBaldSyncLogResult,
         EvPatchResult,
         EvInplacePatchResult,
+        EvAssimilateResult,
 
         // proxy <-> vdisk interface
         EvVPut = EvPut + 2 * 512,                               /// 268 633 088
@@ -488,6 +496,9 @@ struct TEvBlobStorage {
         EvVPatchXorDiff,
         EvVDefrag,
         EvVInplacePatch,
+        EvVAssimilate,
+        EvVTakeSnapshot,
+        EvVReleaseSnapshot,
 
         EvVPutResult = EvPut + 3 * 512,                         /// 268 633 600
         EvVGetResult,
@@ -507,6 +518,9 @@ struct TEvBlobStorage {
         EvVPatchResult,
         EvVDefragResult,
         EvVInplacePatchResult,
+        EvVAssimilateResult,
+        EvVTakeSnapshotResult,
+        EvVReleaseSnapshotResult,
 
         // vdisk <-> vdisk interface
         EvVDisk = EvPut + 4 * 512,                              /// 268 634 112
@@ -630,8 +644,8 @@ struct TEvBlobStorage {
         EvAnubisQuantumDone,
         EvAnubisCandidates,
         EvAnubisVGet,
-        EvChunksLock,
-        EvChunksUnlock,                                         // 268 636 260
+        EvChunkLock,
+        EvChunkUnlock,                                         // 268 636 260
         EvWhiteboardReportResult,
         EvHttpInfoResult,
         EvReadLogContinue,
@@ -673,6 +687,9 @@ struct TEvBlobStorage {
         EvHugeStat,
         EvForwardToSkeleton,
         EvHugeUnlockChunks,
+        EvVDiskStatRequest,
+        EvGetLogoBlobRequest,
+        EvChunkForget,
 
         EvYardInitResult = EvPut + 9 * 512,                     /// 268 636 672
         EvLogResult,
@@ -701,8 +718,8 @@ struct TEvBlobStorage {
         EvOsirisDone,
         EvSyncLogWriteDone,
         EvAnubisVGetResult,
-        EvChunksLockResult,
-        EvChunksUnlockResult,
+        EvChunkLockResult,
+        EvChunkUnlockResult,
         EvDelLogoBlobDataSyncLogResult,
         EvAddBulkSstResult,                                     /// 268 636 702
         EvAddBulkSstCommitted,
@@ -717,6 +734,9 @@ struct TEvBlobStorage {
         EvDeviceError,
         EvHugeLockChunksResult,
         EvHugeStatResult,
+        EvVDiskStatResponse,
+        EvGetLogoBlobResponse,
+        EvChunkForgetResult,
 
         // internal proxy interface
         EvUnusedLocal1 = EvPut + 10 * 512, // Not used.    /// 268 637 184
@@ -776,6 +796,8 @@ struct TEvBlobStorage {
         EvControllerScrubQuantumFinished,
         EvControllerScrubReportQuantumInProgress,
         EvControllerUpdateNodeDrives,
+        EvControllerGroupDecommittedNotify,
+        EvControllerGroupDecommittedResponse,
 
         // EvControllerReadSchemeStringResult = EvPut + 12 * 512,
         // EvControllerReadDataStringResult,
@@ -858,6 +880,7 @@ struct TEvBlobStorage {
     struct TEvStatusResult;
     struct TEvPatchResult;
     struct TEvInplacePatchResult;
+    struct TEvAssimilateResult;
 
     struct TEvPut : public TEventLocal<TEvPut, EvPut> {
         enum ETactic {
@@ -886,6 +909,8 @@ struct TEvBlobStorage {
         const ETactic Tactic;
         mutable NLWTrace::TOrbit Orbit;
         ui32 RestartCounter = 0;
+        std::vector<std::pair<ui64, ui32>> ExtraBlockChecks; // (TabletId, Generation) pairs
+        bool Decommission = false; // is it generated by decommission and should bypass all block checks?
 
         TEvPut(const TLogoBlobID &id, const TString &buffer, TInstant deadline,
                NKikimrBlobStorage::EPutHandleClass handleClass = NKikimrBlobStorage::TabletLog,
@@ -1022,6 +1047,9 @@ struct TEvBlobStorage {
         bool ReportDetailedPartMap = false;
         ui32 RestartCounter = 0;
         bool PhantomCheck = false;
+        bool Decommission = false; // is it generated by decommission actor and should be handled by the underlying proxy?
+        std::optional<ui64> ReaderTabletId;
+        std::optional<ui32> ReaderTabletGeneration;
 
         // NKikimrBlobStorage::EGetHandleClass::FastRead
 
@@ -1088,6 +1116,12 @@ struct TEvBlobStorage {
                 }
                 str << "}";
             }
+            if (ReaderTabletId) {
+                str << " ReaderTabletId# " << *ReaderTabletId;
+            }
+            if (ReaderTabletGeneration) {
+                str << " ReaderTabletGeneration# " << *ReaderTabletGeneration;
+            }
             str << "}";
             return str.Str();
         }
@@ -1129,6 +1163,8 @@ struct TEvBlobStorage {
             ui32 RequestedSize;
             TString Buffer;
             TVector<TPartMapItem> PartMap;
+            bool Keep = false;
+            bool DoNotKeep = false;
 
             TResponse()
                 : Status(NKikimrProto::UNKNOWN)
@@ -1565,15 +1601,18 @@ struct TEvBlobStorage {
         const bool ReadBody;
         const bool DiscoverBlockedGeneration;
         const ui32 ForceBlockedGeneration;
+        const bool FromLeader;
         ui32 RestartCounter = 0;
 
-        TEvDiscover(ui64 tabletId, ui32 minGeneration, bool readBody, bool discoverBlockedGeneration, TInstant deadline, ui32 forceBlockedGeneration)
+        TEvDiscover(ui64 tabletId, ui32 minGeneration, bool readBody, bool discoverBlockedGeneration,
+                TInstant deadline, ui32 forceBlockedGeneration, bool fromLeader)
             : TabletId(tabletId)
             , MinGeneration(minGeneration)
             , Deadline(deadline)
             , ReadBody(readBody)
             , DiscoverBlockedGeneration(discoverBlockedGeneration)
             , ForceBlockedGeneration(forceBlockedGeneration)
+            , FromLeader(fromLeader)
         {}
 
         TString Print(bool isFull) const {
@@ -1583,6 +1622,8 @@ struct TEvBlobStorage {
             str << " MinGeneration# " << MinGeneration;
             str << " ReadBody# " << (ReadBody ? "true" : "false");
             str << " DiscoverBlockedGeneration# " << (DiscoverBlockedGeneration ? "true" : "false");
+            str << " ForceBlockedGeneration# " << ForceBlockedGeneration;
+            str << " FromLeader# " << (FromLeader ? "true" : "false");
             str << " Deadline# " << Deadline.MilliSeconds();
             str << "}";
             return str.Str();
@@ -1664,6 +1705,7 @@ struct TEvBlobStorage {
         bool IsIndexOnly;
         ui32 ForceBlockedGeneration;
         ui32 RestartCounter = 0;
+        bool Decommission = false;
 
         TEvRange(ui64 tabletId, const TLogoBlobID &from, const TLogoBlobID &to, const bool mustRestoreFirst,
                 TInstant deadline, bool isIndexOnly = false, ui32 forceBlockedGeneration = 0)
@@ -1706,6 +1748,8 @@ struct TEvBlobStorage {
         struct TResponse {
             TLogoBlobID Id;
             TString Buffer;
+            bool Keep = false;
+            bool DoNotKeep = false;
 
             TResponse()
             {}
@@ -1779,6 +1823,8 @@ struct TEvBlobStorage {
 
         bool IsMultiCollectAllowed;
         bool IsMonitored = true;
+
+        bool Decommission = false;
 
         ui32 RestartCounter = 0;
 
@@ -1976,6 +2022,170 @@ struct TEvBlobStorage {
         }
     };
 
+    struct TEvAssimilate : TEventLocal<TEvAssimilate, EvAssimilate> {
+        std::optional<ui64> SkipBlocksUpTo;
+        std::optional<std::tuple<ui64, ui8>> SkipBarriersUpTo;
+        std::optional<TLogoBlobID> SkipBlobsUpTo;
+        ui32 RestartCounter = 0;
+
+        TEvAssimilate(std::optional<ui64> skipBlocksUpTo, std::optional<std::tuple<ui64, ui8>> skipBarriersUpTo,
+                std::optional<TLogoBlobID> skipBlobsUpTo)
+            : SkipBlocksUpTo(skipBlocksUpTo)
+            , SkipBarriersUpTo(skipBarriersUpTo)
+            , SkipBlobsUpTo(skipBlobsUpTo)
+        {}
+
+        TString Print(bool /*isFull*/) const {
+            return ToString();
+        }
+
+        TString ToString() const {
+            TStringStream str;
+            str << "TEvAssimilate {";
+            const char *prefix = "";
+            if (SkipBlocksUpTo) {
+                str << std::exchange(prefix, " ") << "SkipBlocksUpTo# " << *SkipBlocksUpTo;
+            }
+            if (SkipBarriersUpTo) {
+                str << std::exchange(prefix, " " ) << "SkipBarriersUpTo# " << std::get<0>(*SkipBarriersUpTo)
+                    << ":" << int(std::get<1>(*SkipBarriersUpTo));
+            }
+            if (SkipBlobsUpTo) {
+                str << std::exchange(prefix, " " ) << "SkipBlobsUpTo# ";
+                SkipBlobsUpTo->Out(str);
+            }
+            str << "}";
+            return str.Str();
+        }
+
+        ui32 CalculateSize() const {
+            return sizeof(*this);
+        }
+
+        std::unique_ptr<TEvAssimilateResult> MakeErrorResponse(NKikimrProto::EReplyStatus status, const TString& errorReason,
+            ui32 groupId);
+    };
+
+    struct TEvAssimilateResult : TEventLocal<TEvAssimilateResult, EvAssimilateResult> {
+        struct TBlock {
+            ui64 TabletId = 0;
+            ui32 BlockedGeneration = 0;
+
+            TString ToString() const {
+                TStringStream str;
+                Output(str);
+                return str.Str();
+            }
+
+            void Output(IOutputStream& s) const {
+                s << "{" << TabletId << "=>" << BlockedGeneration << "}";
+            }
+        };
+
+        struct TBarrier {
+            struct TValue {
+                ui32 RecordGeneration = 0;
+                ui32 PerGenerationCounter = 0;
+                ui32 CollectGeneration = 0;
+                ui32 CollectStep = 0;
+
+                void Output(IOutputStream& s) const {
+                    if (RecordGeneration || PerGenerationCounter || CollectGeneration || CollectGeneration) {
+                        s << "{" << RecordGeneration << ":" << PerGenerationCounter << "=>" << CollectGeneration
+                            << ":" << CollectStep << "}";
+                    }
+                }
+            };
+
+            ui64 TabletId = 0;
+            ui8 Channel = 0;
+            TValue Soft;
+            TValue Hard;
+
+            TString ToString() const {
+                TStringStream str;
+                Output(str);
+                return str.Str();
+            }
+
+            void Output(IOutputStream& s) const {
+                s << "{" << TabletId << ":" << int(Channel) << "=>soft";
+                Soft.Output(s);
+                s << "/hard";
+                Hard.Output(s);
+                s << "}";
+            }
+        };
+
+        struct TBlob {
+            TLogoBlobID Id;
+            bool Keep = false;
+            bool DoNotKeep = false;
+
+            TString ToString() const {
+                TStringStream str;
+                Output(str);
+                return str.Str();
+            }
+
+            void Output(IOutputStream& s) const {
+                Id.Out(s);
+                if (Keep) {
+                    s << "k";
+                }
+                if (DoNotKeep) {
+                    s << "d";
+                }
+            }
+        };
+
+        NKikimrProto::EReplyStatus Status;
+        TString ErrorReason;
+        std::deque<TBlock> Blocks;
+        std::deque<TBarrier> Barriers;
+        std::deque<TBlob> Blobs;
+
+        TEvAssimilateResult(NKikimrProto::EReplyStatus status, TString errorReason = {})
+            : Status(status)
+            , ErrorReason(std::move(errorReason))
+        {}
+
+        TString Print(bool isFull) const {
+            TStringStream str;
+            str << "TEvAssimilateResult {"
+                << "Status# " << NKikimrProto::EReplyStatus_Name(Status)
+                << " ErrorReason# '" << ErrorReason << "'";
+
+            auto out = [&](const char *name, auto& container) {
+                str << " " << name << "# ";
+                if (isFull) {
+                    str << "[";
+                    for (auto it = container.begin(); it != container.end(); ++it) {
+                        if (it != container.begin()) {
+                            str << " ";
+                        }
+                        it->Output(str);
+                    }
+                    str << "]";
+                } else {
+                    str << "size=" << container.size();
+                }
+            };
+
+            out("Blocks", Blocks);
+            out("Barriers", Barriers);
+            out("Blobs", Blobs);
+
+            str << "}";
+
+            return str.Str();
+        }
+
+        TString ToString() const {
+            return Print(false);
+        }
+    };
+
     struct TEvConfigureProxy;
     struct TEvUpdateGroupInfo;
 
@@ -2030,6 +2240,12 @@ struct TEvBlobStorage {
     struct TEvCaptureVDiskLayoutResult;
     struct TEvVDefrag;
     struct TEvVDefragResult;
+    struct TEvVAssimilate;
+    struct TEvVAssimilateResult;
+    struct TEvVTakeSnapshot;
+    struct TEvVTakeSnapshotResult;
+    struct TEvVReleaseSnapshot;
+    struct TEvVReleaseSnapshotResult;
 
 
     struct TEvControllerRegisterNode;
@@ -2054,6 +2270,8 @@ struct TEvBlobStorage {
     struct TEvResponseControllerInfo;
     struct TEvTestLoadRequest;
     struct TEvTestLoadResponse;
+    struct TEvControllerGroupDecommittedNotify;
+    struct TEvControllerGroupDecommittedResponse;
 
     struct TEvMonStreamQuery;
     struct TEvMonStreamActorDeathNote;

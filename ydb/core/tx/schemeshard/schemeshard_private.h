@@ -21,8 +21,10 @@ struct TEvPrivate {
         EvSubscribeToShardDeletion,
         EvNotifyShardDeleted,
         EvRunBackgroundCompaction,
+        EvRunBorrowedCompaction,
         EvCompletePublication,
         EvCompleteBarrier,
+        EvPersistStats,
         EvEnd
     };
 
@@ -155,6 +157,9 @@ struct TEvPrivate {
         }
     };
 
+    struct TEvPersistStats: public TEventLocal<TEvPersistStats, EvPersistStats> {
+        TEvPersistStats() = default;
+    };
 
 }; // TEvPrivate
 

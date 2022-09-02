@@ -15,19 +15,22 @@ struct THash<TIntrusivePtr<Type>> {
 };
 
 template<>
-inline void Out<TSockAddrInet6>(IOutputStream& o, const TSockAddrInet6& x) {
-    o << x.ToString();
+inline void Out<NHttp::THttpConfig::SocketAddressType>(IOutputStream& o, const NHttp::THttpConfig::SocketAddressType& x) {
+    o << x->ToString();
 }
 
 namespace NHttp {
 
 bool IsIPv6(const TString& host);
+bool IsIPv4(const TString& host);
 bool CrackURL(TStringBuf url, TStringBuf& scheme, TStringBuf& host, TStringBuf& uri);
 void CrackAddress(const TString& address, TString& hostname, TIpPort& port);
 void TrimBegin(TStringBuf& target, char delim);
 void TrimEnd(TStringBuf& target, char delim);
 void Trim(TStringBuf& target, char delim);
 void TrimEnd(TString& target, char delim);
+TString CompressDeflate(TStringBuf source);
+TString DecompressDeflate(TStringBuf source);
 
 struct TLessNoCase {
     bool operator()(TStringBuf l, TStringBuf r) const {
@@ -49,6 +52,27 @@ struct TEqNoCase {
         }
         return strnicmp(l.data(), r.data(), ll) == 0;
     }
+};
+
+struct TSensors {
+    TString Direction;
+    TString Host;
+    TString Url;
+    TString Status;
+    TDuration Time;
+
+    TSensors(
+            TStringBuf direction,
+            TStringBuf host,
+            TStringBuf url,
+            TStringBuf status,
+            TDuration time)
+        : Direction(direction)
+        , Host(host)
+        , Url(url)
+        , Status(status)
+        , Time(time)
+    {}
 };
 
 struct TUrlParameters {
@@ -99,6 +123,7 @@ struct THeadersBuilder : THeaders {
     THeadersBuilder(TStringBuf headers);
     THeadersBuilder(const THeadersBuilder& builder);
     void Set(TStringBuf name, TStringBuf data);
+    void Erase(TStringBuf name);
 };
 
 class TSocketBuffer : public TBuffer, public THttpConfig {
@@ -115,6 +140,11 @@ public:
         }
         return true;
     }
+
+    // non-destructive variant of AsString
+    TString AsString() const {
+        return TString(Data(), Size());
+    }
 };
 
 class THttpRequest {
@@ -130,6 +160,7 @@ public:
     TStringBuf Connection;
     TStringBuf ContentType;
     TStringBuf ContentLength;
+    TStringBuf AcceptEncoding;
     TStringBuf TransferEncoding;
 
     TStringBuf Body;
@@ -183,7 +214,7 @@ public:
         Error,
     };
 
-    static constexpr size_t MaxMethodSize = 6;
+    static constexpr size_t MaxMethodSize = 8;
     static constexpr size_t MaxURLSize = 1024;
     static constexpr size_t MaxProtocolSize = 4;
     static constexpr size_t MaxVersionSize = 4;
@@ -200,7 +231,7 @@ public:
     TStringBuf& Header = Line;
     size_t ChunkLength = 0;
     size_t ContentSize = 0;
-    TString Content;
+    TString Content; // body storage
     std::optional<size_t> TotalSize;
 
     THttpParser(const THttpParser& src)
@@ -435,6 +466,37 @@ public:
     };
 
     ERenderStage Stage = ERenderStage::Init;
+    TString Content; // body storage
+
+    //THttpRenderer(TStringBuf method, TStringBuf url, TStringBuf protocol, TStringBuf version); // request
+    void InitRequest(TStringBuf method, TStringBuf url, TStringBuf protocol, TStringBuf version) {
+        Y_VERIFY_DEBUG(Stage == ERenderStage::Init);
+        AppendParsedValue<&THttpRequest::Method>(method);
+        Append(' ');
+        AppendParsedValue<&THttpRequest::URL>(url);
+        Append(' ');
+        AppendParsedValue<&THttpRequest::Protocol>(protocol);
+        Append('/');
+        AppendParsedValue<&THttpRequest::Version>(version);
+        Append("\r\n");
+        Stage = ERenderStage::Header;
+        HeaderType::Headers = TStringBuf(BufferType::Pos(), size_t(0));
+    }
+
+    //THttpRenderer(TStringBuf protocol, TStringBuf version, TStringBuf status, TStringBuf message); // response
+    void InitResponse(TStringBuf protocol, TStringBuf version, TStringBuf status, TStringBuf message) {
+        Y_VERIFY_DEBUG(Stage == ERenderStage::Init);
+        AppendParsedValue<&THttpResponse::Protocol>(protocol);
+        Append('/');
+        AppendParsedValue<&THttpResponse::Version>(version);
+        Append(' ');
+        AppendParsedValue<&THttpResponse::Status>(status);
+        Append(' ');
+        AppendParsedValue<&THttpResponse::Message>(message);
+        Append("\r\n");
+        Stage = ERenderStage::Header;
+        HeaderType::Headers = TStringBuf(BufferType::Pos(), size_t(0));
+    }
 
     void Append(TStringBuf text) {
         EnsureEnoughSpaceAvailable(text.size());
@@ -484,34 +546,13 @@ public:
         HeaderType::Headers = TStringBuf(HeaderType::Headers.Data(), BufferType::Pos() - HeaderType::Headers.Data());
     }
 
-    //THttpRenderer(TStringBuf method, TStringBuf url, TStringBuf protocol, TStringBuf version); // request
-    void InitRequest(TStringBuf method, TStringBuf url, TStringBuf protocol, TStringBuf version) {
-        Y_VERIFY_DEBUG(Stage == ERenderStage::Init);
-        AppendParsedValue<&THttpRequest::Method>(method);
-        Append(' ');
-        AppendParsedValue<&THttpRequest::URL>(url);
-        Append(' ');
-        AppendParsedValue<&THttpRequest::Protocol>(protocol);
-        Append('/');
-        AppendParsedValue<&THttpRequest::Version>(version);
-        Append("\r\n");
-        Stage = ERenderStage::Header;
-        HeaderType::Headers = TStringBuf(BufferType::Pos(), size_t(0));
-    }
+    static constexpr TStringBuf ALLOWED_CONTENT_ENCODINGS[] = {"deflate"};
 
-    //THttpRenderer(TStringBuf protocol, TStringBuf version, TStringBuf status, TStringBuf message); // response
-    void InitResponse(TStringBuf protocol, TStringBuf version, TStringBuf status, TStringBuf message) {
-        Y_VERIFY_DEBUG(Stage == ERenderStage::Init);
-        AppendParsedValue<&THttpResponse::Protocol>(protocol);
-        Append('/');
-        AppendParsedValue<&THttpResponse::Version>(version);
-        Append(' ');
-        AppendParsedValue<&THttpResponse::Status>(status);
-        Append(' ');
-        AppendParsedValue<&THttpResponse::Message>(message);
-        Append("\r\n");
-        Stage = ERenderStage::Header;
-        HeaderType::Headers = TStringBuf(BufferType::Pos(), size_t(0));
+    void SetContentEncoding(TStringBuf contentEncoding) {
+        Y_VERIFY_DEBUG(Stage == ERenderStage::Header);
+        if (Count(ALLOWED_CONTENT_ENCODINGS, contentEncoding) != 0) {
+            Set("Content-Encoding", contentEncoding);
+        }
     }
 
     void FinishHeader() {
@@ -575,8 +616,13 @@ public:
         parser.Clear();
         parser.Advance(size);
         // move buffer and result back
+        bool needReassignBody = (parser.Body.data() == parser.Content.data());
         static_cast<HeaderType&>(*this) = std::move(static_cast<HeaderType&>(parser));
         static_cast<BufferType&>(*this) = std::move(static_cast<BufferType&>(parser));
+        if (needReassignBody) {
+            Content = std::move(parser.Content);
+            HeaderType::Body = Content;
+        }
         switch (parser.Stage) {
         case THttpParser<HeaderType, BufferType>::EParseStage::Method:
         case THttpParser<HeaderType, BufferType>::EParseStage::URL:
@@ -621,6 +667,25 @@ inline void THttpRenderer<THttpRequest, TSocketBuffer>::Set<&THttpRequest::Body>
     SetBody(value);
 }
 
+template <>
+template <>
+inline void THttpRenderer<THttpResponse, TSocketBuffer>::Set<&THttpResponse::ContentEncoding>(TStringBuf value) {
+    SetContentEncoding(value);
+}
+
+struct THttpEndpointInfo {
+    TString WorkerName;
+    bool Secure = false;
+    const std::vector<TString> CompressContentTypes; // content types, which will be automatically compressed on response
+
+    THttpEndpointInfo() = default;
+
+protected:
+    THttpEndpointInfo(std::vector<TString> compressContentTypes)
+        : CompressContentTypes(std::move(compressContentTypes))
+    {}
+};
+
 class THttpIncomingRequest;
 using THttpIncomingRequestPtr = TIntrusivePtr<THttpIncomingRequest>;
 
@@ -631,10 +696,24 @@ class THttpIncomingRequest :
         public THttpParser<THttpRequest, TSocketBuffer>,
         public TRefCounted<THttpIncomingRequest, TAtomicCounter> {
 public:
+    std::shared_ptr<THttpEndpointInfo> Endpoint;
     THttpConfig::SocketAddressType Address;
-    TString WorkerName;
     THPTimer Timer;
-    bool Secure = false;
+
+    THttpIncomingRequest()
+        : Endpoint(std::make_shared<THttpEndpointInfo>())
+    {}
+
+    THttpIncomingRequest(std::shared_ptr<THttpEndpointInfo> endpoint, const THttpConfig::SocketAddressType& address)
+        : Endpoint(std::move(endpoint))
+        , Address(address)
+    {}
+
+    THttpIncomingRequest(TStringBuf content, std::shared_ptr<THttpEndpointInfo> endpoint, const THttpConfig::SocketAddressType& address)
+        : THttpParser(content)
+        , Endpoint(std::move(endpoint))
+        , Address(address)
+    {}
 
     bool IsConnectionClose() const {
         if (Connection.empty()) {
@@ -646,7 +725,12 @@ public:
 
     TStringBuf GetConnection() const {
         if (!Connection.empty()) {
-            return Connection;
+            if (TEqNoCase()(Connection, "keep-alive")) {
+                return "keep-alive";
+            }
+            if (TEqNoCase()(Connection, "close")) {
+                return "close";
+            }
         }
         return Version == "1.0" ? "close" : "keep-alive";
     }
@@ -730,6 +814,44 @@ public:
         return GetRequest()->Method != "HEAD" && Status != "204";
     }
 
+    bool EnableCompression() {
+        TStringBuf acceptEncoding = Request->AcceptEncoding;
+        std::vector<TStringBuf> encodings;
+        TStringBuf encoding;
+        while (acceptEncoding.NextTok(',', encoding)) {
+            Trim(encoding, ' ');
+            if (Count(ALLOWED_CONTENT_ENCODINGS, encoding) != 0) {
+                encodings.push_back(encoding);
+            }
+        }
+        if (!encodings.empty()) {
+            // TODO: prioritize encodings
+            SetContentEncoding(encodings.front());
+            return true;
+        }
+        return false;
+    }
+
+    void SetBody(TStringBuf body) {
+        if (ContentEncoding == "deflate") {
+            TString compressedBody = CompressDeflate(body);
+            THttpRenderer<THttpResponse, TSocketBuffer>::SetBody(compressedBody);
+            Body = Content = body;
+        } else {
+            THttpRenderer<THttpResponse, TSocketBuffer>::SetBody(body);
+        }
+    }
+
+    void SetBody(const TString& body) {
+        if (ContentEncoding == "deflate") {
+            TString compressedBody = CompressDeflate(body);
+            THttpRenderer<THttpResponse, TSocketBuffer>::SetBody(compressedBody);
+            Body = Content = body;
+        } else {
+            THttpRenderer<THttpResponse, TSocketBuffer>::SetBody(body);
+        }
+    }
+
     THttpIncomingRequestPtr GetRequest() const {
         return Request;
     }
@@ -739,6 +861,7 @@ public:
 // it's temporary accessible for cleanup
 //protected:
     THttpIncomingRequestPtr Request;
+    std::unique_ptr<TSensors> Sensors;
 };
 
 }

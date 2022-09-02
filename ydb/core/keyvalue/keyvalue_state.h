@@ -265,6 +265,7 @@ protected:
 
     ui64 TabletId;
     TActorId KeyValueActorId;
+    TActorId CollectorActorId;
     ui32 ExecutorGeneration;
     bool IsStatePresent;
     bool IsEmptyDbStart;
@@ -288,6 +289,9 @@ protected:
     ui32 PerGenerationCounter; // for garbage collection
 
     NMetrics::TResourceMetrics* ResourceMetrics;
+
+    TMaybe<NKeyValue::THelpers::TGenerationStep> PartitialCollectedGenerationStep;
+    TVector<TLogoBlobID> PartitialCollectedDoNotKeep;
 
 public:
     TKeyValueState();
@@ -318,7 +322,9 @@ public:
     void Load(const TString &key, const TString& value);
     void InitExecute(ui64 tabletId, TActorId keyValueActorId, ui32 executorGeneration, ISimpleDb &db,
         const TActorContext &ctx, const TTabletStorageInfo *info);
-    void RegisterInitialCollectResult(const TActorContext &ctx);
+    bool RegisterInitialCollectResult(const TActorContext &ctx);
+    void RegisterInitialGCCompletionExecute(ISimpleDb &db, const TActorContext &ctx);
+    void RegisterInitialGCCompletionComplete(const TActorContext &ctx);
     void SendCutHistory(const TActorContext &ctx);
     void OnInitQueueEmpty(const TActorContext &ctx);
     void OnStateWork(const TActorContext &ctx);
@@ -328,16 +334,30 @@ public:
 
     // garbage collection methods
     void PrepareCollectIfNeeded(const TActorContext &ctx);
+    void RemoveFromTrashDoNotKeep(ISimpleDb &db, const TActorContext &ctx, const TVector<TLogoBlobID> &collectedDoNotKeep);
+    void RemoveFromTrashBySoftBarrier(ISimpleDb &db, const TActorContext &ctx, const NKeyValue::THelpers::TGenerationStep &genStep);
+    void UpdateStoredState(ISimpleDb &db, const TActorContext &ctx, const NKeyValue::THelpers::TGenerationStep &genStep);
+    void UpdateGC(ISimpleDb &db, const TActorContext &ctx, bool updateTrash, bool updateState);
+    void UpdateAfterPartitialGC(ISimpleDb &db, const TActorContext &ctx);
     void StoreCollectExecute(ISimpleDb &db, const TActorContext &ctx);
     void StoreCollectComplete(const TActorContext &ctx);
     void EraseCollectExecute(ISimpleDb &db, const TActorContext &ctx);
     void EraseCollectComplete(const TActorContext &ctx);
+    void CompleteGCExecute(ISimpleDb &db, const TActorContext &ctx);
+    void CompleteGCComplete(const TActorContext &ctx);
+    void PartitialCompleteGCExecute(ISimpleDb &db, const TActorContext &ctx);
+    void PartitialCompleteGCComplete(const TActorContext &ctx);
     void SendStoreCollect(const TActorContext &ctx, const THelpers::TGenerationStep &genStep,
+        TVector<TLogoBlobID> &keep, TVector<TLogoBlobID> &doNotKeep);
+    void StartGC(const TActorContext &ctx, const THelpers::TGenerationStep &genStep,
         TVector<TLogoBlobID> &keep, TVector<TLogoBlobID> &doNotKeep);
     void StartCollectingIfPossible(const TActorContext &ctx);
     ui64 OnEvCollect(const TActorContext &ctx);
-    void OnEvCollectDone(ui64 perGenerationCounterStepSize, const TActorContext &ctx);
+    void OnEvCollectDone(ui64 perGenerationCounterStepSize, TActorId collector, const TActorContext &ctx);
     void OnEvEraseCollect(const TActorContext &ctx);
+    void OnEvCompleteGC();
+    void OnEvPartitialCompleteGC(TEvKeyValue::TEvPartitialCompleteGC *ev);
+
 
     void Reply(THolder<TIntermediate> &intermediate, const TActorContext &ctx, const TTabletStorageInfo *info);
     void ProcessCmd(TIntermediate::TRead &read,
@@ -483,9 +503,9 @@ public:
             THolder<TIntermediate> &intermediate)
     {
         auto &record = kvRequest->Record;
-        intermediate->HasGeneration = true;
-        intermediate->Generation = record.lock_generation();
         if (record.has_lock_generation() && record.lock_generation() != StoredState.GetUserGeneration()) {
+            intermediate->HasGeneration = true;
+            intermediate->Generation = record.lock_generation();
             TStringStream str;
             str << "KeyValue# " << TabletId;
             str << " Generation mismatch! Requested# " << record.lock_generation();
@@ -494,6 +514,8 @@ public:
             ReplyError<typename TGrpcRequestWithLockGeneration::TResponse>(ctx, str.Str(),
                     NKikimrKeyValue::Statuses::RSTATUS_WRONG_LOCK_GENERATION, intermediate);
             return true;
+        } else {
+            intermediate->HasGeneration = false;
         }
         return false;
     }
@@ -540,8 +562,8 @@ public:
     TPrepareResult InitGetStatusCommand(TIntermediate::TGetStatus &cmd,
         NKikimrClient::TKeyValueRequest::EStorageChannel storageChannel, const TTabletStorageInfo *info);
     void ReplyError(const TActorContext &ctx, TString errorDescription,
-        NMsgBusProxy::EResponseStatus status, THolder<TIntermediate> &intermediate,
-        const TTabletStorageInfo *info = nullptr);
+        NMsgBusProxy::EResponseStatus oldStatus, NKikimrKeyValue::Statuses::ReplyStatus newStatus,
+        THolder<TIntermediate> &intermediate, const TTabletStorageInfo *info = nullptr);
 
     template <typename TResponse>
     void ReplyError(const TActorContext &ctx, TString errorDescription,

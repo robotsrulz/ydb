@@ -9,7 +9,7 @@
 namespace NKikimr {
 namespace NSchemeShard {
 
-static void FillTableStats(NKikimrTableStats::TTableStats* stats, const TTableInfo::TPartitionStats& tableStats) {
+static void FillTableStats(NKikimrTableStats::TTableStats* stats, const TPartitionStats& tableStats) {
     stats->SetRowCount(tableStats.RowCount);
     stats->SetDataSize(tableStats.DataSize);
     stats->SetIndexSize(tableStats.IndexSize);
@@ -31,7 +31,7 @@ static void FillTableStats(NKikimrTableStats::TTableStats* stats, const TTableIn
     stats->SetPartCount(tableStats.PartCount);
 }
 
-static void FillTableMetrics(NKikimrTabletBase::TMetrics* metrics, const TTableInfo::TPartitionStats& tableStats) {
+static void FillTableMetrics(NKikimrTabletBase::TMetrics* metrics, const TPartitionStats& tableStats) {
     metrics->SetCPU(tableStats.GetCurrentRawCpuUsage());
     metrics->SetMemory(tableStats.Memory);
     metrics->SetNetwork(tableStats.Network);
@@ -40,6 +40,11 @@ static void FillTableMetrics(NKikimrTabletBase::TMetrics* metrics, const TTableI
     metrics->SetWriteThroughput(tableStats.WriteThroughput);
     metrics->SetReadIops(tableStats.ReadIops);
     metrics->SetWriteIops(tableStats.WriteIops);
+}
+
+static void FillAggregatedStats(NKikimrSchemeOp::TPathDescription& pathDescription, const TAggregatedStats& stats) {
+    FillTableStats(pathDescription.MutableTableStats(), stats.Aggregated);
+    FillTableMetrics(pathDescription.MutableTabletMetrics(), stats.Aggregated);
 }
 
 void TPathDescriber::FillPathDescr(NKikimrSchemeOp::TDirEntry* descr, TPathElement::TPtr pathEl, TPathElement::EPathSubType subType) {
@@ -233,17 +238,7 @@ void TPathDescriber::DescribeTable(const TActorContext& ctx, TPathId pathId, TPa
         }
     }
 
-    const auto& tableStats(tableInfo->GetStats().Aggregated);
-
-    {
-        auto* stats = Result->Record.MutablePathDescription()->MutableTableStats();
-        FillTableStats(stats, tableStats);
-    }
-
-    {
-        auto* metrics = Result->Record.MutablePathDescription()->MutableTabletMetrics();
-        FillTableMetrics(metrics, tableStats);
-    }
+    FillAggregatedStats(*Result->Record.MutablePathDescription(), tableInfo->GetStats());
 
     if (returnPartitionStats) {
         NKikimrSchemeOp::TPathDescription& pathDescription = *Result->Record.MutablePathDescription();
@@ -327,6 +322,10 @@ void TPathDescriber::DescribeTable(const TActorContext& ctx, TPathId pathId, TPa
             continue;
         }
 
+        if (!childPath->IsCreateFinished()) {
+            continue;
+        }
+
         switch (childPath->PathType) {
         case NKikimrSchemeOp::EPathTypeTableIndex:
             Self->DescribeTableIndex(childPathId, childName, *entry->AddTableIndexes());
@@ -362,11 +361,13 @@ void TPathDescriber::DescribeOlapStore(TPathId pathId, TPathElement::TPtr pathEl
         Y_VERIFY(shardInfo, "ColumnShard not found");
         description->AddColumnShards(shardInfo->TabletID.GetValue());
     }
+
+    FillAggregatedStats(*Result->Record.MutablePathDescription(), storeInfo->GetStats());
 }
 
-void TPathDescriber::DescribeOlapTable(TPathId pathId, TPathElement::TPtr pathEl) {
-    const TOlapTableInfo::TPtr tableInfo = *Self->OlapTables.FindPtr(pathId);
-    Y_VERIFY(tableInfo, "OlapTable not found");
+void TPathDescriber::DescribeColumnTable(TPathId pathId, TPathElement::TPtr pathEl) {
+    const TColumnTableInfo::TPtr tableInfo = *Self->ColumnTables.FindPtr(pathId);
+    Y_VERIFY(tableInfo, "ColumnTable not found");
     const TOlapStoreInfo::TPtr storeInfo = *Self->OlapStores.FindPtr(tableInfo->OlapStorePathId);
     Y_VERIFY(storeInfo, "OlapStore not found");
     Y_UNUSED(pathEl);
@@ -383,17 +384,6 @@ void TPathDescriber::DescribeOlapTable(TPathId pathId, TPathElement::TPtr pathEl
             description->MutableSchema()->SetVersion(description->GetSchema().GetVersion() + description->GetSchemaPresetVersionAdj());
         }
     }
-#if 0
-    if (!description->HasTtlSettings() && description->HasTtlSettingsPresetId()) {
-        auto& preset = storeInfo->TtlSettingsPresets.at(description->GetTtlSettingsPresetId());
-        auto& presetProto = storeInfo->Description.GetTtlSettingsPresets(preset.ProtoIndex);
-        *description->MutableTtlSettings() = presetProto.GetTtlSettings();
-        if (description->HasTtlSettingsPresetVersionAdj()) {
-            description->MutableTtlSettings()->SetVersion(
-                description->GetTtlSettings().GetVersion() + description->GetTtlSettingsPresetVersionAdj());
-        }
-    }
-#endif
 }
 
 void TPathDescriber::DescribePersQueueGroup(TPathId pathId, TPathElement::TPtr pathEl) {
@@ -577,7 +567,7 @@ void TPathDescriber::DescribePathVersion(const TPath& path) {
 }
 
 void TPathDescriber::DescribeDomain(TPathElement::TPtr pathEl) {
-    TPathId domainId = Self->ResolveDomainId(pathEl);
+    TPathId domainId = Self->ResolvePathIdForDomain(pathEl);
 
     TPathElement::TPtr domainEl = Self->PathsById.at(domainId);
     Y_VERIFY(domainEl);
@@ -606,17 +596,13 @@ void TPathDescriber::DescribeDomainRoot(TPathElement::TPtr pathEl) {
 
     NKikimrSubDomains::TDomainDescription * entry = Result->Record.MutablePathDescription()->MutableDomainDescription();
 
-    NKikimrSubDomains::TDomainKey *key = entry->MutableDomainKey();
     entry->SetSchemeShardId_Depricated(Self->ParentDomainId.OwnerId);
     entry->SetPathId_Depricated(Self->ParentDomainId.LocalPathId);
 
-    if (pathEl->IsRoot()) {
-        key->SetSchemeShard(Self->ParentDomainId.OwnerId);
-        key->SetPathId(Self->ParentDomainId.LocalPathId);
-    } else {
-        key->SetSchemeShard(pathEl->PathId.OwnerId);
-        key->SetPathId(pathEl->PathId.LocalPathId);
-    }
+    auto domainKey = Self->GetDomainKey(pathEl->PathId);
+    NKikimrSubDomains::TDomainKey *key = entry->MutableDomainKey();
+    key->SetSchemeShard(domainKey.OwnerId);
+    key->SetPathId(domainKey.LocalPathId);
 
     entry->MutableProcessingParams()->CopyFrom(subDomainInfo->GetProcessingParams());
 
@@ -734,6 +720,11 @@ void TPathDescriber::DescribeReplication(TPathId pathId, TPathElement::TPtr path
     Self->DescribeReplication(pathId, pathEl->Name, *Result->Record.MutablePathDescription()->MutableReplicationDescription());
 }
 
+void TPathDescriber::DescribeBlobDepot(const TPath& path) {
+    Y_VERIFY(path->IsBlobDepot());
+    Self->DescribeBlobDepot(path->PathId, path->Name, *Result->Record.MutablePathDescription()->MutableBlobDepotDescription());
+}
+
 THolder<TEvSchemeShard::TEvDescribeSchemeResultBuilder> TPathDescriber::Describe(const TActorContext& ctx) {
     TPathId pathId = Params.HasPathId() ? TPathId(Params.GetSchemeshardId(), Params.GetPathId()) : InvalidPathId;
     TString pathStr = Params.GetPath();
@@ -829,7 +820,7 @@ THolder<TEvSchemeShard::TEvDescribeSchemeResultBuilder> TPathDescriber::Describe
             DescribeOlapStore(base->PathId, base);
             break;
         case NKikimrSchemeOp::EPathTypeColumnTable:
-            DescribeOlapTable(base->PathId, base);
+            DescribeColumnTable(base->PathId, base);
             break;
         case NKikimrSchemeOp::EPathTypePersQueueGroup:
             DescribePersQueueGroup(base->PathId, base);
@@ -860,6 +851,9 @@ THolder<TEvSchemeShard::TEvDescribeSchemeResultBuilder> TPathDescriber::Describe
             break;
         case NKikimrSchemeOp::EPathTypeReplication:
             DescribeReplication(path.Base()->PathId, path.Base());
+            break;
+        case NKikimrSchemeOp::EPathTypeBlobDepot:
+            DescribeBlobDepot(path);
             break;
         case NKikimrSchemeOp::EPathTypeInvalid:
             Y_UNREACHABLE();
@@ -1105,6 +1099,16 @@ void TSchemeShard::DescribeReplication(const TPathId& pathId, const TString& nam
             desc.SetControllerId(ui64(shardInfo.TabletID));
         }
     }
+}
+
+void TSchemeShard::DescribeBlobDepot(const TPathId& pathId, const TString& name, NKikimrSchemeOp::TBlobDepotDescription& desc) {
+    auto it = BlobDepots.find(pathId);
+    Y_VERIFY(it != BlobDepots.end());
+    desc = it->second->Description;
+    desc.SetName(name);
+    PathIdFromPathId(pathId, desc.MutablePathId());
+    desc.SetVersion(it->second->AlterVersion);
+    desc.SetTabletId(static_cast<ui64>(it->second->BlobDepotTabletId));
 }
 
 void TSchemeShard::FillTableBoundaries(const TTableInfo::TPtr tableInfo, google::protobuf::RepeatedPtrField<NKikimrSchemeOp::TSplitBoundary>& boundaries) {

@@ -8,7 +8,10 @@
 #include <ydb/library/yql/providers/dq/expr_nodes/dqs_expr_nodes.h>
 #include <ydb/library/yql/providers/s3/expr_nodes/yql_s3_expr_nodes.h>
 #include <ydb/library/yql/providers/s3/proto/range.pb.h>
+#include <ydb/library/yql/providers/s3/proto/sink.pb.h>
 #include <ydb/library/yql/providers/s3/proto/source.pb.h>
+#include <ydb/library/yql/providers/s3/range_helpers/file_tree_builder.h>
+#include <ydb/library/yql/providers/s3/range_helpers/path_list_reader.h>
 #include <ydb/library/yql/utils/log/log.h>
 
 namespace NYql {
@@ -16,6 +19,29 @@ namespace NYql {
 using namespace NNodes;
 
 namespace {
+
+TExprNode::TListType GetKeys(const TExprNode& settings) {
+    for (auto i = 0U; i < settings.ChildrenSize(); ++i) {
+        if (const auto& child = *settings.Child(i); child.Head().IsAtom("partitionedby")) {
+            auto children = child.ChildrenList();
+            children.erase(children.cbegin());
+            return children;
+        }
+    }
+    return {};
+}
+
+std::string_view GetCompression(const TExprNode& settings) {
+    for (auto i = 0U; i < settings.ChildrenSize(); ++i) {
+        if (settings.Child(i)->Head().IsAtom("compression")) {
+            return settings.Child(i)->Tail().Content();
+        }
+    }
+
+    return {};
+}
+
+using namespace NYql::NS3Details;
 
 class TS3DqIntegration: public TDqIntegrationBase {
 public:
@@ -26,13 +52,19 @@ public:
 
     ui64 Partition(const TDqSettings&, size_t maxPartitions, const TExprNode& node, TVector<TString>& partitions, TString*, TExprContext&, bool) override {
         TString cluster;
-        std::vector<std::vector<TString>> parts;
+        std::vector<std::vector<std::pair<TString, ui64>>> parts;
         if (const TMaybeNode<TDqSource> source = &node) {
             cluster = source.Cast().DataSource().Cast<TS3DataSource>().Cluster().Value();
             const auto settings = source.Cast().Settings().Cast<TS3SourceSettingsBase>();
-            parts.reserve(settings.Paths().Size());
-            for (auto i = 0u; i < settings.Paths().Size(); ++i)
-                parts.emplace_back(std::vector<TString>(1U, settings.Paths().Item(i).Path().StringValue()));
+            for (auto i = 0u; i < settings.Paths().Size(); ++i) {
+                const auto& path = settings.Paths().Item(i);
+                TPathList paths;
+                UnpackPathsList(path.Data().Literal().Value(), FromString<bool>(path.IsText().Literal().Value()), paths);
+                parts.reserve(parts.size() + paths.size());
+                for (auto& p : paths) {
+                    parts.emplace_back(1U, std::pair(std::get<0>(p), std::get<1>(p)));
+                }
+            }
         }
 
         if (maxPartitions && parts.size() > maxPartitions) {
@@ -57,9 +89,13 @@ public:
         }
 
         partitions.reserve(parts.size());
+        ui64 startIdx = 0;
         for (const auto& part : parts) {
             NS3::TRange range;
-            std::for_each(part.cbegin(), part.cend(), [&range](const TString& path) { range.AddPath(path); });
+            range.SetStartPathIndex(startIdx);
+            TFileTreeBuilder builder;
+            std::for_each(part.cbegin(), part.cend(), [&builder, &startIdx](const std::pair<TString, ui64>& f) { builder.AddPath(f.first, f.second); ++startIdx; });
+            builder.Save(&range);
 
             partitions.emplace_back();
             TStringOutput out(partitions.back());
@@ -84,6 +120,9 @@ public:
             const auto rowType = s3ReadObject.Ref().GetTypeAnn()->Cast<TTupleExprType>()->GetItems().back()->Cast<TListExprType>()->GetItemType();
             const auto& clusterName = s3ReadObject.DataSource().Cluster().StringValue();
 
+            const auto token = "cluster:default_" + clusterName;
+            YQL_CLOG(INFO, ProviderS3) << "Wrap " << read->Content() << " with token: " << token;
+
             TExprNode::TListType settings(1U,
                 ctx.Builder(s3ReadObject.Object().Pos())
                     .List()
@@ -92,20 +131,39 @@ public:
                     .Seal().Build()
             );
 
-            if (const auto& objectSettings = s3ReadObject.Object().Settings()) {
-                settings.emplace_back(
-                    ctx.Builder(objectSettings.Cast().Pos())
+            TExprNodeList extraColumnsExtents;
+            for (size_t i = 0; i < s3ReadObject.Object().Paths().Size(); ++i) {
+                auto batch = s3ReadObject.Object().Paths().Item(i);
+                TStringBuf packed = batch.Data().Literal().Value();
+                bool isTextEncoded = FromString<bool>(batch.IsText().Literal().Value());
+
+                TPathList paths;
+                UnpackPathsList(packed, isTextEncoded, paths);
+
+                extraColumnsExtents.push_back(
+                    ctx.Builder(batch.ExtraColumns().Pos())
+                        .Callable("Replicate")
+                            .Add(0, batch.ExtraColumns().Ptr())
+                            .Callable(1, "Uint64")
+                                .Atom(0, ToString(paths.size()), TNodeFlags::Default)
+                            .Seal()
+                        .Seal()
+                        .Build()
+                );
+            }
+            YQL_ENSURE(!extraColumnsExtents.empty());
+            if (s3ReadObject.Object().Paths().Item(0).ExtraColumns().Ref().GetTypeAnn()->Cast<TStructExprType>()->GetSize()) {
+                settings.push_back(
+                    ctx.Builder(s3ReadObject.Object().Pos())
                         .List()
-                            .Atom(0, "settings", TNodeFlags::Default)
-                            .Add(1, objectSettings.Cast().Ptr())
-                        .Seal().Build()
+                            .Atom(0, "extraColumns")
+                            .Add(1, ctx.NewCallable(s3ReadObject.Object().Pos(), "OrderedExtend", std::move(extraColumnsExtents)))
+                        .Seal()
+                        .Build()
                 );
             }
 
-            const auto token = "cluster:default_" + clusterName;
-            YQL_CLOG(INFO, ProviderS3) << "Wrap " << read->Content() << " with token: " << token;
-
-            if (const auto useCoro = State_->Configuration->SourceCoroActor.Get(); useCoro && *useCoro && !s3ReadObject.Object().Format().Ref().IsAtom({"raw", "json_list"}))
+            if (const auto useCoro = State_->Configuration->SourceCoroActor.Get(); (!useCoro || *useCoro) && !s3ReadObject.Object().Format().Ref().IsAtom({"raw", "json_list"}))
                 return Build<TDqSourceWrap>(ctx, read->Pos())
                     .Input<TS3ParseSettings>()
                         .Paths(s3ReadObject.Object().Paths())
@@ -114,23 +172,58 @@ public:
                             .Build()
                         .Format(s3ReadObject.Object().Format())
                         .RowType(ExpandType(s3ReadObject.Pos(), *rowType, ctx))
+                        .Settings(s3ReadObject.Object().Settings())
                         .Build()
                     .RowType(ExpandType(s3ReadObject.Pos(), *rowType, ctx))
                     .DataSource(s3ReadObject.DataSource().Cast<TCoDataSource>())
                     .Settings(ctx.NewList(s3ReadObject.Object().Pos(), std::move(settings)))
                     .Done().Ptr();
-            else
-                return Build<TDqSourceWrap>(ctx, read->Pos())
+            else {
+                if (const auto& objectSettings = s3ReadObject.Object().Settings()) {
+                    settings.emplace_back(
+                        ctx.Builder(objectSettings.Cast().Pos())
+                            .List()
+                                .Atom(0, "settings", TNodeFlags::Default)
+                                .Add(1, objectSettings.Cast().Ptr())
+                            .Seal().Build()
+                    );
+                }
+                auto readSettings = s3ReadObject.Object().Settings().Cast().Ptr();
+
+                int expectedSizeIndex = -1;
+                for (size_t childInd = 0; childInd < readSettings->ChildrenSize(); ++childInd) {
+                    if (readSettings->Child(childInd)->Head().Content() == "readmaxbytes") {
+                        expectedSizeIndex = childInd;
+                        break;
+                    }
+                }
+
+                if (expectedSizeIndex != -1) {
+                    return Build<TDqSourceWrap>(ctx, read->Pos())
                     .Input<TS3SourceSettings>()
                         .Paths(s3ReadObject.Object().Paths())
                         .Token<TCoSecureParam>()
                             .Name().Build(token)
                             .Build()
+                        .ExpectedSize(readSettings->Child(expectedSizeIndex)->TailPtr())
                         .Build()
                     .RowType(ExpandType(s3ReadObject.Pos(), *rowType, ctx))
                     .DataSource(s3ReadObject.DataSource().Cast<TCoDataSource>())
                     .Settings(ctx.NewList(s3ReadObject.Object().Pos(), std::move(settings)))
                     .Done().Ptr();
+                }
+                return Build<TDqSourceWrap>(ctx, read->Pos())
+                .Input<TS3SourceSettings>()
+                    .Paths(s3ReadObject.Object().Paths())
+                    .Token<TCoSecureParam>()
+                        .Name().Build(token)
+                        .Build()
+                    .Build()
+                .RowType(ExpandType(s3ReadObject.Pos(), *rowType, ctx))
+                .DataSource(s3ReadObject.DataSource().Cast<TCoDataSource>())
+                .Settings(ctx.NewList(s3ReadObject.Object().Pos(), std::move(settings)))
+                .Done().Ptr();
+            }
         }
         return read;
     }
@@ -147,19 +240,39 @@ public:
             srcDesc.SetToken(settings.Token().Name().StringValue());
 
             const auto& paths = settings.Paths();
-            for (auto i = 0U; i < paths.Size(); ++i) {
-                const auto p = srcDesc.AddPath();
-                p->SetPath(paths.Item(i).Path().StringValue());
-                p->SetSize(FromString<ui64>(paths.Item(i).Size().Value()));
-            }
+            YQL_ENSURE(paths.Size() > 0);
+            const TStructExprType* extraColumnsType = paths.Item(0).ExtraColumns().Ref().GetTypeAnn()->Cast<TStructExprType>();
 
             if (const auto mayParseSettings = settings.Maybe<TS3ParseSettings>()) {
                 const auto parseSettings = mayParseSettings.Cast();
                 srcDesc.SetFormat(parseSettings.Format().StringValue().c_str());
-                srcDesc.SetRowType(NCommon::WriteTypeToYson(parseSettings.RowType().Ref().GetTypeAnn()->Cast<TTypeExprType>()->GetType(), NYT::NYson::EYsonFormat::Text));
 
-                if (const auto compression = parseSettings.Compression())
-                    srcDesc.SetCompression(compression.Cast().StringValue().c_str());
+                const TStructExprType* fullRowType = parseSettings.RowType().Ref().GetTypeAnn()->Cast<TTypeExprType>()->GetType()->Cast<TStructExprType>();
+                // exclude extra columns to get actual row type we need to read from input
+                auto rowTypeItems = fullRowType->GetItems();
+                EraseIf(rowTypeItems, [extraColumnsType](const auto& item) { return extraColumnsType->FindItem(item->GetName()); });
+                {
+                    // TODO: pass context
+                    TExprContext ctx;
+                    srcDesc.SetRowType(NCommon::WriteTypeToYson(ctx.MakeType<TStructExprType>(rowTypeItems), NYT::NYson::EYsonFormat::Text));
+                }
+
+                if (const auto maySettings = parseSettings.Settings()) {
+                    const auto& settings = maySettings.Cast();
+                    for (auto i = 0U; i < settings.Ref().ChildrenSize(); ++i) {
+                        srcDesc.MutableSettings()->insert({TString(settings.Ref().Child(i)->Head().Content()), TString(settings.Ref().Child(i)->Tail().IsAtom() ? settings.Ref().Child(i)->Tail().Content() : settings.Ref().Child(i)->Tail().Head().Content())});
+                    }
+                }
+            } else if (const auto maySourceSettings = source.Settings().Maybe<TS3SourceSettings>()){
+                const auto sourceSettings = maySourceSettings.Cast();
+                auto expectedSize = sourceSettings.ExpectedSize();
+                if (expectedSize.IsValid()) {
+                    srcDesc.MutableSettings()->insert({"expectedSize", expectedSize.Cast().StringValue()});
+                }
+            }
+
+            if (extraColumnsType->GetSize()) {
+                srcDesc.MutableSettings()->insert({"addPathIndex", "true"});
             }
 
             protoSettings.PackFrom(srcDesc);
@@ -167,10 +280,37 @@ public:
         }
     }
 
+    void FillSinkSettings(const TExprNode& node, ::google::protobuf::Any& protoSettings, TString& sinkType) override {
+        const TDqSink sink(&node);
+        if (const auto maySettings = sink.Settings().Maybe<TS3SinkSettings>()) {
+            const auto settings = maySettings.Cast();
+            const auto& cluster = sink.DataSink().Cast<TS3DataSink>().Cluster().StringValue();
+            const auto& connect = State_->Configuration->Clusters.at(cluster);
+
+            NS3::TSink sinkDesc;
+            sinkDesc.SetUrl(connect.Url);
+            sinkDesc.SetToken(settings.Token().Name().StringValue());
+            sinkDesc.SetPath(settings.Path().StringValue());
+            for (const auto& key : GetKeys(settings.Settings().Ref()))
+                sinkDesc.MutableKeys()->Add(TString(key->Content()));
+
+            if (const auto& maxObjectSize = State_->Configuration->MaxOutputObjectSize.Get())
+                sinkDesc.SetMaxFileSize(*maxObjectSize);
+
+            if (const auto& memoryLimit = State_->Configuration->InFlightMemoryLimit.Get())
+                sinkDesc.SetMemoryLimit(*memoryLimit);
+
+            if (const auto& compression = GetCompression(settings.Settings().Ref()); !compression.empty())
+                sinkDesc.SetCompression(TString(compression));
+
+            protoSettings.PackFrom(sinkDesc);
+            sinkType = "S3Sink";
+        }
+    }
+
     void RegisterMkqlCompiler(NCommon::TMkqlCallableCompilerBase& compiler) override {
         RegisterDqS3MkqlCompilers(compiler, State_);
     }
-
 private:
     const TS3State::TPtr State_;
 };

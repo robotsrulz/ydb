@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(interface)
 
 add_library(yq-libs-shared_resources)
 target_compile_options(yq-libs-shared_resources PRIVATE
@@ -17,7 +18,9 @@ target_link_libraries(yq-libs-shared_resources PUBLIC
   cpp-actors-core
   cpp-monlib-dynamic_counters
   ydb-core-protos
+  libs-control_plane_storage-proto
   yq-libs-events
+  libs-quota_manager-events
   libs-shared_resources-interface
   ydb-library-logger
   ydb-library-security
@@ -25,6 +28,7 @@ target_link_libraries(yq-libs-shared_resources PUBLIC
   cpp-client-ydb_table
 )
 target_sources(yq-libs-shared_resources PRIVATE
+  ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/shared_resources/db_exec.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/shared_resources/db_pool.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/shared_resources/shared_resources.cpp
 )

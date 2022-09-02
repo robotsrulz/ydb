@@ -52,8 +52,8 @@ const s2n_extension_type s2n_server_supported_versions_extension = {
 
 static int s2n_server_supported_versions_send(struct s2n_connection *conn, struct s2n_stuffer *out)
 {
-    GUARD(s2n_stuffer_write_uint8(out, conn->server_protocol_version / 10));
-    GUARD(s2n_stuffer_write_uint8(out, conn->server_protocol_version % 10));
+    POSIX_GUARD(s2n_stuffer_write_uint8(out, conn->server_protocol_version / 10));
+    POSIX_GUARD(s2n_stuffer_write_uint8(out, conn->server_protocol_version % 10));
 
     return S2N_SUCCESS;
 }
@@ -61,17 +61,30 @@ static int s2n_server_supported_versions_send(struct s2n_connection *conn, struc
 static int s2n_extensions_server_supported_versions_process(struct s2n_connection *conn, struct s2n_stuffer *extension)
 {
     uint8_t highest_supported_version = conn->client_protocol_version;
-    uint8_t minimum_supported_version;
-    GUARD(s2n_connection_get_minimum_supported_version(conn, &minimum_supported_version));
+    uint8_t minimum_supported_version = s2n_unknown_protocol_version;
+    POSIX_GUARD_RESULT(s2n_connection_get_minimum_supported_version(conn, &minimum_supported_version));
+    POSIX_ENSURE(highest_supported_version >= minimum_supported_version, S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED);
 
     uint8_t server_version_parts[S2N_TLS_PROTOCOL_VERSION_LEN];
-    GUARD(s2n_stuffer_read_bytes(extension, server_version_parts, S2N_TLS_PROTOCOL_VERSION_LEN));
+    POSIX_GUARD(s2n_stuffer_read_bytes(extension, server_version_parts, S2N_TLS_PROTOCOL_VERSION_LEN));
 
     uint16_t server_version = (server_version_parts[0] * 10) + server_version_parts[1];
 
-    gte_check(server_version, S2N_TLS13);
-    lte_check(server_version, highest_supported_version);
-    gte_check(server_version, minimum_supported_version);
+    /**
+     *= https://tools.ietf.org/rfc/rfc8446#4.1.4
+     *# The value of selected_version in the HelloRetryRequest
+     *# "supported_versions" extension MUST be retained in the ServerHello,
+     *# and a client MUST abort the handshake with an "illegal_parameter"
+     *# alert if the value changes.
+     **/
+    if (s2n_is_hello_retry_handshake(conn) && !s2n_is_hello_retry_message(conn)) {
+        POSIX_ENSURE(conn->server_protocol_version == server_version,
+                     S2N_ERR_BAD_MESSAGE);
+    }
+
+    POSIX_ENSURE_GTE(server_version, S2N_TLS13);
+    POSIX_ENSURE_LTE(server_version, highest_supported_version);
+    POSIX_ENSURE_GTE(server_version, minimum_supported_version);
 
     conn->server_protocol_version = server_version;
     

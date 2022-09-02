@@ -11,12 +11,12 @@ add_library(contrib-libs-nghttp2)
 target_compile_options(contrib-libs-nghttp2 PRIVATE
   -DBUILDING_NGHTTP2
   -DHAVE_CONFIG_H
+  -Wno-everything
 )
 target_include_directories(contrib-libs-nghttp2 PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/includes
 )
 target_include_directories(contrib-libs-nghttp2 PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/includes
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib
 )
@@ -24,6 +24,7 @@ target_sources(contrib-libs-nghttp2 PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/nghttp2_buf.c
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/nghttp2_callbacks.c
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/nghttp2_debug.c
+  ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/nghttp2_extpri.c
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/nghttp2_frame.c
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/nghttp2_hd.c
   ${CMAKE_SOURCE_DIR}/contrib/libs/nghttp2/lib/nghttp2_hd_huffman.c

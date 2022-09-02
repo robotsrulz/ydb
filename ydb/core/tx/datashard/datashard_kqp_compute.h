@@ -4,12 +4,12 @@
 #include <ydb/core/engine/mkql_engine_flat.h>
 #include <ydb/core/scheme/scheme_tabledefs.h>
 #include <ydb/core/tablet_flat/flat_database.h>
+#include <ydb/core/tx/datashard/datashard_user_table.h>
 
 namespace NKikimr {
     namespace NDataShard {
         class TExecuteKqpScanTxUnit;
         class TDataShard;
-        struct TUserTable;
     }
 }
 
@@ -31,9 +31,10 @@ public:
     TString GetTablePath(const TTableId& tableId) const;
     const NDataShard::TUserTable* GetTable(const TTableId& tableId) const;
     void BreakSetLocks() const;
-    void SetLockTxId(ui64 lockTxId);
+    void SetLockTxId(ui64 lockTxId, ui32 lockNodeId);
 
-    TVector<std::pair<NScheme::TTypeId, TString>> GetKeyColumnsInfo(const TTableId &tableId) const;
+    const NDataShard::TUserTable::TUserColumn& GetKeyColumnInfo(
+        const NDataShard::TUserTable& table, ui32 keyIndex) const;
     THashMap<TString, NScheme::TTypeId> GetKeyColumnsMap(const TTableId &tableId) const;
 
     void SetHasPersistentChannels(bool value) { PersistentChannels = value; }
@@ -107,6 +108,7 @@ private:
     TEngineHost& EngineHost;
     TInstant Now;
     ui64 LockTxId = 0;
+    ui32 LockNodeId = 0;
     bool PersistentChannels = false;
     bool TabletNotReady = false;
     TRowVersion ReadVersion = TRowVersion::Min();
@@ -117,8 +119,6 @@ class TKqpDatashardApplyContext : public NUdf::IApplyContext {
 public:
     IEngineFlatHost* Host = nullptr;
 };
-
-TSmallVec<NTable::TTag> ExtractTags(const TSmallVec<TKqpComputeContextBase::TColumn>& columns);
 
 IComputationNode* WrapKqpWideReadTableRanges(TCallable& callable, const TComputationNodeFactoryContext& ctx,
     TKqpDatashardComputeContext& computeCtx);

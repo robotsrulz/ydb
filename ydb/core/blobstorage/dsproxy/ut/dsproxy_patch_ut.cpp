@@ -371,7 +371,7 @@ void ConductVPatchStart(TTestBasicRuntime &runtime, const TDSProxyEnv &env, cons
     UNIT_ASSERT(startRecord.HasCookie());
     std::unique_ptr<TEvBlobStorage::TEvVPatchFoundParts> foundParts = std::make_unique<TEvBlobStorage::TEvVPatchFoundParts>(
             status, args.OriginalId, args.PatchedId, vdisk, startRecord.GetCookie(), now, "", &startRecord,
-            nullptr, nullptr, nullptr, NWilson::TTraceId(), 0);
+            nullptr, nullptr, nullptr, 0);
     for (auto partId : parts) {
         foundParts->AddPart(partId);
     }
@@ -406,7 +406,7 @@ void ConductVPatchDiff(TTestBasicRuntime &runtime, const TDSProxyEnv &env, const
     UNIT_ASSERT(diffRecord.HasCookie());
     std::unique_ptr<TEvBlobStorage::TEvVPatchResult> result = std::make_unique<TEvBlobStorage::TEvVPatchResult>(
             resultStatus, args.OriginalId, args.PatchedId, vdisk, diffRecord.GetCookie(), now,
-            &diffRecord, nullptr, nullptr, nullptr,NWilson::TTraceId(), 0);
+            &diffRecord, nullptr, nullptr, nullptr, 0);
     result->SetStatusFlagsAndFreeSpace(args.StatusFlags, args.ApproximateFreeSpaceShare);
 
     SendByHandle(runtime, diffEv, std::move(result));
@@ -449,7 +449,7 @@ void ConductVMovedPatch(TTestBasicRuntime &runtime, const TTestArgs &args, EMove
     TOutOfSpaceStatus oos(args.StatusFlags, args.ApproximateFreeSpaceShare);
     std::unique_ptr<TEvBlobStorage::TEvVMovedPatchResult> vPatchResult = std::make_unique<TEvBlobStorage::TEvVMovedPatchResult>(
             resultStatus, args.OriginalId, args.PatchedId, vDiskId, expectedCookie, oos,
-            TAppData::TimeProvider->Now(), 0, &vPatchRecord, nullptr, nullptr, nullptr, NWilson::TTraceId(), 0, TString());
+            TAppData::TimeProvider->Now(), 0, &vPatchRecord, nullptr, nullptr, nullptr, 0, TString());
 
     SendByHandle(runtime, handle, std::move(vPatchResult));
     CTEST << "ConductVMovedPatch: Finish\n";
@@ -530,7 +530,7 @@ void RunNaivePatchTest(TTestBasicRuntime &runtime, const TTestArgs &args, ENaive
     env.Configure(runtime, args.GType, args.CurrentGroupId, 0);
     TEvBlobStorage::TEvPatch::TPtr patch = CreatePatch(runtime, env, args);
     std::unique_ptr<IActor> patchActor = env.CreatePatchRequestActor(patch, false);
-    runtime.Register(patchActor.release());
+    runtime.Register(patchActor.release(), 0, 0, TMailboxType::Simple, 0, env.FakeProxyActorId);
     ConductNaivePatch(runtime, args, naiveCase);
 }
 
@@ -539,7 +539,7 @@ void RunMovedPatchTest(TTestBasicRuntime &runtime, const TTestArgs &args, EMoved
     env.Configure(runtime, args.GType, args.CurrentGroupId, 0);
     TEvBlobStorage::TEvPatch::TPtr patch = CreatePatch(runtime, env, args);
     std::unique_ptr<IActor> patchActor = env.CreatePatchRequestActor(patch, true);
-    runtime.Register(patchActor.release());
+    runtime.Register(patchActor.release(), 0, 0, TMailboxType::Simple, 0, env.FakeProxyActorId);
     ConductMovedPatch(runtime, env, args, movedCase);
 }
 
@@ -548,7 +548,7 @@ void RunVPatchTest(TTestBasicRuntime &runtime, const TTestArgs &args, EVPatchCas
     env.Configure(runtime, args.GType, args.CurrentGroupId, 0);
     TEvBlobStorage::TEvPatch::TPtr patch = CreatePatch(runtime, env, args);
     std::unique_ptr<IActor> patchActor = env.CreatePatchRequestActor(patch, true);
-    runtime.Register(patchActor.release());
+    runtime.Register(patchActor.release(), 0, 0, TMailboxType::Simple, 0, env.FakeProxyActorId);
     ConductVPatch(runtime, env, args, vpatchCase);
 }
 
@@ -742,7 +742,7 @@ void RunFaultToleranceBlock4Plus2(TTestBasicRuntime &runtime, const TTestArgs &a
     env.Configure(runtime, args.GType, args.CurrentGroupId, 0);
     TEvBlobStorage::TEvPatch::TPtr patch = CreatePatch(runtime, env, args);
     std::unique_ptr<IActor> patchActor = env.CreatePatchRequestActor(patch, true);
-    runtime.Register(patchActor.release());
+    runtime.Register(patchActor.release(), 0, 0, TMailboxType::Simple, 0, env.FakeProxyActorId);
     ConductFaultTolerance(runtime, env, args, GetFaultToleranceCaseForBlock4Plus2(env, args));
 }
 
@@ -751,7 +751,7 @@ void RunFaultToleranceMirror3dc(TTestBasicRuntime &runtime, const TTestArgs &arg
     env.Configure(runtime, args.GType, args.CurrentGroupId, 0);
     TEvBlobStorage::TEvPatch::TPtr patch = CreatePatch(runtime, env, args);
     std::unique_ptr<IActor> patchActor = env.CreatePatchRequestActor(patch, true);
-    runtime.Register(patchActor.release());
+    runtime.Register(patchActor.release(), 0, 0, TMailboxType::Simple, 0, env.FakeProxyActorId);
     ConductFaultTolerance(runtime, env, args, GetFaultToleranceCaseForMirror3dc(env, args));
 }
 

@@ -54,24 +54,15 @@ ui64 ExtractTimestamp(const std::shared_ptr<TPredicate>& pkPredicate, const std:
 std::shared_ptr<arrow::RecordBatch> AddSpecials(const TIndexInfo& indexInfo, const TInsertedData& inserted,
                                                 const TString& data)
 {
-    auto schema = indexInfo.ArrowSchema();
     Y_VERIFY(!data.empty(), "Blob data not present");
-    auto batch = NArrow::DeserializeBatch(data, schema);
-    Y_VERIFY(batch, "Deserialization failed");
-    i64 numRows = batch->num_rows();
 
-    auto columns = indexInfo.MakeSpecialColumns(inserted, numRows);
-    columns.reserve(columns.size() + schema->num_fields());
+    auto batch = NArrow::DeserializeBatch(data, indexInfo.ArrowSchema());
+    Y_VERIFY(batch);
 
-    for (auto& field : schema->fields()) {
-        Y_VERIFY(!indexInfo.IsSpecialColumn(*field));
-        columns.push_back(batch->GetColumnByName(field->name()));
-    }
+    batch = TIndexInfo::AddSpecialColumns(batch, inserted.PlanStep(), inserted.TxId());
+    Y_VERIFY(batch);
 
-    auto extendedSchema = indexInfo.ArrowSchemaWithSpecials();
-    Y_VERIFY(extendedSchema->num_fields() == (i64)columns.size());
-
-    return arrow::RecordBatch::Make(extendedSchema, numRows, columns);
+    return NArrow::ExtractColumns(batch, indexInfo.ArrowSchemaWithSpecials());
 }
 
 bool UpdateEvictedPortion(TPortionInfo& portionInfo, const TIndexInfo& indexInfo, const TString& tierName,
@@ -326,11 +317,10 @@ TVector<const TPortionInfo*> GetActualPortions(const THashMap<ui64, TPortionInfo
     return out;
 }
 
-}
-
-THashMap<ui64, std::shared_ptr<arrow::RecordBatch>>
-SliceIntoGranules(const std::shared_ptr<arrow::RecordBatch>& batch, const TMap<ui64, ui64>& tsGranules,
-                  const TIndexInfo& indexInfo) {
+template <typename T>
+inline THashMap<ui64, std::shared_ptr<arrow::RecordBatch>> SliceIntoGranulesImpl(
+    const std::shared_ptr<arrow::RecordBatch>& batch, const T& tsGranules, const TIndexInfo& indexInfo)
+{
     THashMap<ui64, std::shared_ptr<arrow::RecordBatch>> out;
 
     if (tsGranules.size() == 1) {
@@ -371,6 +361,21 @@ SliceIntoGranules(const std::shared_ptr<arrow::RecordBatch>& batch, const TMap<u
     return out;
 }
 
+}
+
+THashMap<ui64, std::shared_ptr<arrow::RecordBatch>>
+SliceIntoGranules(const std::shared_ptr<arrow::RecordBatch>& batch, const TMap<ui64, ui64>& tsGranules,
+                  const TIndexInfo& indexInfo)
+{
+    return SliceIntoGranulesImpl(batch, tsGranules, indexInfo);
+}
+
+THashMap<ui64, std::shared_ptr<arrow::RecordBatch>>
+SliceIntoGranules(const std::shared_ptr<arrow::RecordBatch>& batch, const std::vector<std::pair<ui64, ui64>>& tsGranules,
+                  const TIndexInfo& indexInfo)
+{
+    return SliceIntoGranulesImpl(batch, tsGranules, indexInfo);
+}
 
 TColumnEngineForLogs::TColumnEngineForLogs(TIndexInfo&& info, ui64 tabletId, const TCompactionLimits& limits)
     : IndexInfo(info)
@@ -579,7 +584,7 @@ bool TColumnEngineForLogs::Load(IDbWrapper& db, const THashSet<ui64>& pathsToDro
         }
     }
 
-    UpdateOverloaded(Granules, {});
+    UpdateOverloaded(Granules);
 
     Y_VERIFY(!(LastPortion >> 63), "near to int overflow");
     Y_VERIFY(!(LastGranule >> 63), "near to int overflow");
@@ -634,14 +639,24 @@ std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartInsert(TVector<
 
     for (auto& data : changes->DataToIndex) {
         ui64 pathId = data.PathId;
+        if (changes->PathToGranule.count(pathId)) {
+            continue;
+        }
+
         if (PathGranules.count(pathId)) {
             if (PathsGranulesOverloaded.count(pathId)) {
                 return {};
             }
 
-            // FIXME: Copying all granules of a huge table might be heavy
-            changes->PathToGranule[pathId] = PathGranules[pathId];
+            // TODO: cache PathToGranule for hot pathIds
+            const auto& src = PathGranules[pathId];
+            auto& dst = changes->PathToGranule[pathId];
+            dst.reserve(src.size());
+            for (const auto& [ts, granule] : src) {
+                dst.emplace_back(std::make_pair(ts, granule));
+            }
         } else {
+            // It could reserve more then needed in case of the same pathId in DataToIndex
             ++reserveGranules;
         }
     }
@@ -687,7 +702,7 @@ std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartCompaction(std:
     ui64 pathId = spg->Record.PathId;
     Y_VERIFY(PathGranules.count(pathId));
 
-    for (auto& [ts, pathGranule] : PathGranules[pathId]) {
+    for (const auto& [ts, pathGranule] : PathGranules[pathId]) {
         if (pathGranule == granule) {
             changes->SrcGranule = {pathId, granule, ts};
             break;
@@ -719,8 +734,8 @@ std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartCleanup(const T
         if (!PathGranules.count(pathId)) {
             continue;
         }
-        auto& pathGranules = PathGranules[pathId];
-        for (auto& [_, granule]: pathGranules) {
+
+        for (const auto& [_, granule]: PathGranules[pathId]) {
             Y_VERIFY(Granules.count(granule));
             auto spg = Granules[granule];
             Y_VERIFY(spg);
@@ -756,13 +771,18 @@ std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartCleanup(const T
     return changes;
 }
 
-std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartTtl(const THashMap<ui64, TTiersInfo>& pathTtls) {
+std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartTtl(const THashMap<ui64, TTiersInfo>& pathTtls,
+                                                                     ui64 maxEvictBytes) {
     if (pathTtls.empty()) {
         return {};
     }
 
     TSnapshot fakeSnapshot = {1, 1}; // TODO: better snapshot
     auto changes = std::make_shared<TChanges>(TColumnEngineChanges::TTL, fakeSnapshot);
+    ui64 evicttionSize = 0;
+    bool allowEviction = true;
+    ui64 dropBlobs = 0;
+    bool allowDrop = true;
 
     for (auto& [pathId, ttl] : pathTtls) {
         if (!PathGranules.count(pathId)) {
@@ -776,8 +796,7 @@ std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartTtl(const THash
         Y_VERIFY(!ttl.TierBorders.empty());
 
         ui32 ttlColumnId = IndexInfo.GetColumnId(ttl.Column);
-        auto& tsGranule = PathGranules[pathId];
-        for (auto [ts, granule] : tsGranule) {
+        for (const auto& [ts, granule] : PathGranules[pathId]) {
             auto spg = Granules[granule];
             Y_VERIFY(spg);
 
@@ -786,19 +805,24 @@ std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartTtl(const THash
                     continue;
                 }
 
+                allowEviction = (evicttionSize <= maxEvictBytes);
+                allowDrop = (dropBlobs <= TCompactionLimits::MAX_BLOBS_TO_DELETE);
+
                 if (auto max = info.MaxValue(ttlColumnId)) {
                     bool keep = false;
                     for (auto& border : ttl.TierBorders) {
                         if (NArrow::ScalarLess(*border.ToTimestamp(), *max)) {
                             keep = true;
-                            if (info.TierName != border.TierName) {
+                            if (allowEviction && info.TierName != border.TierName) {
+                                evicttionSize += info.BlobsSizes().first;
                                 changes->PortionsToEvict.emplace_back(info, border.TierName);
                             }
                             break;
                         }
                     }
-                    if (!keep) {
+                    if (!keep && allowDrop) {
                         Y_VERIFY(!NArrow::ScalarLess(*ttl.TierBorders.back().ToTimestamp(), *max));
+                        dropBlobs += info.NumRecords();
                         changes->PortionsToDrop.push_back(info);
                     }
                 }
@@ -811,16 +835,19 @@ std::shared_ptr<TColumnEngineChanges> TColumnEngineForLogs::StartTtl(const THash
         return {};
     }
 
+    if (!allowEviction || !allowDrop) {
+        changes->NeedRepeat = true;
+    }
     return changes;
 }
 
 TVector<TVector<std::pair<ui64, ui64>>> TColumnEngineForLogs::EmptyGranuleTracks(ui64 pathId) const {
     Y_VERIFY(PathGranules.count(pathId));
-    auto& pathGranules = PathGranules.find(pathId)->second;
+    const auto& pathGranules = PathGranules.find(pathId)->second;
 
     TVector<TVector<std::pair<ui64, ui64>>> emptyGranules;
     ui64 emptyStart = 0;
-    for (auto& [ts, granule]: pathGranules) {
+    for (const auto& [ts, granule]: pathGranules) {
         Y_VERIFY(Granules.count(granule));
         auto spg = Granules.find(granule)->second;
         Y_VERIFY(spg);
@@ -839,8 +866,7 @@ TVector<TVector<std::pair<ui64, ui64>>> TColumnEngineForLogs::EmptyGranuleTracks
     return emptyGranules;
 }
 
-void TColumnEngineForLogs::UpdateOverloaded(const THashMap<ui64, std::shared_ptr<TGranuleMeta>>& granules,
-                                            const TChanges::TSrcGranule& splitted) {
+void TColumnEngineForLogs::UpdateOverloaded(const THashMap<ui64, std::shared_ptr<TGranuleMeta>>& granules) {
     for (auto [granule, spg] : granules) {
         if (!spg) {
             spg = Granules[granule];
@@ -862,16 +888,6 @@ void TColumnEngineForLogs::UpdateOverloaded(const THashMap<ui64, std::shared_ptr
             granules.erase(granule);
             if (granules.empty()) {
                 PathsGranulesOverloaded.erase(pathId);
-            }
-        }
-    }
-
-    if (splitted.Granule) {
-        if (PathsGranulesOverloaded.count(splitted.PathId)) {
-            auto& granules = PathsGranulesOverloaded[splitted.PathId];
-            granules.erase(splitted.Granule);
-            if (granules.empty()) {
-                PathsGranulesOverloaded.erase(splitted.PathId);
             }
         }
     }
@@ -954,15 +970,21 @@ bool TColumnEngineForLogs::ApplyChanges(IDbWrapper& db, std::shared_ptr<TColumnE
         }
     }
 
-    /// @warning Update overload info (only if tx would be applyed)
-    if (changes->IsInsert() || (changes->IsCompaction() && changes->CompactionInfo->InGranule)) {
+    // Update overloaded granules (only if tx would be applyed)
+    if (changes->IsInsert() || changes->IsCompaction() || changes->IsCleanup()) {
         THashMap<ui64, std::shared_ptr<TGranuleMeta>> granules;
-        for (auto& portionInfo : changes->AppendedPortions) {
-            granules[portionInfo.Granule()] = {};
+        if (changes->IsCleanup()) {
+            for (auto& portionInfo : changes->PortionsToDrop) {
+                granules[portionInfo.Granule()] = {};
+            }
+        } else if (changes->IsCompaction() && !changes->CompactionInfo->InGranule) {
+            granules[changes->SrcGranule.Granule] = {};
+        } else {
+            for (auto& portionInfo : changes->AppendedPortions) {
+                granules[portionInfo.Granule()] = {};
+            }
         }
-        UpdateOverloaded(granules, {});
-    } else if (changes->IsCompaction() && !changes->CompactionInfo->InGranule) {
-        UpdateOverloaded({}, changes->SrcGranule);
+        UpdateOverloaded(granules);
     }
     return true;
 }
@@ -1197,8 +1219,7 @@ bool TColumnEngineForLogs::SetGranule(const TGranuleRecord& rec, bool apply) {
         return true;
     }
 
-    auto& pathGranules = PathGranules[rec.PathId];
-    pathGranules.emplace(ts, rec.Granule);
+    PathGranules[rec.PathId].emplace(ts, rec.Granule);
     auto& spg = Granules[rec.Granule];
     Y_VERIFY(!spg);
     spg = std::make_shared<TGranuleMeta>(rec);
@@ -1290,10 +1311,13 @@ bool TColumnEngineForLogs::CanInsert(const TChanges& changes, const TSnapshot& c
         }
     }
     // Does insert have already splitted granule?
-    for (auto& [pathId, map] : changes.PathToGranule) {
+    for (const auto& [pathId, tsGranules] : changes.PathToGranule) {
         if (PathGranules.count(pathId)) {
-            if (PathGranules.find(pathId)->second.size() != map.size()) {
-                LOG_S_DEBUG("Cannot insert: splitted granules at tablet " << TabletId);
+            const auto& actualGranules = PathGranules.find(pathId)->second;
+            size_t expectedSize = tsGranules.size();
+            if (actualGranules.size() != expectedSize) {
+                LOG_S_DEBUG("Cannot insert into splitted granules (actual: " << actualGranules.size()
+                    << ", expected: " << expectedSize << ") at tablet " << TabletId);
                 return false;
             }
         }

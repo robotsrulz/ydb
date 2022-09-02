@@ -54,6 +54,7 @@ namespace NKikimr {
         app->CompactionConfig = CompactionConfig;
         app->HiveConfig = HiveConfig;
         app->DataShardConfig = DataShardConfig;
+        app->SchemeShardConfig = SchemeShardConfig;
         app->MeteringConfig = MeteringConfig;
         app->FeatureFlags = FeatureFlags;
 
@@ -183,6 +184,18 @@ namespace NKikimr {
         if (value) {
             PQConfig.SetEnableProtoSourceIdInfo(*value);
         }
+    }
+
+    void TAppPrepare::SetEnablePqBilling(std::optional<bool> value)
+    {
+        if (value) {
+            PQConfig.MutableBillingMeteringConfig()->SetEnabled(*value);
+        }
+    }
+
+    void TAppPrepare::SetEnableDbCounters(bool value)
+    {
+        FeatureFlags.SetEnableDbCounters(value);
     }
 
 }

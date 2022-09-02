@@ -17,7 +17,8 @@ TValidatedDataTx::TValidatedDataTx(TDataShard *self,
                                    const TActorContext &ctx,
                                    const TStepOrder &stepTxId,
                                    TInstant receivedAt,
-                                   const TString &txBody)
+                                   const TString &txBody,
+                                   bool usesMvccSnapshot)
     : StepTxId_(stepTxId)
     , TabletId_(self->TabletID())
     , TxBody(txBody)
@@ -45,10 +46,13 @@ TValidatedDataTx::TValidatedDataTx(TDataShard *self,
              "One of the fields should be set: MiniKQL, ReadTableTransaction, KqpTransaction");
 
     if (Tx.GetLockTxId())
-        EngineBay.SetLockTxId(Tx.GetLockTxId());
+        EngineBay.SetLockTxId(Tx.GetLockTxId(), Tx.GetLockNodeId());
 
     if (Tx.GetImmediate())
         EngineBay.SetIsImmediateTx();
+
+    if (usesMvccSnapshot)
+        EngineBay.SetIsRepeatableSnapshot();
 
     if (Tx.HasReadTableTransaction()) {
         auto &tx = Tx.GetReadTableTransaction();
@@ -244,38 +248,6 @@ bool TValidatedDataTx::ReValidateKeys()
     return true;
 }
 
-ETxOrder TValidatedDataTx::CheckOrder(const TSysLocks& sysLocks, const TValidatedDataTx& dataTx) const {
-    Y_VERIFY(TxInfo().Loaded);
-    Y_VERIFY(dataTx.TxInfo().Loaded);
-
-    if (KeysCount() > MaxReorderTxKeys())
-        return ETxOrder::Unknown;
-
-    if (HasLockedWrites()) {
-        if (sysLocks.IsBroken(LockTxId()))
-            return ETxOrder::Any;
-
-        // TODO: dataTx.DynRW && dataTx.RW && dataTx.LockedRW
-        if (dataTx.HasWrites())
-            return ETxOrder::Unknown;
-
-    } else if (dataTx.HasLockedWrites()) {
-        if (sysLocks.IsBroken(dataTx.LockTxId()))
-            return ETxOrder::Any;
-
-        if (LockTxId() == dataTx.LockTxId())
-            return ETxOrder::Unknown;
-
-        // TODO: DynRW && RW
-        if (HasWrites())
-            return ETxOrder::Unknown;
-    }
-
-    if (HasKeyConflict(TxInfo(), dataTx.TxInfo()))
-        return StepTxId_.CheckOrder(dataTx.StepTxId());
-    return ETxOrder::Any;
-}
-
 bool TValidatedDataTx::CanCancel() {
     if (!IsTxReadOnly()) {
         return false;
@@ -314,8 +286,14 @@ bool TValidatedDataTx::CheckCancelled() {
 void TValidatedDataTx::ReleaseTxData() {
     TxBody = "";
     auto lock = Tx.GetLockTxId();
+    auto lockNode = Tx.GetLockNodeId();
     Tx.Clear();
-    Tx.SetLockTxId(lock);
+    if (lock) {
+        Tx.SetLockTxId(lock);
+    }
+    if (lockNode) {
+        Tx.SetLockNodeId(lockNode);
+    }
     EngineBay.DestroyEngine();
     IsReleased = true;
 
@@ -427,7 +405,7 @@ TValidatedDataTx::TPtr TActiveTransaction::BuildDataTx(TDataShard *self,
     if (!DataTx) {
         Y_VERIFY(TxBody);
         DataTx = std::make_shared<TValidatedDataTx>(self, txc, ctx, GetStepOrder(),
-                                                    GetReceivedAt(), TxBody);
+                                                    GetReceivedAt(), TxBody, MvccSnapshotRepeatable);
         if (DataTx->HasStreamResponse())
             SetStreamSink(DataTx->GetSink());
     }
@@ -456,7 +434,8 @@ bool TActiveTransaction::BuildSchemeTx()
         + (ui32)SchemeTx->HasMoveTable()
         + (ui32)SchemeTx->HasCreateCdcStreamNotice()
         + (ui32)SchemeTx->HasAlterCdcStreamNotice()
-        + (ui32)SchemeTx->HasDropCdcStreamNotice();
+        + (ui32)SchemeTx->HasDropCdcStreamNotice()
+        + (ui32)SchemeTx->HasMoveIndex();
     if (count != 1)
         return false;
 
@@ -490,6 +469,8 @@ bool TActiveTransaction::BuildSchemeTx()
         SchemeTxType = TSchemaOperation::ETypeAlterCdcStream;
     else if (SchemeTx->HasDropCdcStreamNotice())
         SchemeTxType = TSchemaOperation::ETypeDropCdcStream;
+    else if (SchemeTx->HasMoveIndex())
+        SchemeTxType = TSchemaOperation::ETypeMoveIndex;
     else
         SchemeTxType = TSchemaOperation::ETypeUnknown;
 
@@ -648,7 +629,7 @@ ERestoreDataStatus TActiveTransaction::RestoreTxData(
 
     bool extractKeys = DataTx->IsTxInfoLoaded();
     DataTx = std::make_shared<TValidatedDataTx>(self, txc, ctx, GetStepOrder(),
-                                                GetReceivedAt(), TxBody);
+                                                GetReceivedAt(), TxBody, MvccSnapshotRepeatable);
     if (DataTx->Ready() && extractKeys) {
         DataTx->ExtractKeys(true);
     }
@@ -887,6 +868,7 @@ void TActiveTransaction::BuildExecutionPlan(bool loaded)
         plan.push_back(EExecutionUnitKind::FinalizeBuildIndex);
         plan.push_back(EExecutionUnitKind::DropIndexNotice);
         plan.push_back(EExecutionUnitKind::MoveTable);
+        plan.push_back(EExecutionUnitKind::MoveIndex);
         plan.push_back(EExecutionUnitKind::CreateCdcStream);
         plan.push_back(EExecutionUnitKind::AlterCdcStream);
         plan.push_back(EExecutionUnitKind::DropCdcStream);

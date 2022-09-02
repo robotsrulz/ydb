@@ -4,6 +4,7 @@
 #include <ydb/library/yql/minikql/computation/presort_impl.h>
 #include <ydb/library/yql/core/yql_pg_utils.h>
 #include <ydb/library/yql/minikql/mkql_type_builder.h>
+#include <ydb/library/yql/public/udf/udf_value_builder.h>
 
 namespace NSQLTranslationPG {
 
@@ -20,54 +21,97 @@ NYql::TAstParseResult PGToYql(const TString& query, const NSQLTranslation::TTran
 namespace NYql {
 namespace NCommon {
 
+TString PgValueToString(const NUdf::TUnboxedValuePod& value, ui32 pgTypeId) {
+    Y_UNUSED(value);
+    Y_UNUSED(pgTypeId);
+    throw yexception() << "PgValueToString: PG types are not supported";
+}
+
+NUdf::TUnboxedValue PgValueFromString(const TStringBuf text, ui32 pgTypeId) {
+    Y_UNUSED(text);
+    Y_UNUSED(pgTypeId);
+    throw yexception() << "PgValueFromString: PG types are not supported";
+}
+
+TString PgValueToNativeText(const NUdf::TUnboxedValuePod& value, ui32 pgTypeId) {
+    Y_UNUSED(value);
+    Y_UNUSED(pgTypeId);
+    throw yexception() << "PgValueToNativeText: PG types are not supported";
+}
+
+NUdf::TUnboxedValue PgValueFromNativeText(const TStringBuf text, ui32 pgTypeId) {
+    Y_UNUSED(text);
+    Y_UNUSED(pgTypeId);
+    throw yexception() << "PgValueFromNativeText: PG types are not supported";
+}
+
+TString PgValueToNativeBinary(const NUdf::TUnboxedValuePod& value, ui32 pgTypeId) {
+    Y_UNUSED(value);
+    Y_UNUSED(pgTypeId);
+    throw yexception() << "PgValueToNativeBinary: PG types are not supported";
+}
+
+NUdf::TUnboxedValue PgValueFromNativeBinary(const TStringBuf binary, ui32 pgTypeId) {
+    Y_UNUSED(binary);
+    Y_UNUSED(pgTypeId);
+    throw yexception() << "PgValueFromNativeBinary: PG types are not supported";
+}
+
 void WriteYsonValuePg(TYsonResultWriter& writer, const NUdf::TUnboxedValuePod& value, NKikimr::NMiniKQL::TPgType* type,
     const TVector<ui32>* structPositions) {
     Y_UNUSED(writer);
     Y_UNUSED(value);
     Y_UNUSED(type);
     Y_UNUSED(structPositions);
-    throw yexception() << "PG types are not supported";
+    throw yexception() << "WriteYsonValuePg: PG types are not supported";
 }
 
 void WriteYsonValueInTableFormatPg(TOutputBuf& buf, NKikimr::NMiniKQL::TPgType* type, const NKikimr::NUdf::TUnboxedValuePod& value) {
     Y_UNUSED(buf);
     Y_UNUSED(type);
     Y_UNUSED(value);
-    throw yexception() << "PG types are not supported";
+    throw yexception() << "WriteYsonValueInTableFormatPg: PG types are not supported";
+}
+
+NUdf::TUnboxedValue ReadYsonValueInTableFormatPg(NKikimr::NMiniKQL::TPgType* type, char cmd, TInputBuf& buf) {
+    Y_UNUSED(type);
+    Y_UNUSED(cmd);
+    Y_UNUSED(buf);
+    throw yexception() << "ReadYsonValueInTableFormatPg: PG types are not supported";
 }
 
 NUdf::TUnboxedValue ReadYsonValuePg(NKikimr::NMiniKQL::TPgType* type, char cmd, TInputBuf& buf) {
     Y_UNUSED(type);
     Y_UNUSED(cmd);
     Y_UNUSED(buf);
-    throw yexception() << "PG types are not supported";
+    throw yexception() << "ReadYsonValuePg: PG types are not supported";
 }
 
 NKikimr::NUdf::TUnboxedValue ReadSkiffPg(NKikimr::NMiniKQL::TPgType* type, NCommon::TInputBuf& buf) {
     Y_UNUSED(type);
     Y_UNUSED(buf);
-    throw yexception() << "PG types are not supported";
+    throw yexception() << "ReadSkiffPg: PG types are not supported";
 }
 
 void WriteSkiffPg(NKikimr::NMiniKQL::TPgType* type, const NKikimr::NUdf::TUnboxedValuePod& value, NCommon::TOutputBuf& buf) {
     Y_UNUSED(type);
     Y_UNUSED(value);
     Y_UNUSED(buf);
-    throw yexception() << "PG types are not supported";
+    throw yexception() << "WriteSkiffPg: PG types are not supported";
 }
 
 extern "C" void ReadSkiffPgValue(NKikimr::NMiniKQL::TPgType* type, NKikimr::NUdf::TUnboxedValue& value, NCommon::TInputBuf& buf) {
     Y_UNUSED(type);
     Y_UNUSED(value);
     Y_UNUSED(buf);
-    throw yexception() << "PG types are not supported";
+    throw yexception() << "ReadSkiffPgValue: PG types are not supported";
 }
 
 extern "C" void WriteSkiffPgValue(NKikimr::NMiniKQL::TPgType* type, const NKikimr::NUdf::TUnboxedValuePod& value, NCommon::TOutputBuf& buf) {
     Y_UNUSED(type);
     Y_UNUSED(value);
     Y_UNUSED(buf);
-    throw yexception() << "PG types are not supported";
+    throw yexception() << "WriteSkiffPgValue: PG types are not supported";
 }
 
 } // namespace NCommon
@@ -158,6 +202,54 @@ TMaybe<ui32> ConvertToPgType(NKikimr::NUdf::EDataSlot slot) {
 TMaybe<NKikimr::NUdf::EDataSlot> ConvertFromPgType(ui32 typeId) {
     Y_UNUSED(typeId);
     return Nothing();
+}
+
+bool ParsePgIntervalModifier(const TString& str, i32& ret) {
+    Y_UNUSED(str);
+    Y_UNUSED(ret);
+    return false;
+}
+
+class TPgDummyBuilder : public NUdf::IPgBuilder {
+public:
+    NUdf::TUnboxedValue ValueFromText(ui32 typeId, const NUdf::TStringRef& value, NUdf::TStringValue& error) const override {
+        Y_UNUSED(typeId);
+        Y_UNUSED(value);
+        error = NUdf::TStringValue(TStringBuf("TPgDummyBuilder::ValueFromText does nothing"));
+        return NUdf::TUnboxedValue();
+    }
+
+    NUdf::TUnboxedValue ValueFromBinary(ui32 typeId, const NUdf::TStringRef& value, NUdf::TStringValue& error) const override {
+        Y_UNUSED(typeId);
+        Y_UNUSED(value);
+        error = NUdf::TStringValue(TStringBuf("TPgDummyBuilder::ValueFromBinary does nothing"));
+        return NUdf::TUnboxedValue();
+    }
+
+    NUdf::TUnboxedValue ConvertFromPg(NUdf::TUnboxedValue source, ui32 sourceTypeId, const NUdf::TType* targetType) const override {
+        Y_UNUSED(source);
+        Y_UNUSED(sourceTypeId);
+        Y_UNUSED(targetType);
+        ythrow yexception() << "TPgDummyBuilder::ConvertFromPg does nothing";
+    }
+
+    NUdf::TUnboxedValue ConvertToPg(NUdf::TUnboxedValue source, const NUdf::TType* sourceType, ui32 targetTypeId) const override {
+        Y_UNUSED(source);
+        Y_UNUSED(sourceType);
+        Y_UNUSED(targetTypeId);
+        ythrow yexception() << "TPgDummyBuilder::ConvertToPg does nothing";
+    }
+
+    NUdf::TUnboxedValue NewString(i32 typeLen, ui32 targetTypeId, NUdf::TStringRef data) const override {
+        Y_UNUSED(typeLen);
+        Y_UNUSED(targetTypeId);
+        Y_UNUSED(data);
+        ythrow yexception() << "TPgDummyBuilder::NewString does nothing";
+    }
+};
+
+std::unique_ptr<NUdf::IPgBuilder> CreatePgBuilder() {
+    return std::make_unique<TPgDummyBuilder>();
 }
 
 } // NYql

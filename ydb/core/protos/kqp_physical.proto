@@ -143,6 +143,9 @@ message TKqpPhyOpReadOlapRanges {
      * it is done a bit later in executor, so we need separate field for parameter names.
      */
     repeated string OlapProgramParameterNames = 5;
+    // Sorted sign which indicates that read operation should return a sorted data out of the
+    // dedicated actors or we can relax constraints here and return unsorted data.
+    bool Sorted = 6;
 }
 
 message TKqpPhyOpReadRanges {
@@ -205,6 +208,14 @@ message TKqpPhyCnMerge {
     repeated TKqpPhySortColumn SortColumns = 1;
 }
 
+message TKqpPhyCnStreamLookup {
+    TKqpPhyTable Table = 1;
+    repeated string KeyColumns = 2;
+    repeated string Columns = 3;
+    bytes LookupKeysType = 4;
+    bytes ResultType = 5;
+}
+
 message TKqpPhyConnection {
     uint32 StageIndex = 1;
     uint32 OutputIndex = 2;
@@ -219,6 +230,7 @@ message TKqpPhyConnection {
         TKqpPhyCnResult Result = 9;
         TKqpPhyCnValue Value = 10;
         TKqpPhyCnMerge Merge = 11;
+        TKqpPhyCnStreamLookup StreamLookup = 12;
     };
 }
 

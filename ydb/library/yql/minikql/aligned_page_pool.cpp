@@ -1,4 +1,5 @@
 #include "aligned_page_pool.h"
+#include "util/string/builder.h"
 #include <library/cpp/actors/util/intrinsics.h>
 
 #include <util/generic/yexception.h>
@@ -109,10 +110,10 @@ private:
 
 } // unnamed
 
-TAlignedPagePoolCounters::TAlignedPagePoolCounters(NMonitoring::TDynamicCounterPtr countersRoot, const TString& name) {
+TAlignedPagePoolCounters::TAlignedPagePoolCounters(::NMonitoring::TDynamicCounterPtr countersRoot, const TString& name) {
     if (!countersRoot || name.empty())
         return;
-    NMonitoring::TDynamicCounterPtr subGroup = countersRoot->GetSubgroup("counters", "utils")->GetSubgroup("subsystem", "mkqlalloc");
+    ::NMonitoring::TDynamicCounterPtr subGroup = countersRoot->GetSubgroup("counters", "utils")->GetSubgroup("subsystem", "mkqlalloc");
     TotalBytesAllocatedCntr = subGroup->GetCounter(name + "/TotalBytesAllocated");
     AllocationsCntr = subGroup->GetCounter(name + "/Allocations", true);
     PoolsCntr = subGroup->GetCounter(name + "/Pools", true);
@@ -122,8 +123,9 @@ TAlignedPagePoolCounters::TAlignedPagePoolCounters(NMonitoring::TDynamicCounterP
 TAlignedPagePool::~TAlignedPagePool() {
     if (CheckLostMem && !UncaughtException()) {
         Y_VERIFY_DEBUG(TotalAllocated == FreePages.size() * POOL_PAGE_SIZE,
-                       "Expected %ld, actual %ld (%ld page(s), %ld offloaded)", TotalAllocated,
-                       FreePages.size() * POOL_PAGE_SIZE, FreePages.size(), OffloadedActiveBytes);
+                       "Expected %ld, actual %ld (%ld page(s), %ld offloaded)",
+                       TotalAllocated, FreePages.size() * POOL_PAGE_SIZE,
+                       FreePages.size(), OffloadedActiveBytes);
         Y_VERIFY_DEBUG(OffloadedActiveBytes == 0, "offloaded: %ld", OffloadedActiveBytes);
     }
 

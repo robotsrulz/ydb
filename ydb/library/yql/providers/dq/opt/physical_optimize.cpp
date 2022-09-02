@@ -17,9 +17,12 @@ using namespace NYql::NNodes;
 
 class TDqsPhysicalOptProposalTransformer : public TOptimizeTransformerBase {
 public:
-    TDqsPhysicalOptProposalTransformer(TTypeAnnotationContext* typeCtx)
+    TDqsPhysicalOptProposalTransformer(TTypeAnnotationContext* typeCtx, const TDqConfiguration::TPtr& config)
         : TOptimizeTransformerBase(typeCtx, NLog::EComponent::ProviderDq, {})
+        , Config(config)
     {
+        const bool enablePrecompute = Config->_EnablePrecompute.Get().GetOrElse(false);
+
 #define HNDL(name) "DqsPhy-"#name, Hndl(&TDqsPhysicalOptProposalTransformer::name)
         AddHandler(0, &TDqSourceWrap::Match, HNDL(BuildStageWithSourceWrap));
         AddHandler(0, &TDqReadWrap::Match, HNDL(BuildStageWithReadWrap));
@@ -32,7 +35,7 @@ public:
         AddHandler(0, &TCoAsList::Match, HNDL(BuildAggregationResultStage));
         AddHandler(0, &TCoTopSort::Match, HNDL(BuildTopSortStage<false>));
         AddHandler(0, &TCoSort::Match, HNDL(BuildSortStage<false>));
-        AddHandler(0, &TCoTake::Match, HNDL(BuildTakeOrTakeSkipStage<false>));
+        AddHandler(0, &TCoTakeBase::Match, HNDL(BuildTakeOrTakeSkipStage<false>));
         AddHandler(0, &TCoLength::Match, HNDL(RewriteLengthOfStageOutput));
         AddHandler(0, &TCoExtendBase::Match, HNDL(BuildExtendStage));
         AddHandler(0, &TDqJoin::Match, HNDL(RewriteRightJoinToLeft));
@@ -41,10 +44,15 @@ public:
         AddHandler(0, &TCoAssumeSorted::Match, HNDL(BuildSortStage<false>));
         AddHandler(0, &TCoOrderedLMap::Match, HNDL(PushOrderedLMapToStage<false>));
         AddHandler(0, &TCoLMap::Match, HNDL(PushLMapToStage<false>));
-#if 0
-        AddHandler(0, &TCoHasItems::Match, HNDL(BuildHasItems));
-        AddHandler(0, &TCoToOptional::Match, HNDL(BuildScalarPrecompute<false>));
-#endif
+        if (enablePrecompute) {
+            AddHandler(0, &TCoHasItems::Match, HNDL(BuildHasItems));
+            AddHandler(0, &TCoToOptional::Match, HNDL(BuildScalarPrecompute<false>));
+            AddHandler(0, &TCoHead::Match, HNDL(BuildScalarPrecompute<false>));
+            AddHandler(0, &TDqPrecompute::Match, HNDL(BuildPrecompute));
+            AddHandler(0, &TDqStage::Match, HNDL(PrecomputeToInput));
+            AddHandler(0, &TCoTake::Match, HNDL(PropagatePrecomuteTake<false>));
+            AddHandler(0, &TCoFlatMap::Match, HNDL(PropagatePrecomuteFlatmap<false>));
+        }
 
         AddHandler(1, &TCoSkipNullMembers::Match, HNDL(PushSkipNullMembersToStage<true>));
         AddHandler(1, &TCoExtractMembers::Match, HNDL(PushExtractMembersToStage<true>));
@@ -52,12 +60,18 @@ public:
         AddHandler(1, &TCoCombineByKey::Match, HNDL(PushCombineToStage<true>));
         AddHandler(1, &TCoTopSort::Match, HNDL(BuildTopSortStage<true>));
         AddHandler(1, &TCoSort::Match, HNDL(BuildSortStage<true>));
-        AddHandler(1, &TCoTake::Match, HNDL(BuildTakeOrTakeSkipStage<true>));
+        AddHandler(1, &TCoTakeBase::Match, HNDL(BuildTakeOrTakeSkipStage<true>));
         AddHandler(1, &TDqJoin::Match, HNDL(RewriteLeftPureJoin<true>));
         AddHandler(1, &TDqJoin::Match, HNDL(BuildJoin<true>));
         AddHandler(1, &TCoAssumeSorted::Match, HNDL(BuildSortStage<true>));
         AddHandler(1, &TCoOrderedLMap::Match, HNDL(PushOrderedLMapToStage<true>));
         AddHandler(1, &TCoLMap::Match, HNDL(PushLMapToStage<true>));
+        if (enablePrecompute) {
+            AddHandler(1, &TCoToOptional::Match, HNDL(BuildScalarPrecompute<true>));
+            AddHandler(1, &TCoHead::Match, HNDL(BuildScalarPrecompute<true>));
+            AddHandler(1, &TCoTake::Match, HNDL(PropagatePrecomuteTake<true>));
+            AddHandler(1, &TCoFlatMap::Match, HNDL(PropagatePrecomuteFlatmap<true>));
+        }
 #undef HNDL
 
         SetGlobal(1u);
@@ -296,10 +310,35 @@ protected:
     TMaybeNode<TExprBase> BuildScalarPrecompute(TExprBase node, TExprContext& ctx, IOptimizationContext& optCtx, const TGetParents& getParents) {
         return DqBuildScalarPrecompute(node, ctx, optCtx, *getParents(), IsGlobal);
     }
+
+    TMaybeNode<TExprBase> BuildPrecompute(TExprBase node, TExprContext& ctx) {
+        return DqBuildPrecompute(node, ctx);
+    }
+
+    TMaybeNode<TExprBase> PrecomputeToInput(TExprBase node, TExprContext& ctx) {
+        return DqPrecomputeToInput(node, ctx);
+    }
+
+    template <bool IsGlobal>
+    TMaybeNode<TExprBase> PropagatePrecomuteTake(TExprBase node, TExprContext& ctx,
+        IOptimizationContext& optCtx, const TGetParents& getParents)
+    {
+        return DqPropagatePrecomuteTake(node, ctx, optCtx, *getParents(), IsGlobal);
+    }
+
+    template <bool IsGlobal>
+    TMaybeNode<TExprBase> PropagatePrecomuteFlatmap(TExprBase node, TExprContext& ctx,
+        IOptimizationContext& optCtx, const TGetParents& getParents)
+    {
+        return DqPropagatePrecomuteFlatmap(node, ctx, optCtx, *getParents(), IsGlobal);
+    }
+
+private:
+    TDqConfiguration::TPtr Config;
 };
 
-THolder<IGraphTransformer> CreateDqsPhyOptTransformer(TTypeAnnotationContext* typeCtx) {
-    return THolder(new TDqsPhysicalOptProposalTransformer(typeCtx));
+THolder<IGraphTransformer> CreateDqsPhyOptTransformer(TTypeAnnotationContext* typeCtx, const TDqConfiguration::TPtr& config) {
+    return THolder(new TDqsPhysicalOptProposalTransformer(typeCtx, config));
 }
 
 } // NYql::NDqs

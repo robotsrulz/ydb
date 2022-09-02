@@ -8,11 +8,11 @@ namespace NKikimr {
     TEvBlobStorage::TEvVPutResult::TEvVPutResult(const NKikimrProto::EReplyStatus status,
             const TLogoBlobID &logoBlobId, const TVDiskID &vdisk, const ui64 *cookie, TOutOfSpaceStatus oosStatus,
             const TInstant &now, ui32 recByteSize, NKikimrBlobStorage::TEvVPut *record,
-            const TActorIDPtr &skeletonFrontIDPtr, const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr,
-            const NVDiskMon::TLtcHistoPtr &histoPtr, const ui64 bufferSizeBytes, NWilson::TTraceId traceId,
+            const TActorIDPtr &skeletonFrontIDPtr, const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr,
+            const NVDiskMon::TLtcHistoPtr &histoPtr, const ui64 bufferSizeBytes,
             ui64 incarnationGuid, const TString& errorReason)
-        : TEvVResultBaseWithQoSPB(now, counterPtr, histoPtr, std::move(traceId),
-                TInterconnectChannels::IC_BLOBSTORAGE_SMALL_MSG, recByteSize, record, skeletonFrontIDPtr)
+        : TEvVResultBaseWithQoSPB(now, counterPtr, histoPtr, TInterconnectChannels::IC_BLOBSTORAGE_SMALL_MSG,
+                recByteSize, record, skeletonFrontIDPtr)
     {
         IncrementSize(bufferSizeBytes);
         Record.SetStatus(status);

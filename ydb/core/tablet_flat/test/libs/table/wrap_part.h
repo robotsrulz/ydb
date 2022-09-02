@@ -86,7 +86,8 @@ namespace NTest {
 
         EReady SkipToRowVersion(TRowVersion rowVersion) noexcept
         {
-            Ready = Iter->SkipToRowVersion(rowVersion, /* committed */ {});
+            TIteratorStats stats;
+            Ready = Iter->SkipToRowVersion(rowVersion, stats, /* committed */ nullptr, /* observer */ nullptr);
 
             if (Ready == EReady::Data)
                 Ready = RollUp();
@@ -144,7 +145,7 @@ namespace NTest {
             for (auto &pin: Remap_.KeyPins())
                 State.Set(pin.Pos, ECellOp::Set, key.Columns[pin.Key]);
 
-            Iter->Apply(State, /* committed */ {});
+            Iter->Apply(State, /* committed */ nullptr, /* observer */ nullptr);
 
             return (NoBlobs = State.Need() > 0) ? EReady::Page : EReady::Data;
         }

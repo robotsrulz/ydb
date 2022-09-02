@@ -14,7 +14,8 @@ target_include_directories(ydb-core-blobstorage-pdisk-ut PRIVATE
 target_link_libraries(ydb-core-blobstorage-pdisk-ut PUBLIC
   contrib-libs-cxxsupp
   yutil
-  library-cpp-lfalloc
+  cpp-malloc-tcmalloc
+  libs-tcmalloc-no_percpu_cache
   library-cpp-cpuid_check
   cpp-testing-unittest_main
   core-blobstorage-pdisk
@@ -37,10 +38,13 @@ target_sources(ydb-core-blobstorage-pdisk-ut PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_blockdevice_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_crypto_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_util_ut.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_ut_env.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_ut_races.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_ut_actions.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_ut_helpers.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_ut_run.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_restore_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/pdisk/blobstorage_pdisk_ut_yard.cpp
 )
 add_test(

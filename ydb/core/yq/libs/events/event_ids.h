@@ -44,6 +44,14 @@ struct TEventIds {
         EvGraphParams,
         EvRaiseTransientIssues,
         EvSchemaCreated,
+        EvCallback,
+
+        EvCreateRateLimiterResourceRequest,
+        EvCreateRateLimiterResourceResponse,
+        EvDeleteRateLimiterResourceRequest,
+        EvDeleteRateLimiterResourceResponse,
+
+        EvSchemaDeleted,
 
         // Special events
         EvEnd

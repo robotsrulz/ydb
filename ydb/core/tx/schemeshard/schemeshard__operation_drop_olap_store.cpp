@@ -102,10 +102,12 @@ public:
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
         context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
-
         context.SS->ClearDescribePathCaches(path);
-        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        }
 
         context.SS->ChangeTxState(db, OperationId, TTxState::ProposedWaitParts);
         return true;
@@ -347,9 +349,13 @@ public:
         Y_VERIFY(context.SS->OlapStores.contains(path.Base()->PathId));
         TOlapStoreInfo::TPtr storeInfo = context.SS->OlapStores.at(path.Base()->PathId);
 
-        if (!storeInfo->OlapTables.empty()) {
+        if (!storeInfo->ColumnTables.empty()) {
             errStr = TStringBuilder() << "OlapStore cannot be dropped until all tables are dropped";
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
+            return result;
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxDropOlapStore, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
             return result;
         }
 
@@ -391,10 +397,12 @@ public:
         ++parent.Base()->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parent.Base());
         context.SS->ClearDescribePathCaches(parent.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, parent.Base()->PathId);
-
         context.SS->ClearDescribePathCaches(path.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parent.Base()->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+        }
 
         State = NextState();
         SetState(SelectStateFunc(State));

@@ -33,8 +33,11 @@
 #include <ydb/core/yq/libs/control_plane_storage/events/events.h>
 #include <ydb/core/yq/libs/control_plane_storage/proto/yq_internal.pb.h>
 #include <ydb/core/yq/libs/db_schema/db_schema.h>
+#include <ydb/core/yq/libs/events/events.h>
+#include <ydb/core/yq/libs/quota_manager/events/events.h>
 #include <ydb/core/yq/libs/ydb/util.h>
 #include <ydb/core/yq/libs/ydb/ydb.h>
+
 
 namespace NYq {
 
@@ -86,9 +89,78 @@ inline static bool HasManageAccess(TPermissions permissions, YandexQuery::Acl::V
     return HasAccessImpl(permissions, entityVisibility, entityUser, user, TPermissions::MANAGE_PRIVATE, TPermissions::MANAGE_PUBLIC);
 }
 
+TAsyncStatus ExecDbRequest(TDbPool::TPtr dbPool, std::function<NYdb::TAsyncStatus(NYdb::NTable::TSession&)> handler);
+
 LWTRACE_USING(YQ_CONTROL_PLANE_STORAGE_PROVIDER);
 
 using TRequestCountersPtr = TIntrusivePtr<TRequestCounters>;
+
+    template<typename T>
+    THashMap<TString, T> GetEntitiesWithVisibilityPriority(const TResultSet& resultSet, const TString& columnName)
+    {
+        THashMap<TString, T> entities;
+        TResultSetParser parser(resultSet);
+        while (parser.TryNextRow()) {
+            T entity;
+            Y_VERIFY(entity.ParseFromString(*parser.ColumnParser(columnName).GetOptionalString()));
+            const TString name = entity.content().name();
+            if (auto it = entities.find(name); it != entities.end()) {
+                const auto visibility = entity.content().acl().visibility();
+                if (visibility == YandexQuery::Acl::PRIVATE) {
+                    entities[name] = std::move(entity);
+                }
+            } else {
+                entities[name] = std::move(entity);
+            }
+        }
+
+        return entities;
+    }
+
+    template<typename T>
+    TVector<T> GetEntities(const TResultSet& resultSet, const TString& columnName)
+    {
+        TVector<T> entities;
+        TResultSetParser parser(resultSet);
+        while (parser.TryNextRow()) {
+            Y_VERIFY(entities.emplace_back().ParseFromString(*parser.ColumnParser(columnName).GetOptionalString()));
+        }
+        return entities;
+    }
+
+void InsertIdempotencyKey(TSqlQueryBuilder& builder, const TString& scope, const TString& idempotencyKey, const TString& response, const TInstant& expireAt);
+
+void ReadIdempotencyKeyQuery(TSqlQueryBuilder& builder, const TString& scope, const TString& idempotencyKey);
+
+class TRequestCountersScope {
+    TRequestCountersPtr Counters;
+public:
+    TRequestCountersScope(TRequestCountersPtr counters, ui64 requestSize) : Counters(counters) {
+        StartTime = TInstant::Now();
+        Counters->InFly->Inc();
+        Counters->RequestBytes->Add(requestSize);
+    }
+
+    void Reply(const NYql::TIssues& issues, ui64 resultSize) {
+        Delta = TInstant::Now() - StartTime;
+        Counters->ResponseBytes->Add(resultSize);
+        Counters->InFly->Dec();
+        Counters->LatencyMs->Collect(Delta.MilliSeconds());
+        if (issues) {
+            Counters->Error->Inc();
+            for (const auto& issue : issues) {
+                NYql::WalkThroughIssues(issue, true, [&counters=Counters](const NYql::TIssue& err, ui16 level) {
+                    Y_UNUSED(level);
+                    counters->Issues->GetCounter(ToString(err.GetCode()), true)->Inc();
+                });
+            }
+        } else {
+            Counters->Ok->Inc();
+        }
+    }
+    TInstant StartTime;
+    TDuration Delta;
+};
 
 class TYdbControlPlaneStorageActor : public NActors::TActorBootstrapped<TYdbControlPlaneStorageActor> {
     enum ERequestTypeScope {
@@ -120,6 +192,9 @@ class TYdbControlPlaneStorageActor : public NActors::TActorBootstrapped<TYdbCont
         RTC_WRITE_RESULT_DATA,
         RTC_GET_TASK,
         RTC_NODES_HEALTH_CHECK,
+        RTS_QUOTA_USAGE,
+        RTC_CREATE_RATE_LIMITER_RESOURCE,
+        RTC_DELETE_RATE_LIMITER_RESOURCE,
         RTC_MAX,
     };
 
@@ -141,14 +216,18 @@ class TYdbControlPlaneStorageActor : public NActors::TActorBootstrapped<TYdbCont
             { MakeIntrusive<TRequestCounters>("WriteResultData") },
             { MakeIntrusive<TRequestCounters>("GetTask") },
             { MakeIntrusive<TRequestCounters>("NodesHealthCheck") },
+            { MakeIntrusive<TRequestCounters>("GetQuotaUsage") },
+            { MakeIntrusive<TRequestCounters>("CreateRateLimiterResource") },
+            { MakeIntrusive<TRequestCounters>("DeleteRateLimiterResource") },
         });
 
         TMap<TMetricsScope, TScopeCountersPtr> ScopeCounters;
         TMap<TMetricsScope, TFinalStatusCountersPtr> FinalStatusCounters;
-        NMonitoring::TDynamicCounterPtr Counters;
 
     public:
-        explicit TCounters(const NMonitoring::TDynamicCounterPtr& counters)
+        ::NMonitoring::TDynamicCounterPtr Counters;
+
+        explicit TCounters(const ::NMonitoring::TDynamicCounterPtr& counters)
             : Counters(counters)
         {
             for (auto& request: CommonRequests) {
@@ -233,11 +312,17 @@ class TYdbControlPlaneStorageActor : public NActors::TActorBootstrapped<TYdbCont
     NKikimr::TYdbCredentialsProviderFactory CredProviderFactory;
     TString TenantName;
 
+    // Query Quota
+    THashMap<TString, ui32> QueryQuotas;
+    THashMap<TString, TEvQuotaService::TQuotaUsageRequest::TPtr> QueryQuotaRequests;
+    TInstant QuotasUpdatedAt = TInstant::Zero();
+    bool QuotasUpdating = false;
+
 public:
     TYdbControlPlaneStorageActor(
         const NConfig::TControlPlaneStorageConfig& config,
         const NConfig::TCommonConfig& common,
-        const NMonitoring::TDynamicCounterPtr& counters,
+        const ::NMonitoring::TDynamicCounterPtr& counters,
         const ::NYq::TYqSharedResources::TPtr& yqSharedResources,
         const NKikimr::TYdbCredentialsProviderFactory& credProviderFactory,
         const TString& tenantName)
@@ -278,7 +363,12 @@ public:
         hFunc(TEvControlPlaneStorage::TEvGetTaskRequest, Handle);
         hFunc(TEvControlPlaneStorage::TEvPingTaskRequest, Handle);
         hFunc(TEvControlPlaneStorage::TEvNodesHealthCheckRequest, Handle);
+        hFunc(TEvControlPlaneStorage::TEvCreateRateLimiterResourceRequest, Handle);
+        hFunc(TEvControlPlaneStorage::TEvDeleteRateLimiterResourceRequest, Handle);
         hFunc(NMon::TEvHttpInfo, Handle);
+        hFunc(TEvQuotaService::TQuotaUsageRequest, Handle);
+        hFunc(TEvQuotaService::TQuotaLimitChangeRequest, Handle);
+        hFunc(TEvents::TEvCallback, [](TEvents::TEvCallback::TPtr& ev) { ev->Get()->Callback(); } );
     )
 
     void Handle(TEvControlPlaneStorage::TEvCreateQueryRequest::TPtr& ev);
@@ -307,8 +397,16 @@ public:
     void Handle(TEvControlPlaneStorage::TEvWriteResultDataRequest::TPtr& ev);
     void Handle(TEvControlPlaneStorage::TEvGetTaskRequest::TPtr& ev);
     void Handle(TEvControlPlaneStorage::TEvPingTaskRequest::TPtr& ev);
+    void Handle(TEvControlPlaneStorage::TEvCreateRateLimiterResourceRequest::TPtr& ev);
+    void Handle(TEvControlPlaneStorage::TEvDeleteRateLimiterResourceRequest::TPtr& ev);
 
     void Handle(TEvControlPlaneStorage::TEvNodesHealthCheckRequest::TPtr& ev);
+
+    void Handle(TEvQuotaService::TQuotaUsageRequest::TPtr& ev);
+    void Handle(TEvQuotaService::TQuotaLimitChangeRequest::TPtr& ev);
+
+    template <class TEventPtr, class TRequestActor, ERequestTypeCommon requestType>
+    void HandleRateLimiterImpl(TEventPtr& ev);
 
     template<typename T>
     NYql::TIssues ValidateConnection(T& ev, bool clickHousePasswordRequire = true)
@@ -353,7 +451,6 @@ public:
     */
     void CreateDirectory();
     void CreateQueriesTable();
-    void CreatePendingTable();
     void CreatePendingSmallTable();
     void CreateConnectionsTable();
     void CreateJobsTable();
@@ -371,11 +468,8 @@ private:
     */
     bool IsSuperUser(const TString& user);
 
-    void InsertIdempotencyKey(TSqlQueryBuilder& builder, const TString& scope, const TString& idempotencyKey, const TString& response, const TInstant& expireAt);
-
-    void ReadIdempotencyKeyQuery(TSqlQueryBuilder& builder, const TString& scope, const TString& idempotencyKey);
-
     std::pair<TAsyncStatus, std::shared_ptr<TVector<NYdb::TResultSet>>> Read(
+        NActors::TActorSystem* actorSystem,
         const TString& query,
         const NYdb::TParams& params,
         const TRequestCountersPtr& requestCounters,
@@ -384,6 +478,7 @@ private:
         bool retryOnTli = true);
 
     TAsyncStatus Validate(
+        NActors::TActorSystem* actorSystem,
         std::shared_ptr<TMaybe<TTransaction>> transaction,
         size_t item, const TVector<TValidationQuery>& validators,
         TSession session,
@@ -411,39 +506,6 @@ private:
         const TVector<TValidationQuery>& validators = {},
         TTxSettings transactionMode = TTxSettings::SerializableRW(),
         bool retryOnTli = true);
-
-    template<typename T>
-    THashMap<TString, T> GetEntitiesWithVisibilityPriority(const TResultSet& resultSet, const TString& columnName)
-    {
-        THashMap<TString, T> entities;
-        TResultSetParser parser(resultSet);
-        while (parser.TryNextRow()) {
-            T entity;
-            Y_VERIFY(entity.ParseFromString(*parser.ColumnParser(columnName).GetOptionalString()));
-            const TString name = entity.content().name();
-            if (auto it = entities.find(name); it != entities.end()) {
-                const auto visibility = entity.content().acl().visibility();
-                if (visibility == YandexQuery::Acl::PRIVATE) {
-                    entities[name] = std::move(entity);
-                }
-            } else {
-                entities[name] = std::move(entity);
-            }
-        }
-
-        return entities;
-    }
-
-    template<typename T>
-    TVector<T> GetEntities(const TResultSet& resultSet, const TString& columnName)
-    {
-        TVector<T> entities;
-        TResultSetParser parser(resultSet);
-        while (parser.TryNextRow()) {
-            Y_VERIFY(entities.emplace_back().ParseFromString(*parser.ColumnParser(columnName).GetOptionalString()));
-        }
-        return entities;
-    }
 
     template<class ResponseEvent, class Result, class RequestEventPtr>
     TFuture<bool> SendResponse(const TString& name,
@@ -489,7 +551,7 @@ private:
             const auto& request = ev->Get()->Request;
             size_t responseByteSize = 0;
             if (issues) {
-                CPS_LOG_AS_D(*actorSystem, name << ": " << request.DebugString() << " error: " << internalIssues.ToString());
+                CPS_LOG_AS_W(*actorSystem, name << ": {" << TrimForLogs(request.DebugString()) << "} ERROR: " << internalIssues.ToOneLineString());
                 auto event = std::make_unique<ResponseEvent>(issues);
                 event->DebugInfo = debugInfo;
                 responseByteSize = event->GetByteSize();
@@ -502,7 +564,7 @@ private:
                     });
                 }
             } else {
-                CPS_LOG_AS_T(*actorSystem, name << ": " << request.DebugString() << " success");
+                CPS_LOG_AS_T(*actorSystem, name << ": {" << TrimForLogs(result.DebugString()) << "} SUCCESS");
                 auto event = std::make_unique<ResponseEvent>(result);
                 event->DebugInfo = debugInfo;
                 responseByteSize = event->GetByteSize();
@@ -564,7 +626,7 @@ private:
             const auto& request = ev->Get()->Request;
             size_t responseByteSize = 0;
             if (issues) {
-                CPS_LOG_AS_D(*actorSystem, name << ": " << request.DebugString() << " error: " << internalIssues.ToString());
+                CPS_LOG_AS_W(*actorSystem, name << ": {" << request.DebugString() << "} ERROR: " << internalIssues.ToOneLineString());
                 auto event = std::make_unique<ResponseEvent>(issues);
                 event->DebugInfo = debugInfo;
                 responseByteSize = event->GetByteSize();
@@ -577,7 +639,7 @@ private:
                     });
                 }
             } else {
-                CPS_LOG_AS_T(*actorSystem, name << ": " << request.DebugString() << " success");
+                CPS_LOG_AS_T(*actorSystem, name << ": {" << result.DebugString() << "} SUCCESS");
                 auto event = std::make_unique<ResponseEvent>(result, auditDetails);
                 event->DebugInfo = debugInfo;
                 responseByteSize = event->GetByteSize();
@@ -634,7 +696,7 @@ private:
 
             size_t responseByteSize = 0;
             if (issues) {
-                CPS_LOG_AS_D(*actorSystem, name << ": error: " << internalIssues.ToString());
+                CPS_LOG_AS_W(*actorSystem, name << " ERROR: " << internalIssues.ToOneLineString());
                 std::unique_ptr<ResponseEvent> event(new ResponseEvent(issues));
                 event->DebugInfo = debugInfo;
                 responseByteSize = event->GetByteSize();
@@ -647,7 +709,7 @@ private:
                     });
                 }
             } else {
-                CPS_LOG_AS_T(*actorSystem, name << ":  success");
+                CPS_LOG_AS_T(*actorSystem, name << ": SUCCESS");
                 std::unique_ptr<ResponseEvent> event(new ResponseEvent(std::make_from_tuple<ResponseEvent>(result)));
                 event->DebugInfo = debugInfo;
                 responseByteSize = event->GetByteSize();
@@ -690,6 +752,14 @@ private:
 
     static TString MakeLogPrefix(const TString& scope, const TString& user, const TString& id = "") {
         return "[" + scope + ", " + user + (id ? ", " + id : "") + "] ";
+    }
+
+    static TString MakeUserInfo(const TString& user, const TString& token = "") {
+        return "[" + user + (token ? ", " + NKikimr::MaskTicket(token) : "") + "] ";
+    }
+
+    static TString TrimForLogs(const TString& s, ui64 maxLength = 4096) {
+        return s.size() > maxLength ? (s.substr(0, maxLength - 3) + "...") : s;
     }
 
     struct TPickTaskParams {

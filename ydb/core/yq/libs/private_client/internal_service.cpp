@@ -16,7 +16,7 @@
 #define LOG_D(stream) \
     LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::FQ_INTERNAL_SERVICE, stream)
 
-namespace NYq {
+namespace NFq {
 
 NActors::TActorId MakeInternalServiceActorId() {
     constexpr TStringBuf name = "FQINTSRV";
@@ -29,7 +29,7 @@ public:
         const NYq::TYqSharedResources::TPtr& yqSharedResources,
         const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
         const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
-        const NMonitoring::TDynamicCounterPtr& counters)
+        const ::NMonitoring::TDynamicCounterPtr& counters)
         : ServiceCounters(counters->GetSubgroup("subsystem", "InternalService"))
         , EventLatency(ServiceCounters->GetSubgroup("subcomponent", "Latency")->GetHistogram("Latency", NMonitoring::ExponentialHistogram(10, 2, 50)))
         , PrivateClient(
@@ -56,6 +56,8 @@ private:
         hFunc(TEvInternalService::TEvGetTaskRequest, Handle)
         hFunc(TEvInternalService::TEvPingTaskRequest, Handle)
         hFunc(TEvInternalService::TEvWriteResultRequest, Handle)
+        hFunc(TEvInternalService::TEvCreateRateLimiterResourceRequest, Handle)
+        hFunc(TEvInternalService::TEvDeleteRateLimiterResourceRequest, Handle)
     );
 
     void Handle(TEvInternalService::TEvHealthCheckRequest::TPtr& ev) {
@@ -110,7 +112,33 @@ private:
             });
     }
 
-    const NMonitoring::TDynamicCounterPtr ServiceCounters;
+    void Handle(TEvInternalService::TEvCreateRateLimiterResourceRequest::TPtr& ev) {
+        EventLatency->Collect((TInstant::Now() - ev->Get()->SentAt).MilliSeconds());
+        PrivateClient
+            .CreateRateLimiterResource(std::move(ev->Get()->Request))
+            .Subscribe([actorSystem = NActors::TActivationContext::ActorSystem(), senderId = ev->Sender, selfId = SelfId(), cookie = ev->Cookie](const NThreading::TFuture<TCreateRateLimiterResourceResult>& future) {
+                try {
+                    actorSystem->Send(new NActors::IEventHandle(senderId, selfId, new TEvInternalService::TEvCreateRateLimiterResourceResponse(future.GetValue()), 0, cookie));
+                } catch (...) {
+                    actorSystem->Send(new NActors::IEventHandle(senderId, selfId, new TEvInternalService::TEvCreateRateLimiterResourceResponse(CurrentExceptionMessage()), 0, cookie));
+                }
+            });
+    }
+
+    void Handle(TEvInternalService::TEvDeleteRateLimiterResourceRequest::TPtr& ev) {
+        EventLatency->Collect((TInstant::Now() - ev->Get()->SentAt).MilliSeconds());
+        PrivateClient
+            .DeleteRateLimiterResource(std::move(ev->Get()->Request))
+            .Subscribe([actorSystem = NActors::TActivationContext::ActorSystem(), senderId = ev->Sender, selfId = SelfId(), cookie = ev->Cookie](const NThreading::TFuture<TDeleteRateLimiterResourceResult>& future) {
+                try {
+                    actorSystem->Send(new NActors::IEventHandle(senderId, selfId, new TEvInternalService::TEvDeleteRateLimiterResourceResponse(future.GetValue()), 0, cookie));
+                } catch (...) {
+                    actorSystem->Send(new NActors::IEventHandle(senderId, selfId, new TEvInternalService::TEvDeleteRateLimiterResourceResponse(CurrentExceptionMessage()), 0, cookie));
+                }
+            });
+    }
+
+    const ::NMonitoring::TDynamicCounterPtr ServiceCounters;
     const NMonitoring::THistogramPtr EventLatency;
     TPrivateClient PrivateClient;
 };
@@ -119,8 +147,8 @@ NActors::IActor* CreateInternalServiceActor(
     const NYq::TYqSharedResources::TPtr& yqSharedResources,
     const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
     const NYq::NConfig::TPrivateApiConfig& privateApiConfig,
-    const NMonitoring::TDynamicCounterPtr& counters) {
+    const ::NMonitoring::TDynamicCounterPtr& counters) {
         return new TInternalService(yqSharedResources, credentialsProviderFactory, privateApiConfig, counters);
 }
 
-} /* NYq */
+} /* NFq */

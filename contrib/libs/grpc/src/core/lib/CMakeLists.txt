@@ -10,12 +10,12 @@
 add_library(src-core-lib)
 target_compile_options(src-core-lib PRIVATE
   -DGRPC_POSIX_FORK_ALLOW_PTHREAD_ATFORK=1
+  -Wno-everything
 )
 target_include_directories(src-core-lib PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
 )
 target_include_directories(src-core-lib PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
   ${CMAKE_BINARY_DIR}/contrib/libs/grpc
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/src/core/ext/upb-generated
@@ -25,15 +25,14 @@ target_link_libraries(src-core-lib PUBLIC
   contrib-libs-cxxsupp
   yutil
   grpc-third_party-upb
-  ybase-internal-spinlock_wait
+  abseil-cpp-tstring-y_absl-base
   abseil-cpp-tstring-y_absl-container
   abseil-cpp-tstring-y_absl-memory
-  yabseil-cpp-tstring-y_absl-status
-  yabseil-cpp-tstring-y_absl-strings
-  yabsl-strings-cord
-  ystrings-internal-str_format
-  yabseil-cpp-tstring-y_absl-synchronization
-  yabseil-cpp-tstring-y_absl-time
+  abseil-cpp-tstring-y_absl-status
+  abseil-cpp-tstring-y_absl-strings
+  abseil-cpp-tstring-y_absl-synchronization
+  abseil-cpp-tstring-y_absl-time
+  abseil-cpp-tstring-y_absl-types
 )
 target_sources(src-core-lib PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/src/core/ext/upb-generated/google/protobuf/any.upb.c

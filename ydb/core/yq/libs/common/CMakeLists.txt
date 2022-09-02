@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(yq-libs-common)
 target_compile_options(yq-libs-common PRIVATE
@@ -14,6 +15,7 @@ target_compile_options(yq-libs-common PRIVATE
 target_link_libraries(yq-libs-common PUBLIC
   contrib-libs-cxxsupp
   yutil
+  library-cpp-blockcodecs
   libs-control_plane_storage-events
   yq-libs-events
   providers-common-structured_token
@@ -21,6 +23,7 @@ target_link_libraries(yq-libs-common PUBLIC
   api-protos
 )
 target_sources(yq-libs-common PRIVATE
+  ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/common/compression.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/common/entity_id.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/common/rows_proto_splitter.cpp
 )

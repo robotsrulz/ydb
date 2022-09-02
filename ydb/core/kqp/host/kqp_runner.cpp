@@ -97,12 +97,17 @@ class TScanAsyncRunResult : public TKqpAsyncResultBase<IKikimrQueryExecutor::TQu
 public:
     using TResult = IKikimrQueryExecutor::TQueryResult;
 
-    TScanAsyncRunResult(const TExprNode::TPtr& queryRoot, TExprContext& exprCtx, IGraphTransformer& transformer)
-        : TKqpAsyncResultBase(queryRoot, exprCtx, transformer) {}
+    TScanAsyncRunResult(const TExprNode::TPtr& queryRoot, TExprContext& exprCtx, IGraphTransformer& transformer,
+        const TKqlTransformContext& transformCtx)
+        : TKqpAsyncResultBase(queryRoot, exprCtx, transformer)
+        , TransformCtx(transformCtx) {}
 
     void FillResult(TResult& queryResult) const override {
-        Y_UNUSED(queryResult);
+        queryResult.QueryStats.CopyFrom(TransformCtx.QueryStats);
     }
+
+private:
+    const TKqlTransformContext& TransformCtx;
 };
 
 class TKqpIterationGuardTransformer : public TSyncTransformerBase {
@@ -156,8 +161,8 @@ public:
         KqlTypeAnnTransformer = CreateTypeAnnotationTransformer(CreateExtCallableTypeAnnotationTransformer(*typesCtx),
             *typesCtx);
 
-        auto logLevel = NLog::ELevel::TRACE;
-        auto logComp = NLog::EComponent::ProviderKqp;
+        auto logLevel = NYql::NLog::ELevel::TRACE;
+        auto logComp = NYql::NLog::EComponent::ProviderKqp;
 
         KqlOptimizeTransformer = TTransformationPipeline(typesCtx)
             .AddServiceTransformers()
@@ -475,11 +480,13 @@ private:
 
         auto operations = TableOperationsToProto(dataQuery.Operations(), ctx);
         for (auto& op : operations) {
-            const auto& tableName = op.GetTable();
+            const auto tableName = op.GetTable();
+            auto operation = static_cast<TYdbOperation>(op.GetOperation());
 
-            kql->AddOperations()->CopyFrom(op);
+            *kql->AddOperations() = std::move(op);
+
             const auto& desc = TransformCtx->Tables->GetTable(cluster, tableName);
-            TableDescriptionToTableInfo(desc, kql->AddTableInfo());
+            TableDescriptionToTableInfo(desc, operation, *kql->MutableTableInfo());
         }
 
         TransformCtx->PreparingKql = kql;
@@ -516,7 +523,7 @@ private:
         }
 
         auto query = kqlQuery->Ptr();
-        YQL_CLOG(INFO, ProviderKqp) << "Initial KQL query: " << KqpExprToPrettyString(*query, ctx);
+        YQL_CLOG(DEBUG, ProviderKqp) << "Initial KQL query: " << KqpExprToPrettyString(*query, ctx);
 
         TransformCtx->Reset();
         TransformCtx->Settings = NKikimrKqp::TKqlSettings();
@@ -529,7 +536,9 @@ private:
             return MakeKikimrResultHolder(ResultFromErrors<IKqpHost::TQueryResult>(ctx.IssueManager.GetIssues()));
         }
 
-        YQL_CLOG(INFO, ProviderKqp) << "Optimized KQL query: " << KqpExprToPrettyString(*optimizedQuery, ctx);
+        YQL_CLOG(TRACE, ProviderKqp) << "PhysicalOptimizeTransformer: "
+            << TransformerStatsToYson(PhysicalOptimizeTransformer->GetStatistics());
+        YQL_CLOG(DEBUG, ProviderKqp) << "Optimized KQL query: " << KqpExprToPrettyString(*optimizedQuery, ctx);
 
         BuildQueryCtx->Reset();
         PhysicalBuildQueryTransformer->Rewind();
@@ -540,6 +549,9 @@ private:
             return MakeKikimrResultHolder(ResultFromErrors<IKqpHost::TQueryResult>(ctx.IssueManager.GetIssues()));
         }
 
+        YQL_CLOG(TRACE, ProviderKqp) << "PhysicalBuildQueryTransformer: "
+            << TransformerStatsToYson(PhysicalBuildQueryTransformer->GetStatistics());
+
         PhysicalPeepholeTransformer->Rewind();
         auto transformedQuery = builtQuery;
         status = InstantTransform(*PhysicalPeepholeTransformer, transformedQuery, ctx);
@@ -549,7 +561,9 @@ private:
                 ctx.IssueManager.GetIssues()));
         }
 
-        YQL_CLOG(INFO, ProviderKqp) << "Physical KQL query: " << KqpExprToPrettyString(*builtQuery, ctx);
+        YQL_CLOG(TRACE, ProviderKqp) << "PhysicalPeepholeTransformer: "
+            << TransformerStatsToYson(PhysicalPeepholeTransformer->GetStatistics());
+        YQL_CLOG(DEBUG, ProviderKqp) << "Physical KQL query: " << KqpExprToPrettyString(*builtQuery, ctx);
 
         auto& preparedQuery = *TransformCtx->QueryCtx->PreparingQuery;
         TKqpPhysicalQuery physicalQuery(transformedQuery);
@@ -600,7 +614,7 @@ private:
 
         Y_ASSERT(!TxState->Tx().GetSnapshot().IsValid());
 
-        return MakeIntrusive<TScanAsyncRunResult>(world, ctx, *ScanRunQueryTransformer);
+        return MakeIntrusive<TScanAsyncRunResult>(world, ctx, *ScanRunQueryTransformer, *TransformCtx);
     }
 
     static bool MergeFlagValue(const TMaybe<bool>& configFlag, const TMaybe<bool>& flag) {

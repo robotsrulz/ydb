@@ -28,6 +28,8 @@ IActor* CreateNodesManager(
     const NConfig::TPrivateApiConfig& privateApiConfig,
     const NYq::TYqSharedResources::TPtr& yqSharedResources,
     const ui32& icPort,
+    const TString& dataCenter = "",
+    bool useDataCenter = false,
     const TString& tenant = "",
     ui64 mkqlInitialMemoryLimit = 0);
 

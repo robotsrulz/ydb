@@ -8,9 +8,11 @@ namespace NHttp {
 struct TPlainSocketImpl : virtual public THttpConfig {
     TIntrusivePtr<TSocketDescriptor> Socket;
 
-    TPlainSocketImpl()
-        : Socket(new TSocketDescriptor())
-    {}
+    TPlainSocketImpl() = default;
+
+    void Create(int af) {
+        Socket = new TSocketDescriptor(af);
+    }
 
     TPlainSocketImpl(TIntrusivePtr<TSocketDescriptor> socket)
         : Socket(std::move(socket))
@@ -38,18 +40,20 @@ struct TPlainSocketImpl : virtual public THttpConfig {
 
     void Shutdown() {
         //Socket->Socket.ShutDown(SHUT_RDWR); // KIKIMR-3895
-        ::shutdown(Socket->Socket, SHUT_RDWR);
+        if (Socket) {
+            ::shutdown(Socket->Socket, SHUT_RDWR);
+        }
     }
 
-    int Connect(const SocketAddressType& address) {
-        return Socket->Socket.Connect(&address);
+    int Connect(SocketAddressType address) {
+        return Socket->Socket.Connect(address.get());
     }
 
     static constexpr int OnConnect(bool&, bool&) {
         return 1;
     }
 
-    static constexpr int OnAccept(const TEndpointInfo&, bool&, bool&) {
+    static int OnAccept(std::shared_ptr<TPrivateEndpointInfo>, bool&, bool&) {
         return 1;
     }
 
@@ -237,9 +241,9 @@ struct TSecureSocketImpl : TPlainSocketImpl, TSslHelpers {
         return res;
     }
 
-    int OnAccept(const TEndpointInfo& endpoint, bool& read, bool& write) {
+    int OnAccept(std::shared_ptr<TPrivateEndpointInfo> endpoint, bool& read, bool& write) {
         if (!Ssl) {
-            InitServerSsl(endpoint.SecureContext.Get());
+            InitServerSsl(endpoint->SecureContext.Get());
         }
         int res = SSL_accept(Ssl.Get());
         if (res <= 0) {

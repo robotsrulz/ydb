@@ -25,6 +25,7 @@ ALTER TABLE episodes DROP column is_deleted;
 ```
 
 {% if feature_secondary_index %}
+
 ## Добавление или удаление вторичного индекса {#secondary-index}
 
 ```ADD INDEX``` — добавляет индекс с указанным именем и типом для заданного набора колонок. Приведенный ниже код добавит глобальный индекс с именем ```title_index``` для колонки ```title```.
@@ -42,7 +43,45 @@ ALTER TABLE `series` ADD INDEX `title_index` GLOBAL ON (`title`);
 ```sql
 ALTER TABLE `series` DROP INDEX `title_index`;
 ```
+
+Также добавить или удалить вторичный индекс можно с помощью команды [table index](https://ydb.tech/ru/docs/reference/ydb-cli/commands/secondary_index) {{ ydb-short-name }} CLI.
+
 {% endif %}
+
+{% if feature_changefeed %}
+
+## Добавление или удаление потока данных {#changefeed}
+
+`ADD CHANGEFEED <name> WITH (option = value[, ...])` — добавляет [поток данных](../../../../concepts/cdc) с указанным именем и параметрами.
+
+### Параметры Changefeed {#changefeed-options}
+
+* `MODE` — режим работы. Указывает, что именно будет записано в changefeed при каждом изменении данных в таблице.
+  * `KEYS_ONLY` — будут записаны только компоненты первичного ключа и признак изменения.
+  * `UPDATES` — будут записаны значения изменившихся столбцов, получившиеся в результате изменения.
+  * `NEW_IMAGE` — будут записаны значения всех столбцов, получившиеся в результате изменения.
+  * `OLD_IMAGE` — будут записаны значения всех столбцов, предшествующие изменению.
+  * `NEW_AND_OLD_IMAGES` - комбинация режимов `NEW_IMAGE` и `OLD_IMAGE`. Будут записаны значения всех столбцов _до_ и _в результате_ изменения.
+* `FORMAT` — формат данных, в котором будут записаны данные.
+  * `JSON` — структура записи приведена на странице [описания changefeed](../../../../concepts/cdc#record-structure).
+
+Приведенный ниже код добавит поток данных с именем `updates_feed`, в который будут выгружаться значения изменившихся столбцов таблицы в формате JSON:
+
+```sql
+ALTER TABLE `series` ADD CHANGEFEED `updates_feed` WITH (
+    FORMAT = 'JSON',
+    MODE = 'UPDATES'
+);
+```
+
+`DROP CHANGEFEED` — удаляет поток данных с указанным именем. Приведенный ниже код удалит changefeed с именем `updates_feed`:
+
+```sql
+ALTER TABLE `series` DROP CHANGEFEED `updates_feed`;
+```
+
+{% endif %}
+
 {% if feature_map_tables %}
 
 ## Переименование таблицы {#rename}
@@ -94,6 +133,12 @@ ALTER TABLE series_with_families
 ```sql
 ALTER TABLE series_with_families ALTER FAMILY default SET DATA "hdd";
 ```
+
+{% note info %}
+
+Доступные типы устройств хранения зависят от конфигурации кластера {{ ydb-short-name }}.
+
+{% endnote %}
 
 Могут быть указаны все параметры группы колонок, описанные в команде [`CREATE TABLE`](create_table#column-family)
 

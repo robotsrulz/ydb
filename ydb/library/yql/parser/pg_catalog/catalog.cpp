@@ -9,33 +9,7 @@
 namespace NYql::NPg {
 
 constexpr ui32 AnyOid = 2276;
-
-bool IsCompatibleTo(ui32 actualType, ui32 expectedType) {
-    if (!actualType) {
-        return true;
-    }
-
-    if (expectedType == AnyOid) {
-        return true;
-    }
-
-    return actualType == expectedType;
-}
-
-TString ArgTypesList(const TVector<ui32>& ids) {
-    TStringBuilder str;
-    str << '(';
-    for (ui32 i = 0; i < ids.size(); ++i) {
-        if (i > 0) {
-            str << ',';
-        }
-
-        str << LookupType(ids[i]).Name;
-    }
-
-    str << ')';
-    return str;
-}
+constexpr ui32 AnyArrayOid = 2277;
 
 using TOperators = THashMap<ui32, TOperDesc>;
 
@@ -52,6 +26,43 @@ using TOpClasses = THashMap<std::pair<EOpClassMethod, ui32>, TOpClassDesc>;
 using TAmOps = THashMap<std::tuple<TString, ui32, ui32, ui32>, TAmOpDesc>;
 
 using TAmProcs = THashMap<std::tuple<TString, ui32, ui32, ui32>, TAmProcDesc>;
+
+bool IsCompatibleTo(ui32 actualType, ui32 expectedType, const TTypes& types) {
+    if (!actualType) {
+        return true;
+    }
+
+    if (actualType == expectedType) {
+        return true;
+    }
+
+    if (expectedType == AnyOid) {
+        return true;
+    }
+
+    if (expectedType == AnyArrayOid) {
+        const auto& actualDescPtr = types.FindPtr(actualType);
+        Y_ENSURE(actualDescPtr);
+        return actualDescPtr->ArrayTypeId == actualDescPtr->TypeId;
+    }
+
+    return false;
+}
+
+TString ArgTypesList(const TVector<ui32>& ids) {
+    TStringBuilder str;
+    str << '(';
+    for (ui32 i = 0; i < ids.size(); ++i) {
+        if (i > 0) {
+            str << ',';
+        }
+
+        str << (ids[i] ? LookupType(ids[i]).Name : "NULL");
+    }
+
+    str << ')';
+    return str;
+}
 
 class TParser {
 public:
@@ -141,7 +152,7 @@ public:
     virtual void OnKey(const TString& key, const TString& value) = 0;
 };
 
-bool ValidateOperArgs(const TOperDesc& d, const TVector<ui32>& argTypeIds) {
+bool ValidateOperArgs(const TOperDesc& d, const TVector<ui32>& argTypeIds, const TTypes& types) {
     ui32 size = d.Kind == EOperKind::Binary ? 2 : 1;
     if (argTypeIds.size() != size) {
         return false;
@@ -156,7 +167,7 @@ bool ValidateOperArgs(const TOperDesc& d, const TVector<ui32>& argTypeIds) {
             expectedArgType = d.RightType;
         }
 
-        if (!IsCompatibleTo(argTypeIds[i], expectedArgType)) {
+        if (!IsCompatibleTo(argTypeIds[i], expectedArgType, types)) {
             return false;
         }
     }
@@ -166,10 +177,11 @@ bool ValidateOperArgs(const TOperDesc& d, const TVector<ui32>& argTypeIds) {
 
 class TOperatorsParser : public TParser {
 public:
-    TOperatorsParser(TOperators& operators, const THashMap<TString, ui32>& typeByName,
+    TOperatorsParser(TOperators& operators, const THashMap<TString, ui32>& typeByName, const TTypes& types,
         const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs)
         : Operators(operators)
         , TypeByName(typeByName)
+        , Types(types)
         , ProcByName(procByName)
         , Procs(procs)
     {}
@@ -218,7 +230,7 @@ public:
                 for (auto procId : *procIdPtr) {
                     auto procPtr = Procs.FindPtr(procId);
                     Y_ENSURE(procPtr);
-                    if (ValidateOperArgs(LastOperator, procPtr->ArgTypes)) {
+                    if (ValidateOperArgs(LastOperator, procPtr->ArgTypes, Types)) {
                         Y_ENSURE(!LastOperator.ProcId);
                         LastOperator.ProcId = procId;
                     }
@@ -240,6 +252,7 @@ public:
 private:
     TOperators& Operators;
     const THashMap<TString, ui32>& TypeByName;
+    const TTypes& Types;
     const THashMap<TString, TVector<ui32>>& ProcByName;
     const TProcs& Procs;
     TOperDesc LastOperator;
@@ -318,6 +331,8 @@ struct TLazyTypeInfo {
     TString OutFunc;
     TString SendFunc;
     TString ReceiveFunc;
+    TString ModInFunc;
+    TString ModOutFunc;
 };
 
 class TTypesParser : public TParser {
@@ -345,6 +360,16 @@ public:
             } else {
                 LastType.TypeLen = FromString<i32>(value);
             }
+        } else if (key == "typalign") {
+            if (value == "ALIGNOF_POINTER") {
+                LastType.TypeAlign = 'i'; // doesn't matter for pointers
+            } else {
+                Y_ENSURE(value.size() == 1);
+                LastType.TypeAlign = value[0];
+            }
+        } else if (key == "typdelim") {
+            Y_ENSURE(value.size() == 1);
+            LastType.TypeDelim = value[0];
         } else if (key == "typelem") {
             LastLazyTypeInfo.ElementType = value; // resolve later
         } else if (key == "typinput") {
@@ -355,6 +380,10 @@ public:
             LastLazyTypeInfo.SendFunc = value; // resolve later
         } else if (key == "typreceive") {
             LastLazyTypeInfo.ReceiveFunc = value; // resolve later
+        } else if (key == "typmodin") {
+            LastLazyTypeInfo.ModInFunc = value; // resolve later
+        } else if (key == "typmodout") {
+            LastLazyTypeInfo.ModOutFunc = value; // resolve later
         } else if (key == "typbyval") {
             if (value == "f") {
                 LastType.PassByValue = false;
@@ -378,6 +407,7 @@ public:
             arrayType.Name = "_" + arrayType.Name;
             arrayType.ElementTypeId = arrayType.TypeId;
             arrayType.TypeId = LastType.ArrayTypeId;
+            arrayType.PassByValue = false;
             Types[LastType.ArrayTypeId] = arrayType;
         }
 
@@ -396,10 +426,11 @@ private:
 
 class TCastsParser : public TParser {
 public:
-    TCastsParser(TCasts& casts, const THashMap<TString, ui32>& typeByName,
+    TCastsParser(TCasts& casts, const THashMap<TString, ui32>& typeByName, const TTypes& types,
         const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs)
         : Casts(casts)
         , TypeByName(typeByName)
+        , Types(types)
         , ProcByName(procByName)
         , Procs(procs)
     {}
@@ -437,7 +468,7 @@ public:
                             continue;
                         }
 
-                        if (IsCompatibleTo(*inputTypeIdPtr, procPtr->ArgTypes[0])) {
+                        if (IsCompatibleTo(*inputTypeIdPtr, procPtr->ArgTypes[0], Types)) {
                             LastCast.FunctionId = procPtr->ProcId;
                             found = true;
                             break;
@@ -481,6 +512,7 @@ public:
 private:
     TCasts& Casts;
     const THashMap<TString, ui32>& TypeByName;
+    const TTypes& Types;
     const THashMap<TString, TVector<ui32>>& ProcByName;
     const TProcs& Procs;
     TCastDesc LastCast;
@@ -490,9 +522,10 @@ private:
 class TAggregationsParser : public TParser {
 public:
     TAggregationsParser(TAggregations& aggregations, const THashMap<TString, ui32>& typeByName,
-        const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs)
+        const TTypes& types, const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs)
         : Aggregations(aggregations)
         , TypeByName(typeByName)
+        , Types(types)
         , ProcByName(procByName)
         , Procs(procs)
     {}
@@ -561,7 +594,8 @@ public:
         for (const auto id : *transFuncIdsPtr) {
             auto procPtr = Procs.FindPtr(id);
             Y_ENSURE(procPtr);
-            if (procPtr->ArgTypes.size() >= 1 && IsCompatibleTo(LastAggregation.TransTypeId, procPtr->ArgTypes[0])) {
+            if (procPtr->ArgTypes.size() >= 1 &&
+                IsCompatibleTo(LastAggregation.TransTypeId, procPtr->ArgTypes[0], Types)) {
                 Y_ENSURE(!LastAggregation.TransFuncId);
                 LastAggregation.TransFuncId = id;
             }
@@ -599,7 +633,7 @@ public:
             Y_ENSURE(procPtr);
             LastAggregation.ArgTypes = procPtr->ArgTypes;
             Y_ENSURE(LastAggregation.ArgTypes.size() >= 1);
-            Y_ENSURE(IsCompatibleTo(LastAggregation.TransTypeId, LastAggregation.ArgTypes[0]));
+            Y_ENSURE(IsCompatibleTo(LastAggregation.TransTypeId, LastAggregation.ArgTypes[0], Types));
             LastAggregation.ArgTypes.erase(LastAggregation.ArgTypes.begin());
         }
 
@@ -640,7 +674,7 @@ public:
                 bool found = true;
                 if (stateArgsCount > 0 && procPtr->ArgTypes.size() == stateArgsCount) {
                     for (ui32 i = 0; i < stateArgsCount; ++i) {
-                        if (!IsCompatibleTo(LastAggregation.TransTypeId, procPtr->ArgTypes[i])) {
+                        if (!IsCompatibleTo(LastAggregation.TransTypeId, procPtr->ArgTypes[i], Types)) {
                             found = false;
                             break;
                         }
@@ -662,6 +696,7 @@ public:
 private:
     TAggregations& Aggregations;
     const THashMap<TString, ui32>& TypeByName;
+    const TTypes& Types;
     const THashMap<TString, TVector<ui32>>& ProcByName;
     const TProcs& Procs;
     TAggregateDesc LastAggregation;
@@ -720,10 +755,11 @@ private:
 
 class TAmOpsParser : public TParser {
 public:
-    TAmOpsParser(TAmOps& amOps, const THashMap<TString, ui32>& typeByName,
+    TAmOpsParser(TAmOps& amOps, const THashMap<TString, ui32>& typeByName, const TTypes& types,
         const THashMap<TString, TVector<ui32>>& operatorsByName, const TOperators& operators)
         : AmOps(amOps)
         , TypeByName(typeByName)
+        , Types(types)
         , OperatorsByName(operatorsByName)
         , Operators(operators)
     {}
@@ -754,7 +790,9 @@ public:
         for (const auto& id : *operIdPtr) {
             const auto& d = Operators.FindPtr(id);
             Y_ENSURE(d);
-            if (d->Kind == EOperKind::Binary && IsCompatibleTo(LastAmOp.LeftType, d->LeftType) && IsCompatibleTo(LastAmOp.RightType, d->RightType)) {
+            if (d->Kind == EOperKind::Binary &&
+                IsCompatibleTo(LastAmOp.LeftType, d->LeftType, Types) &&
+                IsCompatibleTo(LastAmOp.RightType, d->RightType, Types)) {
                 Y_ENSURE(!LastAmOp.OperId);
                 LastAmOp.OperId = d->OperId;
             }
@@ -770,6 +808,7 @@ public:
 private:
     TAmOps& AmOps;
     const THashMap<TString, ui32>& TypeByName;
+    const TTypes& Types;
     const THashMap<TString, TVector<ui32>>& OperatorsByName;
     const TOperators& Operators;
     TAmOpDesc LastAmOp;
@@ -833,17 +872,17 @@ private:
 };
 
 TOperators ParseOperators(const TString& dat, const THashMap<TString, ui32>& typeByName,
-    const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs) {
+    const TTypes& types, const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs) {
     TOperators ret;
-    TOperatorsParser parser(ret, typeByName, procByName, procs);
+    TOperatorsParser parser(ret, typeByName, types, procByName, procs);
     parser.Do(dat);
     return ret;
 }
 
 TAggregations ParseAggregations(const TString& dat, const THashMap<TString, ui32>& typeByName,
-    const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs) {
+    const TTypes& types, const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs) {
     TAggregations ret;
-    TAggregationsParser parser(ret, typeByName, procByName, procs);
+    TAggregationsParser parser(ret, typeByName, types, procByName, procs);
     parser.Do(dat);
     return ret;
 }
@@ -862,10 +901,10 @@ TTypes ParseTypes(const TString& dat, THashMap<ui32, TLazyTypeInfo>& lazyInfos) 
     return ret;
 }
 
-TCasts ParseCasts(const TString& dat, const THashMap<TString, ui32>& typeByName,
+TCasts ParseCasts(const TString& dat, const THashMap<TString, ui32>& typeByName, const TTypes& types,
     const THashMap<TString, TVector<ui32>>& procByName, const TProcs& procs) {
     TCasts ret;
-    TCastsParser parser(ret, typeByName, procByName, procs);
+    TCastsParser parser(ret, typeByName, types, procByName, procs);
     parser.Do(dat);
     return ret;
 }
@@ -877,10 +916,10 @@ TOpClasses ParseOpClasses(const TString& dat, const THashMap<TString, ui32>& typ
     return ret;
 }
 
-TAmOps ParseAmOps(const TString& dat, const THashMap<TString, ui32>& typeByName,
+TAmOps ParseAmOps(const TString& dat, const THashMap<TString, ui32>& typeByName, const TTypes& types,
     const THashMap<TString, TVector<ui32>>& operatorsByName, const TOperators& operators) {
     TAmOps ret;
-    TAmOpsParser parser(ret, typeByName, operatorsByName, operators);
+    TAmOpsParser parser(ret, typeByName, types, operatorsByName, operators);
     parser.Do(dat);
     return ret;
 }
@@ -987,25 +1026,45 @@ struct TCatalog {
                 Y_ENSURE(sendFuncPtr->ResultType == byteaId);
                 typePtr->SendFuncId = sendFuncIdPtr->at(0);
             }
+
+            if (v.ModInFunc) {
+                auto modInFuncIdPtr = ProcByName.FindPtr(v.ModInFunc);
+                Y_ENSURE(modInFuncIdPtr);
+                Y_ENSURE(modInFuncIdPtr->size() == 1);
+                auto modInFuncPtr = Procs.FindPtr(modInFuncIdPtr->at(0));
+                Y_ENSURE(modInFuncPtr);
+                Y_ENSURE(modInFuncPtr->ArgTypes.size() == 1);
+                typePtr->TypeModInFuncId = modInFuncIdPtr->at(0);
+            }
+
+            if (v.ModOutFunc) {
+                auto modOutFuncIdPtr = ProcByName.FindPtr(v.ModOutFunc);
+                Y_ENSURE(modOutFuncIdPtr);
+                Y_ENSURE(modOutFuncIdPtr->size() == 1);
+                auto modOutFuncPtr = Procs.FindPtr(modOutFuncIdPtr->at(0));
+                Y_ENSURE(modOutFuncPtr);
+                Y_ENSURE(modOutFuncPtr->ArgTypes.size() == 1);
+                typePtr->TypeModOutFuncId = modOutFuncIdPtr->at(0);
+            }
         }
 
-        Casts = ParseCasts(castData, TypeByName, ProcByName, Procs);
+        Casts = ParseCasts(castData, TypeByName, Types, ProcByName, Procs);
         for (const auto&[k, v] : Casts) {
             Y_ENSURE(CastsByDir.insert(std::make_pair(std::make_pair(v.SourceId, v.TargetId), k)).second);
         }
 
-        Operators = ParseOperators(opData, TypeByName, ProcByName, Procs);
+        Operators = ParseOperators(opData, TypeByName, Types, ProcByName, Procs);
         for (const auto&[k, v] : Operators) {
             OperatorsByName[v.Name].push_back(k);
         }
 
-        Aggregations = ParseAggregations(aggData, TypeByName, ProcByName, Procs);
+        Aggregations = ParseAggregations(aggData, TypeByName, Types, ProcByName, Procs);
         for (const auto&[k, v] : Aggregations) {
             AggregationsByName[v.Name].push_back(k);
         }
 
         OpClasses = ParseOpClasses(opClassData, TypeByName);
-        AmOps = ParseAmOps(amOpData, TypeByName, OperatorsByName, Operators);
+        AmOps = ParseAmOps(amOpData, TypeByName, Types, OperatorsByName, Operators);
         AmProcs = ParseAmProcs(amProcData, TypeByName, ProcByName, Procs);
         for (auto&[k, v] : Types) {
             if (v.TypeId != v.ArrayTypeId) {
@@ -1082,7 +1141,7 @@ const TProcDesc& LookupProc(ui32 procId, const TVector<ui32>& argTypeIds) {
     }
 
     if (!ValidateProcArgs(*procPtr, argTypeIds)) {
-        throw yexception() << "Unable to find an overload for proc with oid " << procId << " with given argument types:" <<
+        throw yexception() << "Unable to find an overload for proc with oid " << procId << " with given argument types: " <<
             ArgTypesList(argTypeIds);
     }
 
@@ -1106,7 +1165,7 @@ const TProcDesc& LookupProc(const TString& name, const TVector<ui32>& argTypeIds
         return *d;
     }
 
-    throw yexception() << "Unable to find an overload for proc " << name << " with given argument types:"
+    throw yexception() << "Unable to find an overload for proc " << name << " with given argument types: "
         << ArgTypesList(argTypeIds);
 }
 
@@ -1165,6 +1224,13 @@ const TTypeDesc& LookupType(ui32 typeId) {
     return *typePtr;
 }
 
+void EnumTypes(std::function<void(ui32, const TTypeDesc&)> f) {
+    const auto& catalog = TCatalog::Instance();
+    for (const auto& [typeId, desc] : catalog.Types) {
+        f(typeId, desc);
+    }
+}
+
 bool HasCast(ui32 sourceId, ui32 targetId) {
     const auto& catalog = TCatalog::Instance();
     return catalog.CastsByDir.contains(std::make_pair(sourceId, targetId));
@@ -1192,7 +1258,7 @@ const TOperDesc& LookupOper(const TString& name, const TVector<ui32>& argTypeIds
     for (const auto& id : *operIdPtr) {
         const auto& d = catalog.Operators.FindPtr(id);
         Y_ENSURE(d);
-        if (!ValidateOperArgs(*d, argTypeIds)) {
+        if (!ValidateOperArgs(*d, argTypeIds, catalog.Types)) {
             continue;
         }
 
@@ -1210,7 +1276,7 @@ const TOperDesc& LookupOper(ui32 operId, const TVector<ui32>& argTypeIds) {
         throw yexception() << "No such oper: " << operId;
     }
 
-    if (!ValidateOperArgs(*operPtr, argTypeIds)) {
+    if (!ValidateOperArgs(*operPtr, argTypeIds, catalog.Types)) {
         throw yexception() << "Unable to find an overload for operator with oid " << operId << " with given argument types: "
             << ArgTypesList(argTypeIds);
     }
@@ -1291,6 +1357,11 @@ const TAmProcDesc& LookupAmProc(const TString& family, ui32 num, ui32 leftType, 
     }
 
     return *amProcPtr;
+}
+
+bool IsCompatibleTo(ui32 actualType, ui32 expectedType) {
+    const auto& catalog = TCatalog::Instance();
+    return IsCompatibleTo(actualType, expectedType, catalog.Types);
 }
 
 }

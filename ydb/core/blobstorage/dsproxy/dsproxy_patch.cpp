@@ -33,7 +33,6 @@ class TBlobStorageGroupPatchRequest : public TBlobStorageGroupRequestActor<TBlob
     static constexpr ui32 TypicalMaxPartsCount = TypicalPartPlacementCount * TypicalPartsInBlob;
 
     TString Buffer;
-    TActorId ProxyActorId;
 
     ui32 OriginalGroupId;
     TLogoBlobID OriginalId;
@@ -90,11 +89,10 @@ public:
             const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TEvBlobStorage::TEvPatch *ev,
             ui64 cookie, NWilson::TTraceId traceId, TInstant now,
             TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters,
-            const TActorId &proxyId, bool useVPatch = false)
+            bool useVPatch = false)
         : TBlobStorageGroupRequestActor(info, state, mon, source, cookie, std::move(traceId),
                 NKikimrServices::BS_PROXY_PATCH, false, {}, now, storagePoolCounters,
-                ev->RestartCounter)
-        , ProxyActorId(proxyId)
+                ev->RestartCounter, "DSProxy.Patch")
         , OriginalGroupId(ev->OriginalGroupId)
         , OriginalId(ev->OriginalId)
         , PatchedId(ev->PatchedId)
@@ -138,7 +136,6 @@ public:
     void Handle(TEvBlobStorage::TEvGetResult::TPtr &ev) {
         TEvBlobStorage::TEvGetResult *result = ev->Get();
         Orbit = std::move(result->Orbit);
-        TraceId = std::move(ev->TraceId);
 
         ui32 patchedIdHash = PatchedId.Hash();
         bool incorrectCookie = ev->Cookie != patchedIdHash;
@@ -173,13 +170,12 @@ public:
         std::unique_ptr<TEvBlobStorage::TEvPut> put = std::make_unique<TEvBlobStorage::TEvPut>(PatchedId, Buffer, Deadline,
                 NKikimrBlobStorage::AsyncBlob, TEvBlobStorage::TEvPut::TacticDefault);
         put->Orbit = std::move(Orbit);
-        Send(ProxyActorId, put.release(), 0, OriginalId.Hash(), std::move(TraceId));
+        SendToProxy(std::move(put), OriginalId.Hash(), Span.GetTraceId());
     }
 
     void Handle(TEvBlobStorage::TEvPutResult::TPtr &ev) {
         TEvBlobStorage::TEvPutResult *result = ev->Get();
         Orbit = std::move(result->Orbit);
-        TraceId = std::move(ev->TraceId);
 
         StatusFlags = result->StatusFlags;
         ApproximateFreeSpaceShare = result->ApproximateFreeSpaceShare;
@@ -224,7 +220,6 @@ public:
         NKikimrBlobStorage::TEvVMovedPatchResult &record = result->Record;
         PullOutStatusFlagsAndFressSpace(record);
         Orbit = std::move(result->Orbit);
-        TraceId = std::move(ev->TraceId);
 
         ui64 expectedCookie = ((ui64)OriginalId.Hash() << 32) | PatchedId.Hash();
         bool incorrectCookie = ev->Cookie != expectedCookie;
@@ -428,7 +423,7 @@ public:
 
         for (const TPartPlacement &partPlacement : placement) {
             ui32 idxInSubgroup = partPlacement.VDiskIdxInSubgroup;
-            ui32 patchedPartId = partPlacement.PartId;
+            // ui32 patchedPartId = partPlacement.PartId;
             Y_VERIFY_S(idxInSubgroup < VDisks.size(), "vdisidxInSubgroupkIdx# " << idxInSubgroup << "/" << VDisks.size());
 
             Y_VERIFY(Info->GetIdxInSubgroup(VDisks[idxInSubgroup], OriginalId.Hash()) == idxInSubgroup);
@@ -436,7 +431,7 @@ public:
             if (patchedIdxInSubgroup != idxInSubgroup) {
                 // now only mirror3dc has this case (has 9 vdisks instead of 4 or 8)
                 Y_VERIFY(Info->Type.GetErasure() == TErasureType::ErasureMirror3dc);
-                patchedPartId = 1 + patchedIdxInSubgroup / 3;;
+                // patchedPartId = 1 + patchedIdxInSubgroup / 3;;
             }
 
             ReceivedResponseFlags[idxInSubgroup] = false;
@@ -531,9 +526,9 @@ public:
             NKikimrBlobStorage::AsyncRead);
         get->Orbit = std::move(Orbit);
         if (OriginalGroupId == Info->GroupID) {
-            Send(ProxyActorId, get.release(), 0, PatchedId.Hash(), std::move(TraceId));
+            SendToProxy(std::move(get), PatchedId.Hash(), Span.GetTraceId());
         } else {
-            SendToBSProxy(SelfId(), OriginalGroupId, get.release(), PatchedId.Hash(), std::move(TraceId));
+            SendToBSProxy(SelfId(), OriginalGroupId, get.release(), PatchedId.Hash(), Span.GetTraceId());
         }
     }
 
@@ -827,9 +822,9 @@ IActor* CreateBlobStorageGroupPatchRequest(const TIntrusivePtr<TBlobStorageGroup
         const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TEvBlobStorage::TEvPatch *ev,
         ui64 cookie, NWilson::TTraceId traceId, TInstant now,
         TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters,
-        const TActorId &proxyId, bool useVPatch) {
-    return new TBlobStorageGroupPatchRequest(info, state, source, mon, ev, cookie, std::move(traceId),
-            now, storagePoolCounters, proxyId, useVPatch);
+        bool useVPatch) {
+    return new TBlobStorageGroupPatchRequest(info, state, source, mon, ev, cookie, std::move(traceId), now,
+        storagePoolCounters, useVPatch);
 }
 
 }//NKikimr

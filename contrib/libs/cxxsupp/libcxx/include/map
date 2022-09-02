@@ -528,8 +528,10 @@ erase_if(multimap<Key, T, Compare, Allocator>& c, Predicate pred);  // C++20
 
 */
 
+#include <__algorithm/equal.h>
+#include <__algorithm/lexicographical_compare.h>
+#include <__assert>
 #include <__config>
-#include <__debug>
 #include <__functional/is_transparent.h>
 #include <__iterator/iterator_traits.h>
 #include <__node_handle>
@@ -545,7 +547,7 @@ erase_if(multimap<Key, T, Compare, Allocator>& c, Predicate pred);  // C++20
 #include <version>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
-#pragma GCC system_header
+#  pragma GCC system_header
 #endif
 
 _LIBCPP_BEGIN_NAMESPACE_STD
@@ -1368,7 +1370,7 @@ public:
     _LIBCPP_INLINE_VISIBILITY
     iterator  erase(const_iterator __f, const_iterator __l)
         {return __tree_.erase(__f.__i_, __l.__i_);}
-    _LIBCPP_INLINE_VISIBILITY
+    _LIBCPP_REINITIALIZES_OBJECT _LIBCPP_INLINE_VISIBILITY
     void clear() _NOEXCEPT {__tree_.clear();}
 
 #if _LIBCPP_STD_VER > 14
@@ -2110,7 +2112,7 @@ public:
     }
 #endif
 
-    _LIBCPP_INLINE_VISIBILITY
+    _LIBCPP_REINITIALIZES_OBJECT _LIBCPP_INLINE_VISIBILITY
     void clear() _NOEXCEPT {__tree_.clear();}
 
     _LIBCPP_INLINE_VISIBILITY

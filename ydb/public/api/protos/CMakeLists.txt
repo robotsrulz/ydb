@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(annotations)
+add_subdirectory(out)
 
 add_library(api-protos)
 target_link_libraries(api-protos PUBLIC
@@ -21,6 +23,7 @@ target_proto_messages(api-protos PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/draft/persqueue_error_codes.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/draft/ydb_long_tx.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/draft/ydb_logstore.proto
+  ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/fq.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/persqueue_error_codes_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_auth.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_persqueue_v1.proto
@@ -43,6 +46,7 @@ target_proto_messages(api-protos PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_scripting.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_status_codes.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_table.proto
+  ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_topic.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_value.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/ydb_s3_internal.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/protos/yq.proto

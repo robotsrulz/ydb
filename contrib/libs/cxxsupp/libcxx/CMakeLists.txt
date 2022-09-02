@@ -15,14 +15,14 @@ target_compile_options(libs-cxxsupp-libcxx PUBLIC
 )
 target_compile_options(libs-cxxsupp-libcxx PRIVATE
   -D_LIBCPP_BUILDING_LIBRARY
+  -Wno-everything
 )
 target_include_directories(libs-cxxsupp-libcxx PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/include
+  ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxxrt/include
 )
 target_include_directories(libs-cxxsupp-libcxx PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/include
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src
-  ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxxrt
 )
 target_link_libraries(libs-cxxsupp-libcxx PUBLIC
   libs-cxxsupp-libcxxabi-parts
@@ -32,6 +32,7 @@ target_link_libraries(libs-cxxsupp-libcxx PUBLIC
 target_sources(libs-cxxsupp-libcxx PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/algorithm.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/any.cpp
+  ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/assert.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/atomic.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/barrier.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/bind.cpp
@@ -43,7 +44,6 @@ target_sources(libs-cxxsupp-libcxx PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/exception.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/filesystem/directory_iterator.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/filesystem/operations.cpp
-  ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/format.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/functional.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/future.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/hash.cpp
@@ -73,5 +73,6 @@ target_sources(libs-cxxsupp-libcxx PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/valarray.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/variant.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/vector.cpp
+  ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/format.cpp
   ${CMAKE_SOURCE_DIR}/contrib/libs/cxxsupp/libcxx/src/new.cpp
 )

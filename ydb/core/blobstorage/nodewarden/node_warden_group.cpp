@@ -82,7 +82,7 @@ namespace NKikimr::NStorage {
     }
 
     TEncryptionKey& TNodeWarden::GetGroupMainKey(ui32 groupId) {
-        return TGroupID(groupId).ConfigurationType() == GroupConfigurationTypeStatic
+        return TGroupID(groupId).ConfigurationType() == EGroupConfigurationType::Static
             ? Cfg->StaticKey
             : Cfg->TenantKey;
     }
@@ -96,6 +96,11 @@ namespace NKikimr::NStorage {
 
         // some basic consistency checks
         Y_VERIFY(!newGroup || (newGroup->GetGroupID() == groupId && newGroup->GetGroupGeneration() == generation));
+
+        // log if from resolver
+        if (fromResolver) {
+            STLOG(PRI_NOTICE, BS_NODE, NW73, "ApplyGroupInfo from resolver", (GroupId, groupId), (GroupGeneration, generation));
+        }
 
         // obtain group record
         const auto [it, _] = Groups.try_emplace(groupId);
@@ -172,7 +177,7 @@ namespace NKikimr::NStorage {
             Y_VERIFY(success);
             groupChanged = before != after;
 
-            if (groupChanged && Cfg->IsCacheEnabled() && TGroupID(groupId).ConfigurationType() == GroupConfigurationTypeDynamic) {
+            if (groupChanged && Cfg->IsCacheEnabled() && TGroupID(groupId).ConfigurationType() == EGroupConfigurationType::Dynamic) {
                 EnqueueSyncOp(WrapCacheOp(UpdateGroupInCache(*currentGroup)));
             }
         }
@@ -184,8 +189,8 @@ namespace NKikimr::NStorage {
             // for group/proxy and ask BSC for group info
             group.Info.Reset();
             RequestGroupConfig(groupId, group);
-            if (group.ProxyRunning) {
-                Send(MakeBlobStorageProxyID(groupId), new TEvBlobStorage::TEvConfigureProxy(nullptr));
+            if (group.ProxyId) {
+                Send(group.ProxyId, new TEvBlobStorage::TEvConfigureProxy(nullptr));
             }
         } else if (groupChanged) {
             // group has changed; obtain main encryption key for this group and try to parse group info from the protobuf
@@ -197,17 +202,28 @@ namespace NKikimr::NStorage {
                 STLOG(PRI_ERROR, BS_NODE, NW19, "error while parsing group", (GroupId, groupId), (Err, s));
             }
 
-            if (group.ProxyRunning) { // update configuration for running proxies
+            if (group.ProxyId) { // update configuration for running proxies
                 auto info = NeedGroupInfo(groupId);
                 auto counters = info
                     ? DsProxyPerPoolCounters->GetPoolCounters(info->GetStoragePoolName(), info->GetDeviceType())
                     : nullptr;
-                Send(MakeBlobStorageProxyID(groupId), new TEvBlobStorage::TEvConfigureProxy(std::move(info),
-                    std::move(counters)));
+
+                if (info && info->BlobDepotId && !group.AgentProxy) {
+                    // re-register proxy as an agent
+                    group.AgentProxy = true;
+                    TActorSystem *as = TActivationContext::ActorSystem();
+                    group.ProxyId = Register(NBlobDepot::CreateBlobDepotAgent(groupId, info, group.ProxyId),
+                        TMailboxType::ReadAsFilled, AppData()->SystemPoolId);
+                    as->RegisterLocalService(MakeBlobStorageProxyID(groupId), group.ProxyId);
+                }
+
+                // forward ConfigureProxy anyway, because when we switch to BlobDepot agent, we still need to update
+                // ds proxy configuration
+                Send(group.ProxyId, new TEvBlobStorage::TEvConfigureProxy(std::move(info), std::move(counters)));
             }
 
             if (const auto& info = group.Info) {
-                Send(WhiteboardId, new NNodeWhiteboard::TEvWhiteboard::TEvBSGroupStateUpdate(info, info->GetStoragePoolName()));
+                Send(WhiteboardId, new NNodeWhiteboard::TEvWhiteboard::TEvBSGroupStateUpdate(info));
                 for (auto& vdisk : group.VDisksOfGroup) {
                     UpdateGroupInfoForDisk(vdisk, info);
                 }
@@ -233,9 +249,12 @@ namespace NKikimr::NStorage {
             if (group.GetEntityStatus() == NKikimrBlobStorage::DESTROY) {
                 if (EjectedGroups.insert(groupId).second) {
                     TGroupRecord& group = Groups[groupId];
-                    STLOG(PRI_DEBUG, BS_NODE, NW99, "destroying group", (GroupId, groupId), (ProxyRunning, group.ProxyRunning));
-                    if (group.ProxyRunning) {
-                        TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, MakeBlobStorageProxyID(groupId), {}, nullptr, 0));
+                    STLOG(PRI_DEBUG, BS_NODE, NW99, "destroying group", (GroupId, groupId), (ProxyId, group.ProxyId));
+                    if (group.ProxyId) {
+                        TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, group.ProxyId, {}, nullptr, 0));
+                    }
+                    if (group.GroupResolver) {
+                        TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, group.GroupResolver, {}, nullptr, 0));
                     }
                     Groups.erase(groupId);
 

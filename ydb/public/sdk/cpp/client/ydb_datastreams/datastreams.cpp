@@ -63,16 +63,33 @@ namespace NYdb::NDataStreams::V1 {
         }
 
         TAsyncCreateStreamResult CreateStream(const TString &path, TCreateStreamSettings settings) {
+            if (settings.RetentionPeriodHours_.Defined() && settings.RetentionStorageMegabytes_.Defined()) {
+                return NThreading::MakeFuture(TProtoResultWrapper<Ydb::DataStreams::V1::CreateStreamResult>(
+                    NYdb::TPlainStatus(NYdb::EStatus::BAD_REQUEST, "both retention types can not be set"),
+                    std::make_unique<Ydb::DataStreams::V1::CreateStreamResult>()));
+            }
             return CallImpl<Ydb::DataStreams::V1::DataStreamsService,
                     Ydb::DataStreams::V1::CreateStreamRequest,
                     Ydb::DataStreams::V1::CreateStreamResponse,
-                    Ydb::DataStreams::V1::CreateStreamResult>(settings, &Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncCreateStream,
-                                                              [&](Ydb::DataStreams::V1::CreateStreamRequest& req) {
-                                                                    req.set_stream_name(path);
-                                                                    req.set_shard_count(settings.ShardCount_);
-                                                                    req.set_retention_period_hours(settings.RetentionPeriodHours_);
-                                                                    req.set_write_quota_kb_per_sec(settings.WriteQuotaKbPerSec_);
-                                                                });
+                    Ydb::DataStreams::V1::CreateStreamResult>(settings,
+                        &Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncCreateStream,
+                        [&](Ydb::DataStreams::V1::CreateStreamRequest& req) {
+                            req.set_stream_name(path);
+                            req.set_shard_count(settings.ShardCount_);
+                            if (settings.RetentionStorageMegabytes_.Defined()) {
+                                req.set_retention_storage_megabytes(*settings.RetentionStorageMegabytes_.Get());
+                            } else if (settings.RetentionPeriodHours_.Defined()) {
+                                req.set_retention_period_hours(*settings.RetentionPeriodHours_.Get());
+                            } else {
+                                req.set_retention_period_hours(24);
+                            }
+                            req.set_write_quota_kb_per_sec(settings.WriteQuotaKbPerSec_);
+                            if (settings.StreamMode_.Defined()) {
+                                req.mutable_stream_mode_details()->set_stream_mode(
+                                        *settings.StreamMode_ == ESM_PROVISIONED ? Ydb::DataStreams::V1::StreamMode::PROVISIONED
+                                                                                : Ydb::DataStreams::V1::StreamMode::ON_DEMAND);
+                            }
+                        });
         }
 
         TAsyncListStreamsResult ListStreams(TListStreamsSettings settings) {
@@ -213,6 +230,20 @@ namespace NYdb::NDataStreams::V1 {
                                                                   });
         }
 
+        TAsyncUpdateStreamModeResult UpdateStreamMode(const TString& path, TUpdateStreamModeSettings settings) {
+            return CallImpl<Ydb::DataStreams::V1::DataStreamsService,
+                    Ydb::DataStreams::V1::UpdateStreamModeRequest,
+                    Ydb::DataStreams::V1::UpdateStreamModeResponse,
+                    Ydb::DataStreams::V1::UpdateStreamModeResult>(settings, &Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncUpdateStreamMode,
+                                                                  [&](Ydb::DataStreams::V1::UpdateStreamModeRequest& req) {
+                                                                    req.set_stream_arn(path);
+
+                                                                    req.mutable_stream_mode_details()->set_stream_mode(
+                                                                        settings.StreamMode_ == ESM_PROVISIONED ? Ydb::DataStreams::V1::StreamMode::PROVISIONED
+                                                                                                                : Ydb::DataStreams::V1::StreamMode::ON_DEMAND);
+                                                                        });
+        }
+
         TAsyncRegisterStreamConsumerResult RegisterStreamConsumer(const TString& path, const TString& consumer_name, TRegisterStreamConsumerSettings settings) {
             return CallImpl<Ydb::DataStreams::V1::DataStreamsService,
                     Ydb::DataStreams::V1::RegisterStreamConsumerRequest,
@@ -317,16 +348,32 @@ namespace NYdb::NDataStreams::V1 {
         }
 
         TAsyncUpdateStreamResult UpdateStream(const TString& streamName, TUpdateStreamSettings settings) {
+            if (settings.RetentionPeriodHours_.Defined() && settings.RetentionStorageMegabytes_.Defined()) {
+                return NThreading::MakeFuture(TProtoResultWrapper<Ydb::DataStreams::V1::UpdateStreamResult>(
+                    NYdb::TPlainStatus(NYdb::EStatus::BAD_REQUEST, "both retention types can not be set"),
+                    std::make_unique<Ydb::DataStreams::V1::UpdateStreamResult>()));
+            }
             return CallImpl<Ydb::DataStreams::V1::DataStreamsService,
                     Ydb::DataStreams::V1::UpdateStreamRequest,
                     Ydb::DataStreams::V1::UpdateStreamResponse,
-                    Ydb::DataStreams::V1::UpdateStreamResult>(settings, &Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncUpdateStream,
-                                                                  [&](Ydb::DataStreams::V1::UpdateStreamRequest& req) {
-                                                                      req.set_stream_name(streamName);
-                                                                      req.set_target_shard_count(settings.TargetShardCount_);
-                                                                      req.set_retention_period_hours(settings.RetentionPeriodHours_);
-                                                                      req.set_write_quota_kb_per_sec(settings.WriteQuotaKbPerSec_);
-                                                                  });
+                    Ydb::DataStreams::V1::UpdateStreamResult>(settings,
+                        &Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncUpdateStream,
+                        [&](Ydb::DataStreams::V1::UpdateStreamRequest& req) {
+                            req.set_stream_name(streamName);
+                            req.set_target_shard_count(settings.TargetShardCount_);
+                            if (settings.RetentionPeriodHours_.Defined()) {
+                                req.set_retention_period_hours(*settings.RetentionPeriodHours_.Get());
+                            }
+                            if (settings.RetentionStorageMegabytes_.Defined()) {
+                                req.set_retention_storage_megabytes(*settings.RetentionStorageMegabytes_.Get());
+                            }
+                            req.set_write_quota_kb_per_sec(settings.WriteQuotaKbPerSec_);
+                            if (settings.StreamMode_.Defined()) {
+                                req.mutable_stream_mode_details()->set_stream_mode(
+                                        *settings.StreamMode_ == ESM_PROVISIONED ? Ydb::DataStreams::V1::StreamMode::PROVISIONED
+                                                                                : Ydb::DataStreams::V1::StreamMode::ON_DEMAND);
+                            }
+                        });
         }
 
         TAsyncDeleteStreamResult DeleteStream(const TString &path, TDeleteStreamSettings settings) {
@@ -444,6 +491,10 @@ namespace NYdb::NDataStreams::V1 {
 
     TAsyncUpdateShardCountResult TDataStreamsClient::UpdateShardCount(const TString& path, TUpdateShardCountSettings settings) {
         return Impl_->UpdateShardCount(path, settings);
+    }
+
+    TAsyncUpdateStreamModeResult TDataStreamsClient::UpdateStreamMode(const TString& path, TUpdateStreamModeSettings settings) {
+        return Impl_->UpdateStreamMode(path, settings);
     }
 
     TAsyncRegisterStreamConsumerResult TDataStreamsClient::RegisterStreamConsumer(const TString& path, const TString& consumer_name, const TRegisterStreamConsumerSettings settings) {
@@ -662,6 +713,18 @@ namespace NYdb::NDataStreams::V1 {
                 >(
                         const Ydb::DataStreams::V1::UpdateShardCountRequest& request,
                         decltype(&Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncUpdateShardCount) method,
+                        TProtoRequestSettings settings
+                );
+
+    template NThreading::TFuture<TProtoResultWrapper<Ydb::DataStreams::V1::UpdateStreamModeResult>> TDataStreamsClient::DoProtoRequest
+                <
+                    Ydb::DataStreams::V1::UpdateStreamModeRequest,
+                    Ydb::DataStreams::V1::UpdateStreamModeResponse,
+                    Ydb::DataStreams::V1::UpdateStreamModeResult,
+                    decltype(&Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncUpdateStreamMode)
+                >(
+                        const Ydb::DataStreams::V1::UpdateStreamModeRequest& request,
+                        decltype(&Ydb::DataStreams::V1::DataStreamsService::Stub::AsyncUpdateStreamMode) method,
                         TProtoRequestSettings settings
                 );
 

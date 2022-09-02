@@ -6,11 +6,20 @@
 #include <library/cpp/actors/core/hfunc.h>
 #include <library/cpp/actors/core/actor_bootstrapped.h>
 
+#include <ydb/core/yq/libs/actors/logging/log.h>
+
 #include <util/stream/file.h>
 #include <util/string/strip.h>
 
-#define LOG_E(stream)                                                   \
-    LOG_ERROR_S(*TlsActivationContext, NKikimrServices::YQL_PROXY, stream)
+#define LOG_F(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, EMERG, STREAMS, logRecordStream)
+#define LOG_A(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, ALERT, STREAMS, logRecordStream)
+#define LOG_C(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, CRIT, STREAMS, logRecordStream)
+#define LOG_E(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, ERROR, STREAMS, logRecordStream)
+#define LOG_W(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, WARN, STREAMS, logRecordStream)
+#define LOG_N(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, NOTICE, STREAMS, logRecordStream)
+#define LOG_I(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, INFO, STREAMS, logRecordStream)
+#define LOG_D(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, DEBUG, STREAMS, logRecordStream)
+#define LOG_T(ctx, logRecordStream) LOG_STREAMS_IMPL_AS(ctx, TRACE, STREAMS, logRecordStream)
 
 namespace NYq {
 
@@ -21,7 +30,7 @@ class TDbPoolActor : public NActors::TActor<TDbPoolActor> {
 public:
     TDbPoolActor(
         const NYdb::NTable::TTableClient& tableClient,
-        const NMonitoring::TDynamicCounterPtr& counters)
+        const ::NMonitoring::TDynamicCounterPtr& counters)
         : TActor(&TThis::WorkingState)
         , TableClient(tableClient)
         , QueueSize(counters->GetSubgroup("subcomponent", "DbPool")->GetHistogram("InFlight",  NMonitoring::ExponentialHistogram(10, 2, 10)))
@@ -66,6 +75,8 @@ public:
         RequestInProgressTimestamp = TInstant::Now();
         const auto& requestVariant = Requests.front();
 
+        LOG_T(ctx, "TDbPoolActor: ProcessQueue " << SelfId() << " Queue size = " << Requests.size());
+
         if (auto pRequest = std::get_if<TRequest>(&requestVariant)) {
             auto& request = *pRequest;
             auto actorSystem = ctx.ActorSystem();
@@ -86,6 +97,8 @@ public:
             .Subscribe([state = std::weak_ptr<int>(State), sharedResult, actorSystem, cookie, selfId](const NThreading::TFuture<NYdb::TStatus>& statusFuture) {
                 if (state.lock()) {
                     actorSystem->Send(new IEventHandle(selfId, selfId, new TEvents::TEvDbResponse(statusFuture.GetValue(), *sharedResult), 0, cookie));
+                } else {
+                    LOG_T(*actorSystem, "TDbPoolActor: ProcessQueue " << selfId << " State destroyed");
                 }
             });
         } else if (auto pRequest = std::get_if<TFunctionRequest>(&requestVariant)) {
@@ -99,12 +112,15 @@ public:
             .Subscribe([state = std::weak_ptr<int>(State), actorSystem, selfId, cookie](const NThreading::TFuture<NYdb::TStatus>& statusFuture) {
                 if (state.lock()) {
                     actorSystem->Send(new IEventHandle(selfId, selfId, new TEvents::TEvDbFunctionResponse(statusFuture.GetValue()), 0, cookie));
+                } else {
+                    LOG_T(*actorSystem, "TDbPoolActor: ProcessQueue " << selfId << " State destroyed");
                 }
             });
         }
     }
 
     void HandleRequest(TEvents::TEvDbRequest::TPtr& ev, const TActorContext& ctx) {
+        LOG_D(ctx, "TDbPoolActor: TEvDbRequest " << SelfId() << " Queue size = " << Requests.size());
         auto request = ev->Get();
         Requests.emplace_back(TRequest{ev->Sender, ev->Cookie, request->Sql, std::move(request->Params), request->Idempotent});
         ProcessQueue(ctx);
@@ -119,18 +135,21 @@ public:
     }
 
     void HandleResponse(TEvents::TEvDbResponse::TPtr& ev, const TActorContext& ctx) {
+        LOG_T(ctx, "TDbPoolActor: TEvDbResponse " << SelfId() << " Queue size = " << Requests.size());
         const auto& request = Requests.front();
         ctx.Send(ev->Forward(std::visit([](const auto& arg) { return arg.Sender; }, request)));
         PopFromQueueAndProcess(ctx);
     }
 
     void HandleRequest(TEvents::TEvDbFunctionRequest::TPtr& ev, const TActorContext& ctx) {
+        LOG_T(ctx, "TDbPoolActor: TEvDbFunctionRequest " << SelfId() << " Queue size = " << Requests.size());
         auto request = ev->Get();
         Requests.emplace_back(TFunctionRequest{ev->Sender, ev->Cookie, std::move(request->Handler)});
         ProcessQueue(ctx);
     }
 
     void HandleResponse(TEvents::TEvDbFunctionResponse::TPtr& ev, const TActorContext& ctx) {
+        LOG_T(ctx, "TDbPoolActor: TEvDbFunctionResponse " << SelfId() << " Queue size = " << Requests.size());
         const auto& request = Requests.front();
         ctx.Send(ev->Forward(std::visit([](const auto& arg) { return arg.Sender; }, request)));
         PopFromQueueAndProcess(ctx);
@@ -174,15 +193,17 @@ private:
     TInstant RequestInProgressTimestamp = TInstant::Now();
     std::shared_ptr<int> State = std::make_shared<int>();
     const NMonitoring::THistogramPtr QueueSize;
-    const NMonitoring::TDynamicCounters::TCounterPtr TotalInFlight;
+    const ::NMonitoring::TDynamicCounters::TCounterPtr TotalInFlight;
     const NMonitoring::THistogramPtr RequestsTime;
 };
 
 TDbPool::TDbPool(
     ui32 sessionsCount,
     const NYdb::NTable::TTableClient& tableClient,
-    const NMonitoring::TDynamicCounterPtr& counters)
+    const ::NMonitoring::TDynamicCounterPtr& counters,
+    const TString& tablePathPrefix)
 {
+    TablePathPrefix = tablePathPrefix;
     const auto& ctx = NActors::TActivationContext::AsActorContext();
     auto parentId = ctx.SelfID;
     Actors.reserve(sessionsCount);
@@ -225,7 +246,7 @@ TDbPoolMap::TDbPoolMap(
     const NYq::NConfig::TDbPoolConfig& config,
     NYdb::TDriver driver,
     const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-    const NMonitoring::TDynamicCounterPtr& counters)
+    const ::NMonitoring::TDynamicCounterPtr& counters)
     : Config(config)
     , Driver(driver)
     , CredentialsProviderFactory(credentialsProviderFactory)
@@ -238,7 +259,7 @@ TDbPoolHolder::TDbPoolHolder(
     const NYq::NConfig::TDbPoolConfig& config,
     const NYdb::TDriver& driver,
     const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-    const NMonitoring::TDynamicCounterPtr& counters)
+    const ::NMonitoring::TDynamicCounterPtr& counters)
     : Driver(driver)
     , Pools(new TDbPoolMap(config, Driver, credentialsProviderFactory, counters))
 { }
@@ -264,11 +285,11 @@ void TDbPoolMap::Reset(const NYq::NConfig::TDbPoolConfig& config) {
     TableClient = nullptr;
 }
 
-TDbPool::TPtr TDbPoolHolder::GetOrCreate(EDbPoolId dbPoolId, ui32 sessionsCount) {
-    return Pools->GetOrCreate(dbPoolId, sessionsCount);
+TDbPool::TPtr TDbPoolHolder::GetOrCreate(EDbPoolId dbPoolId, ui32 sessionsCount, const TString& tablePathPrefix) {
+    return Pools->GetOrCreate(dbPoolId, sessionsCount, tablePathPrefix);
 }
 
-TDbPool::TPtr TDbPoolMap::GetOrCreate(EDbPoolId dbPoolId, ui32 sessionsCount) {
+TDbPool::TPtr TDbPoolMap::GetOrCreate(EDbPoolId dbPoolId, ui32 sessionsCount, const TString& tablePathPrefix) {
     TGuard<TMutex> lock(Mutex);
     auto it = Pools.find(dbPoolId);
     if (it != Pools.end()) {
@@ -297,7 +318,7 @@ TDbPool::TPtr TDbPoolMap::GetOrCreate(EDbPoolId dbPoolId, ui32 sessionsCount) {
         TableClient = MakeHolder<NYdb::NTable::TTableClient>(Driver, clientSettings);
     }
 
-    TDbPool::TPtr dbPool = new TDbPool(sessionsCount, *TableClient, Counters);
+    TDbPool::TPtr dbPool = new TDbPool(sessionsCount, *TableClient, Counters, tablePathPrefix);
     Pools.emplace(dbPoolId, dbPool);
     return dbPool;
 }

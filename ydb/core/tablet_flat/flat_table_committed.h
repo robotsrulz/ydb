@@ -1,6 +1,7 @@
 #pragma once
 #include "defs.h"
 
+#include <ydb/core/base/row_version.h>
 #include <util/generic/hash.h>
 #include <util/generic/ptr.h>
 
@@ -11,14 +12,147 @@ namespace NKikimr {
 namespace NTable {
 
     /**
-     * A simple copy-on-write data structure for a TxId -> TValue map
+     * An interface that maps TxId to commit RowVersion
      */
-    template<class TValue>
+    class ITransactionMap : public TThrRefBase {
+    public:
+        /**
+         * Returns a pointer to a stored row version for a given txId, or nullptr when it's missing
+         */
+        virtual const TRowVersion* Find(ui64 txId) const = 0;
+    };
+
+    /**
+     * Smart pointer that can safely be used to call methods even when it's nullptr
+     */
+    class ITransactionMapPtr : public TIntrusivePtr<ITransactionMap> {
+    public:
+        using TIntrusivePtr::TIntrusivePtr;
+
+        const TRowVersion* Find(ui64 txId) const {
+            if (ITransactionMap* p = Get()) {
+                return p->Find(txId);
+            }
+            return nullptr;
+        }
+    };
+
+    /**
+     * A simple pointer wrapper that may be useful as a function argument on a hot path
+     *
+     * Unlike a smart pointer it has no destructor and doesn't perform any Ref/UnRef
+     */
+    class ITransactionMapSimplePtr {
+    public:
+        ITransactionMapSimplePtr(const ITransactionMapPtr& ptr)
+            : Ptr(ptr.Get())
+        { }
+
+        ITransactionMapSimplePtr(ITransactionMap* ptr)
+            : Ptr(ptr)
+        { }
+
+        ITransactionMapSimplePtr(std::nullptr_t)
+            : Ptr(nullptr)
+        { }
+
+        explicit operator bool() const {
+            return bool(Ptr);
+        }
+
+        const TRowVersion* Find(ui64 txId) const {
+            if (Ptr) {
+                return Ptr->Find(txId);
+            }
+            return nullptr;
+        }
+
+    private:
+        ITransactionMap* Ptr;
+    };
+
+    /**
+     * A special implementation of transaction map with a single transaction
+     */
+    class TSingleTransactionMap final : public ITransactionMap {
+    public:
+        TSingleTransactionMap(ui64 txId, TRowVersion value)
+            : TxId(txId)
+            , Value(std::move(value))
+        { }
+
+        const TRowVersion* Find(ui64 txId) const override {
+            if (TxId == txId) {
+                return &Value;
+            }
+            return nullptr;
+        }
+
+        static ITransactionMapPtr Create(ui64 txId, TRowVersion value) {
+            return new TSingleTransactionMap(txId, value);
+        }
+
+    private:
+        ui64 TxId;
+        TRowVersion Value;
+    };
+
+    /**
+     * A special implementation of transaction map that merges two non-empty maps
+     */
+    class TMergedTransactionMap final : public ITransactionMap {
+    private:
+        TMergedTransactionMap(
+                ITransactionMapPtr first,
+                ITransactionMapPtr second)
+            : First(std::move(first))
+            , Second(std::move(second))
+        { }
+
+    public:
+        const TRowVersion* Find(ui64 txId) const override {
+            if (const TRowVersion* value = First.Find(txId)) {
+                return value;
+            }
+            return Second.Find(txId);
+        }
+
+        static ITransactionMapPtr Create(
+                const ITransactionMapPtr& first,
+                const ITransactionMapPtr& second)
+        {
+            if (first) {
+                if (second) {
+                    return new TMergedTransactionMap(first, second);
+                }
+                return first;
+            } else {
+                return second;
+            }
+        }
+
+    private:
+        ITransactionMapPtr First;
+        ITransactionMapPtr Second;
+    };
+
+    /**
+     * A simple copy-on-write data structure for a TxId -> RowVersion map
+     *
+     * Pretends to be an instance of ITransactionMapPtr
+     */
     class TTransactionMap {
     private:
-        using TTxMap = std::unordered_map<ui64, TValue>;
+        using TTxMap = std::unordered_map<ui64, TRowVersion>;
 
-        struct TState : public TThrRefBase, public TTxMap {
+        struct TState final : public ITransactionMap, public TTxMap {
+            const TRowVersion* Find(ui64 txId) const override {
+                auto it = this->find(txId);
+                if (it != this->end()) {
+                    return &it->second;
+                }
+                return nullptr;
+            }
         };
 
     public:
@@ -31,16 +165,9 @@ namespace NTable {
             return State_ && !State_->empty();
         }
 
-        bool Contains(ui64 txId) const {
-            return State_ && State_->contains(txId);
-        }
-
-        const TValue* Find(ui64 txId) const {
+        const TRowVersion* Find(ui64 txId) const {
             if (State_) {
-                auto it = State_->find(txId);
-                if (it != State_->end()) {
-                    return &it->second;
-                }
+                return State_->Find(txId);
             }
             return nullptr;
         }
@@ -49,7 +176,7 @@ namespace NTable {
             State_.Reset();
         }
 
-        void Add(ui64 txId, const TValue& value) {
+        void Add(ui64 txId, TRowVersion value) {
             Unshare()[txId] = value;
         }
 
@@ -57,6 +184,31 @@ namespace NTable {
             if (State_ && State_->contains(txId)) {
                 Unshare().erase(txId);
             }
+        }
+
+        operator ITransactionMapPtr() const {
+            if (State_ && !State_->empty()) {
+                return State_;
+            }
+            return nullptr;
+        }
+
+        operator ITransactionMapSimplePtr() const {
+            return static_cast<ITransactionMap*>(State_.Get());
+        }
+
+        ITransactionMap* Get() const {
+            return State_.Get();
+        }
+
+        ITransactionMap& operator*() const {
+            Y_VERIFY(State_);
+            return *State_;
+        }
+
+        ITransactionMap* operator->() const {
+            Y_VERIFY(State_);
+            return State_.Get();
         }
 
     public:
@@ -161,6 +313,132 @@ namespace NTable {
 
     private:
         TIntrusivePtr<TState> State_;
+    };
+
+    /**
+     * An interface for an optional observer of events during iteration
+     */
+    class ITransactionObserver : public TThrRefBase {
+    public:
+        /**
+         * Called when iterator skips over an uncommitted delta
+         */
+        virtual void OnSkipUncommitted(ui64 txId) = 0;
+
+        /**
+         * Called when iterator skips over committed delta
+         */
+        virtual void OnSkipCommitted(const TRowVersion& rowVersion) = 0;
+
+        /**
+         * Called when iterator skips over committed delta
+         */
+        virtual void OnSkipCommitted(const TRowVersion& rowVersion, ui64 txId) = 0;
+
+        /**
+         * Called when iterator applies committed changes from row version
+         */
+        virtual void OnApplyCommitted(const TRowVersion& rowVersion) = 0;
+
+        /**
+         * Called when iterator applies changes with a given row version and txId
+         */
+        virtual void OnApplyCommitted(const TRowVersion& rowVersion, ui64 txId) = 0;
+    };
+
+    /**
+     * Makes it easier to call observer methods even when pointer is nullptr
+     */
+    class ITransactionObserverPtr : public TIntrusivePtr<ITransactionObserver> {
+    public:
+        using TIntrusivePtr::TIntrusivePtr;
+
+        void OnSkipUncommitted(ui64 txId) const {
+            if (ITransactionObserver* p = Get()) {
+                p->OnSkipUncommitted(txId);
+            }
+        }
+
+        void OnSkipCommitted(const TRowVersion& rowVersion) const {
+            if (ITransactionObserver* p = Get()) {
+                p->OnSkipCommitted(rowVersion);
+            }
+        }
+
+        void OnSkipCommitted(const TRowVersion& rowVersion, ui64 txId) const {
+            if (ITransactionObserver* p = Get()) {
+                p->OnSkipCommitted(rowVersion, txId);
+            }
+        }
+
+        void OnApplyCommitted(const TRowVersion& rowVersion) const {
+            if (ITransactionObserver* p = Get()) {
+                p->OnApplyCommitted(rowVersion);
+            }
+        }
+
+        void OnApplyCommitted(const TRowVersion& rowVersion, ui64 txId) const {
+            if (ITransactionObserver* p = Get()) {
+                p->OnApplyCommitted(rowVersion, txId);
+            }
+        }
+    };
+
+    /**
+     * A simple pointer wrapper that may be useful as a function argument on a hot path
+     *
+     * Unlike a smart pointer it has no destructor and doesn't perform any Ref/UnRef
+     */
+    class ITransactionObserverSimplePtr {
+    public:
+        ITransactionObserverSimplePtr(const ITransactionObserverPtr& ptr)
+            : Ptr(ptr.Get())
+        { }
+
+        ITransactionObserverSimplePtr(ITransactionObserver* ptr)
+            : Ptr(ptr)
+        { }
+
+        ITransactionObserverSimplePtr(std::nullptr_t)
+            : Ptr(nullptr)
+        { }
+
+        explicit operator bool() const {
+            return bool(Ptr);
+        }
+
+        void OnSkipUncommitted(ui64 txId) const {
+            if (Ptr) {
+                Ptr->OnSkipUncommitted(txId);
+            }
+        }
+
+        void OnSkipCommitted(const TRowVersion& rowVersion) const {
+            if (Ptr) {
+                Ptr->OnSkipCommitted(rowVersion);
+            }
+        }
+
+        void OnSkipCommitted(const TRowVersion& rowVersion, ui64 txId) const {
+            if (Ptr) {
+                Ptr->OnSkipCommitted(rowVersion, txId);
+            }
+        }
+
+        void OnApplyCommitted(const TRowVersion& rowVersion) const {
+            if (Ptr) {
+                Ptr->OnApplyCommitted(rowVersion);
+            }
+        }
+
+        void OnApplyCommitted(const TRowVersion& rowVersion, ui64 txId) const {
+            if (Ptr) {
+                Ptr->OnApplyCommitted(rowVersion, txId);
+            }
+        }
+
+    private:
+        ITransactionObserver* Ptr;
     };
 
 } // namespace NTable

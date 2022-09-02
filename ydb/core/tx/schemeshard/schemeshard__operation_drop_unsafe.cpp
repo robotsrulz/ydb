@@ -89,10 +89,12 @@ public:
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
         context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
 
-        for (const TPathId pathId : pathes) {
-            context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+            for (const TPathId pathId : pathes) {
+                context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+            }
         }
 
         context.SS->ChangeTxState(db, OperationId, TTxState::ProposedDeleteParts);
@@ -261,6 +263,10 @@ public:
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxForceDropSubDomain, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxForceDropSubDomain, path.Base()->PathId);
         txState.State = TTxState::Waiting;
@@ -304,10 +310,12 @@ public:
         ++parentDir.Base()->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir.Base());
         context.SS->ClearDescribePathCaches(parentDir.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir.Base()->PathId);
-
         context.SS->ClearDescribePathCaches(path.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentDir.Base()->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+        }
 
         State = NextState();
         SetState(SelectStateFunc(State));

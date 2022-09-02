@@ -16,7 +16,7 @@ namespace NKikimr {
     // TBSProxyContext
     /////////////////////////////////////////////////////////////////////////////////////////
     struct TBSProxyContext : public TThrRefBase, TNonCopyable {
-        TBSProxyContext(const TIntrusivePtr<NMonitoring::TDynamicCounters>& mon)
+        TBSProxyContext(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& mon)
             : Queue(mon->GetCounter("MemTotal:Queue"))
         {}
 
@@ -33,8 +33,8 @@ namespace NKikimr {
         // ActorId of the main VDisk actor (currently ActorId of SkeletonFront)
         const TActorId VDiskActorId;
         const std::shared_ptr<TBlobStorageGroupInfo::TTopology> Top;
-        const TIntrusivePtr<NMonitoring::TDynamicCounters> VDiskCounters;
-        const TIntrusivePtr<NMonitoring::TDynamicCounters> VDiskMemCounters;
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters> VDiskCounters;
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters> VDiskMemCounters;
         // latency histograms
         NVDiskMon::THistograms Histograms;
         std::shared_ptr<NMonGroup::TVDiskIFaceGroup> IFaceMonGroup;
@@ -80,10 +80,10 @@ namespace NKikimr {
         TVDiskContext(
                 const TActorId &vdiskActorId,
                 std::shared_ptr<TBlobStorageGroupInfo::TTopology> top,
-                const TIntrusivePtr<NMonitoring::TDynamicCounters>& vdiskCounters,
+                const TIntrusivePtr<::NMonitoring::TDynamicCounters>& vdiskCounters,
                 const TVDiskID &selfVDisk,
                 TActorSystem *as,   // can be nullptr for tests
-                TPDiskCategory::EDeviceType type,
+                NPDisk::EDeviceType type,
                 bool donorMode = false,
                 TReplQuoter::TPtr replPDiskReadQuoter = nullptr,
                 TReplQuoter::TPtr replPDiskWriteQuoter = nullptr,

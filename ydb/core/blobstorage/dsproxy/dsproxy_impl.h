@@ -52,6 +52,8 @@ class TBlobStorageGroupProxy : public TActorBootstrapped<TBlobStorageGroupProxy>
         }
     };
 
+    static std::atomic<TMonotonic> ThrottlingTimestamp;
+
     const ui32 GroupId;
     TIntrusivePtr<TBlobStorageGroupInfo> Info;
     std::shared_ptr<TBlobStorageGroupInfo::TTopology> Topology;
@@ -141,6 +143,8 @@ class TBlobStorageGroupProxy : public TActorBootstrapped<TBlobStorageGroupProxy>
             Mon->EventStatus->Inc();
         } else if constexpr (std::is_same_v<TEvent, TEvBlobStorage::TEvPatch>) {
             Mon->EventPatch->Inc();
+        } else if constexpr (std::is_same_v<TEvent, TEvBlobStorage::TEvAssimilate>) {
+            Mon->EventAssimilate->Inc();
         }
     }
 
@@ -219,7 +223,8 @@ class TBlobStorageGroupProxy : public TActorBootstrapped<TBlobStorageGroupProxy>
             if (rate) {
                 const ui64 num = RandomNumber<ui64>(1000000); // in range [0, 1000000)
                 if (num < rate) {
-                    ev->TraceId = NWilson::TTraceId::NewTraceId();
+                    ev->TraceId = NWilson::TTraceId::NewTraceIdThrottled(15, Max<ui32>(), ThrottlingTimestamp,
+                        TMonotonic::Now(), TDuration::Seconds(1));
                 }
             }
         }
@@ -252,6 +257,7 @@ class TBlobStorageGroupProxy : public TActorBootstrapped<TBlobStorageGroupProxy>
     void HandleNormal(TEvBlobStorage::TEvRange::TPtr &ev);
     void HandleNormal(TEvBlobStorage::TEvCollectGarbage::TPtr &ev);
     void HandleNormal(TEvBlobStorage::TEvStatus::TPtr &ev);
+    void HandleNormal(TEvBlobStorage::TEvAssimilate::TPtr &ev);
     void Handle(TEvBlobStorage::TEvBunchOfEvents::TPtr ev);
     void Handle(TEvDeathNote::TPtr ev);
 
@@ -359,6 +365,7 @@ public:
     hFunc(TEvBlobStorage::TEvCollectGarbage, HANDLER); \
     hFunc(TEvBlobStorage::TEvStatus, HANDLER); \
     hFunc(TEvBlobStorage::TEvPatch, HANDLER); \
+    hFunc(TEvBlobStorage::TEvAssimilate, HANDLER); \
     /**/
 
     STFUNC(StateUnconfigured) {

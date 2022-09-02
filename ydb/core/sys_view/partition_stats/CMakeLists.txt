@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(core-sys_view-partition_stats)
 target_compile_options(core-sys_view-partition_stats PRIVATE
@@ -21,4 +22,5 @@ target_link_libraries(core-sys_view-partition_stats PUBLIC
 )
 target_sources(core-sys_view-partition_stats PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/sys_view/partition_stats/partition_stats.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/sys_view/partition_stats/top_partitions.cpp
 )

@@ -234,14 +234,6 @@ def grpc_tls_data_path(arguments):
     return os.getenv('YDB_GRPC_TLS_DATA_PATH', default_store)
 
 
-def enable_datastreams(arguments):
-    return getattr(arguments, 'enable_datastreams', False) or os.getenv('YDB_ENABLE_DATASTREAMS') == 'true'
-
-
-def enable_pq(arguments):
-    return getattr(arguments, 'enable_pq', False) or enable_datastreams(arguments)
-
-
 def pq_client_service_types(arguments):
     items = getattr(arguments, 'pq_client_service_types', None)
     if not items:
@@ -258,7 +250,7 @@ def pq_client_service_types(arguments):
 
 
 def enable_pqcd(arguments):
-    return enable_pq(arguments) and (getattr(arguments, 'enable_pqcd', False) or os.getenv('YDB_ENABLE_PQCD') == 'true')
+    return (getattr(arguments, 'enable_pqcd', False) or os.getenv('YDB_ENABLE_PQCD') == 'true')
 
 
 def deploy(arguments):
@@ -296,9 +288,7 @@ def deploy(arguments):
         output_path=recipe.generate_data_path(),
         pdisk_store_path=pdisk_store_path,
         domain_name='local',
-        enable_pq=enable_pq(arguments),
         pq_client_service_types=pq_client_service_types(arguments),
-        enable_datastreams=enable_datastreams(arguments),
         enable_pqcd=enable_pqcd(arguments),
         load_udfs=True,
         suppress_version_check=arguments.suppress_version_check,
@@ -343,12 +333,15 @@ def deploy(arguments):
     recipe.write_database(cluster.domain_name)
     recipe.write_connection_string(("grpcs://" if enable_tls() else "grpc://") + endpoint + "?database=/" + cluster.domain_name)
     if enable_tls():
-        recipe.write_certificates_path(configuration.grpc_tls_ca())
+        recipe.write_certificates_path(configuration.grpc_tls_ca.decode("utf-8"))
     return endpoint, database
 
 
 def _stop_instances(arguments):
-    info = Recipe(arguments).read_metafile()
+    recipe = Recipe(arguments)
+    if not os.path.exists(recipe.metafile_path()):
+        return
+    info = recipe.read_metafile()
     for node_id, node_meta in info['nodes'].items():
         pid = node_meta['pid']
         try:
@@ -366,7 +359,10 @@ def cleanup_working_dir(arguments):
 
 
 def _cleanup_working_dir(arguments):
-    info = Recipe(arguments).read_metafile()
+    recipe = Recipe(arguments)
+    if not os.path.exists(recipe.metafile_path()):
+        return
+    info = recipe.read_metafile()
     for node_id, node_meta in info['nodes'].items():
         pdisks = node_meta['pdisks']
         for pdisk in pdisks:
@@ -431,13 +427,15 @@ def produce_arguments(args):
     parser.add_argument("--ydb-working-dir", action="store")
     parser.add_argument("--debug-logging", nargs='*')
     parser.add_argument("--enable-pq", action='store_true', default=False)
+    parser.add_argument("--fixed-ports", action='store_true', default=False)
     parser.add_argument("--pq-client-service-type", action='append', default=[])
     parser.add_argument("--enable-datastreams", action='store_true', default=False)
     parser.add_argument("--enable-pqcd", action='store_true', default=False)
-    parsed, _ = parser.parse_known_args()
+    parsed, _ = parser.parse_known_args(args)
     arguments = EmptyArguments()
     arguments.suppress_version_check = parsed.suppress_version_check
     arguments.ydb_working_dir = parsed.ydb_working_dir
+    arguments.fixed_ports = parsed.fixed_ports
     if parsed.use_packages is not None:
         arguments.use_packages = parsed.use_packages
     if parsed.debug_logging:

@@ -66,7 +66,7 @@ public:
             --ReservedGranuleIds;
             ui64 ts = 0;
             NewGranules.emplace(granule, std::make_pair(pathId, ts));
-            PathToGranule[pathId].emplace(ts, granule);
+            PathToGranule[pathId].emplace_back(ts, granule);
             return true;
         }
 
@@ -105,7 +105,7 @@ public:
             return numSplitInto;
         }
 
-        THashMap<ui64, TMap<ui64, ui64>> PathToGranule; // pathId -> {timestamp, granule}
+        THashMap<ui64, std::vector<std::pair<ui64, ui64>>> PathToGranule; // pathId -> {timestamp, granule}
         TSrcGranule SrcGranule;
         THashMap<ui64, std::pair<ui64, ui64>> NewGranules; // granule -> {pathId, key}
         THashMap<ui64, ui32> TmpGranuleIds; // ts -> tmp granule id
@@ -128,6 +128,7 @@ public:
     TColumnEngineForLogs(TIndexInfo&& info, ui64 tabletId, const TCompactionLimits& limits = {});
 
     const TIndexInfo& GetIndexInfo() const override { return IndexInfo; }
+
     const THashSet<ui64>* GetOverloadedGranules(ui64 pathId) const override {
         if (PathsGranulesOverloaded.count(pathId)) {
             return &PathsGranulesOverloaded.find(pathId)->second;
@@ -135,13 +136,16 @@ public:
         return nullptr;
     }
 
+    bool HasOverloadedGranules() const override { return !PathsGranulesOverloaded.empty(); }
+
     bool Load(IDbWrapper& db, const THashSet<ui64>& pathsToDrop = {}) override;
     std::shared_ptr<TColumnEngineChanges> StartInsert(TVector<TInsertedData>&& dataToIndex) override;
     std::shared_ptr<TColumnEngineChanges> StartCompaction(std::unique_ptr<TCompactionInfo>&& compactionInfo,
                                                           const TSnapshot& outdatedSnapshot) override;
     std::shared_ptr<TColumnEngineChanges> StartCleanup(const TSnapshot& snapshot,
                                                        THashSet<ui64>& pathsToDrop) override;
-    std::shared_ptr<TColumnEngineChanges> StartTtl(const THashMap<ui64, TTiersInfo>& pathTtls) override;
+    std::shared_ptr<TColumnEngineChanges> StartTtl(const THashMap<ui64, TTiersInfo>& pathTtls,
+                                                   ui64 maxEvictBytes = TCompactionLimits::DEFAULT_EVICTION_BYTES) override;
     bool ApplyChanges(IDbWrapper& db, std::shared_ptr<TColumnEngineChanges> indexChanges,
                       const TSnapshot& snapshot) override;
     void UpdateDefaultSchema(const TSnapshot& snapshot, TIndexInfo&& info) override;
@@ -149,6 +153,7 @@ public:
     const TMap<ui64, std::shared_ptr<TColumnEngineStats>>& GetStats() const override;
     const TColumnEngineStats& GetTotalStats() override;
     ui64 MemoryUsage() const override;
+    TSnapshot LastUpdate() const override { return LastSnapshot; }
 
     std::shared_ptr<TSelectInfo> Select(ui64 pathId, TSnapshot snapshot,
                                         const THashSet<ui32>& columnIds,
@@ -249,8 +254,7 @@ private:
 
     bool CanInsert(const TChanges& changes, const TSnapshot& commitSnap) const;
     TMap<TSnapshot, TVector<ui64>> GetOrderedPortions(ui64 granule, const TSnapshot& snapshot = TSnapshot::Max()) const;
-    void UpdateOverloaded(const THashMap<ui64, std::shared_ptr<TGranuleMeta>>& granules,
-                          const TChanges::TSrcGranule& splitted);
+    void UpdateOverloaded(const THashMap<ui64, std::shared_ptr<TGranuleMeta>>& granules);
 
     TVector<TVector<std::pair<ui64, ui64>>> EmptyGranuleTracks(ui64 pathId) const;
 };
@@ -260,6 +264,9 @@ std::shared_ptr<arrow::TimestampArray> GetTimestampColumn(const TIndexInfo& inde
                                                           const std::shared_ptr<arrow::RecordBatch>& batch);
 THashMap<ui64, std::shared_ptr<arrow::RecordBatch>>
 SliceIntoGranules(const std::shared_ptr<arrow::RecordBatch>& batch, const TMap<ui64, ui64>& tsGranules,
+                  const TIndexInfo& indexInfo);
+THashMap<ui64, std::shared_ptr<arrow::RecordBatch>>
+SliceIntoGranules(const std::shared_ptr<arrow::RecordBatch>& batch, const std::vector<std::pair<ui64, ui64>>& tsGranules,
                   const TIndexInfo& indexInfo);
 
 }

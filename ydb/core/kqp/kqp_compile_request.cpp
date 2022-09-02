@@ -4,10 +4,16 @@
 #include <ydb/core/tx/scheme_cache/scheme_cache.h>
 
 #include <library/cpp/actors/core/actor_bootstrapped.h>
+#include <library/cpp/actors/wilson/wilson_span.h>
 #include <library/cpp/actors/core/hfunc.h>
 #include <library/cpp/actors/core/log.h>
 
+#include <ydb/core/kqp/common/kqp_lwtrace_probes.h>
+#include <ydb/core/base/wilson.h>
+
 #include <util/string/escape.h>
+
+LWTRACE_USING(KQP_PROVIDER);
 
 namespace NKikimr {
 namespace NKqp {
@@ -24,16 +30,23 @@ public:
     }
 
     TKqpCompileRequestActor(const TActorId& owner, const TString& userToken, const TMaybe<TString>& uid,
-        TMaybe<TKqpQueryId>&& query, bool keepInCache, const TInstant& deadline, TKqpDbCountersPtr dbCounters)
+        TMaybe<TKqpQueryId>&& query, bool keepInCache, const TInstant& deadline, TKqpDbCountersPtr dbCounters, NLWTrace::TOrbit orbit,
+        NWilson::TTraceId traceId)
         : Owner(owner)
         , UserToken(userToken)
         , Uid(uid)
         , Query(std::move(query))
         , KeepInCache(keepInCache)
         , Deadline(deadline)
-        , DbCounters(dbCounters) {}
-
+        , DbCounters(dbCounters)
+        , Orbit{std::move(orbit)}
+        , CompileRequestSpan(TWilsonKqp::CompileRequest, std::move(traceId), "CompileRequest") {}
+    
     void Bootstrap(const TActorContext& ctx) {
+        LWTRACK(KqpCompileRequestBootstrap, 
+            Orbit, 
+            Query ? Query->UserSid : 0);
+
         TimeoutTimerId = CreateLongTimer(ctx, Deadline - TInstant::Now(),
             new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
 
@@ -41,23 +54,38 @@ public:
         std::swap(Query, query);
 
         auto compileEv = MakeHolder<TEvKqp::TEvCompileRequest>(UserToken, Uid, std::move(query),
-            KeepInCache, Deadline, DbCounters);
-        ctx.Send(MakeKqpCompileServiceID(ctx.SelfID.NodeId()), compileEv.Release());
+            KeepInCache, Deadline, DbCounters, std::move(Orbit));
+        ctx.Send(MakeKqpCompileServiceID(ctx.SelfID.NodeId()), compileEv.Release(), 0, 0, CompileRequestSpan.GetTraceId());
 
         Become(&TKqpCompileRequestActor::MainState);
     }
 
     void Handle(TEvKqp::TEvCompileResponse::TPtr& ev, const TActorContext &ctx) {
+        const auto& query = ev->Get()->CompileResult->Query;
+        LWTRACK(KqpCompileRequestHandleServiceReply, 
+            ev->Get()->Orbit, 
+            query ? query->UserSid : 0);
+        
         auto compileResult = ev->Get()->CompileResult;
         const auto& stats = ev->Get()->Stats;
 
         if (compileResult->Status != Ydb::StatusIds::SUCCESS || !stats.GetFromCache()) {
+
+            if (CompileRequestSpan) {
+                CompileRequestSpan.End();
+            }
+
             ctx.Send(Owner, ev->Release().Release());
             Die(ctx);
             return;
         }
 
         if (!NavigateTables(*compileResult->PreparedQuery, compileResult->Query->Database, ctx)) {
+            
+            if (CompileRequestSpan) {
+                CompileRequestSpan.End();
+            }
+
             ctx.Send(Owner, ev->Release().Release());
             Die(ctx);
             return;
@@ -68,6 +96,11 @@ public:
 
     void Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext &ctx) {
         if (ValidateTables(*ev->Get(), ctx)) {
+
+            if (CompileRequestSpan) {
+                CompileRequestSpan.EndOk();
+            }
+
             ctx.Send(Owner, DeferredResponse.Release());
             Die(ctx);
             return;
@@ -80,8 +113,8 @@ public:
             << ", queryUid: " << compileResult.Uid);
 
         auto recompileEv = MakeHolder<TEvKqp::TEvRecompileRequest>(UserToken, compileResult.Uid, compileResult.Query,
-            Deadline, DbCounters);
-        ctx.Send(MakeKqpCompileServiceID(ctx.SelfID.NodeId()), recompileEv.Release());
+            Deadline, DbCounters, std::move(DeferredResponse->Orbit));
+        ctx.Send(MakeKqpCompileServiceID(ctx.SelfID.NodeId()), recompileEv.Release(), 0, 0, CompileRequestSpan.GetTraceId());
 
         DeferredResponse.Reset();
     }
@@ -186,6 +219,11 @@ private:
             entry.SyncVersion = false;
             entry.ShowPrivatePath = true;
 
+            LOG_DEBUG_S(ctx, NKikimrServices::KQP_COMPILE_REQUEST, "Query has dependency on table, check the table schema version"
+                << ", self: " << ctx.SelfID
+                << ", pathId: " << entry.TableId.PathId
+                << ", version: " << entry.TableId.SchemaVersion);
+
             navigate->ResultSet.emplace_back(entry);
         }
 
@@ -275,7 +313,12 @@ private:
     }
 
     void ReplyError(Ydb::StatusIds::StatusCode status, const TIssues& issues, const TActorContext& ctx) {
-        auto responseEv = MakeHolder<TEvKqp::TEvCompileResponse>(TKqpCompileResult::Make({}, status, issues));
+        auto responseEv = MakeHolder<TEvKqp::TEvCompileResponse>(TKqpCompileResult::Make({}, status, issues), std::move(Orbit));
+
+        if (CompileRequestSpan) {
+            CompileRequestSpan.EndError(issues.ToOneLineString());
+        }
+        
         ctx.Send(Owner, responseEv.Release());
         Die(ctx);
     }
@@ -291,13 +334,26 @@ private:
     TActorId TimeoutTimerId;
     THashMap<TTableId, ui64> TableVersions;
     THolder<TEvKqp::TEvCompileResponse> DeferredResponse;
+
+    NLWTrace::TOrbit Orbit;
+    NWilson::TSpan CompileRequestSpan;
 };
 
 
 IActor* CreateKqpCompileRequestActor(const TActorId& owner, const TString& userToken, const TMaybe<TString>& uid,
-    TMaybe<TKqpQueryId>&& query, bool keepInCache, const TInstant& deadline, TKqpDbCountersPtr dbCounters)
+    TMaybe<TKqpQueryId>&& query, bool keepInCache, const TInstant& deadline, TKqpDbCountersPtr dbCounters, NLWTrace::TOrbit orbit, 
+    NWilson::TTraceId traceId)
 {
-    return new TKqpCompileRequestActor(owner, userToken, uid, std::move(query), keepInCache, deadline, dbCounters);
+    return new TKqpCompileRequestActor(
+        owner, 
+        userToken, 
+        uid, 
+        std::move(query), 
+        keepInCache, 
+        deadline, 
+        dbCounters, 
+        std::move(orbit),
+        std::move(traceId));
 }
 
 } // namespace NKqp

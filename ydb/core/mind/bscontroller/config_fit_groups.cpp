@@ -69,7 +69,7 @@ namespace NKikimr {
                     const ui32 groupLocalId = nextGroupId ? TGroupID(nextGroupId).GroupLocalID() : 0;
 
                     // create new full group id
-                    TGroupID fullGroupId(GroupConfigurationTypeDynamic, AvailabilityDomainId, groupLocalId);
+                    TGroupID fullGroupId(EGroupConfigurationType::Dynamic, AvailabilityDomainId, groupLocalId);
                     TGroupID nextFullGroupId = fullGroupId;
                     ++nextFullGroupId;
 
@@ -131,7 +131,6 @@ namespace NKikimr {
                     Geometry.GetNumFailDomainsPerFailRealm(), Geometry.GetNumVDisksPerFailDomain());
 
                 // bind group to storage pool
-                groupInfo->StoragePoolId = StoragePoolId;
                 State.StoragePoolGroups.Unshare().emplace(StoragePoolId, groupId);
 
                 const TGroupSpecies species = groupInfo->GetGroupSpecies();
@@ -430,7 +429,7 @@ namespace NKikimr {
                         // also we have to find replicating VSlots on this PDisk and assume they consume up to
                         // max(vslotSize for every slot in group), not their actual AllocatedSize
                         for (const auto& [id, slot] : info.VSlotsOnPDisk) {
-                            if (slot->Group && slot->GetStatus() != NKikimrBlobStorage::EVDiskStatus::READY) {
+                            if (slot->Group && slot->Status != NKikimrBlobStorage::EVDiskStatus::READY) {
                                 ui64 maxGroupSlotSize = 0;
                                 for (const TVSlotInfo *peer : slot->Group->VDisksInGroup) {
                                     maxGroupSlotSize = Max(maxGroupSlotSize, peer->Metrics.GetAllocatedSize());

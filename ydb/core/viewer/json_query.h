@@ -6,11 +6,14 @@
 #include <library/cpp/actors/core/mon.h>
 #include <library/cpp/json/json_value.h>
 #include <library/cpp/json/json_reader.h>
+#include <library/cpp/protobuf/json/proto2json.h>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
+#include <ydb/core/grpc_services/rpc_kqp_base.h>
 #include <ydb/core/kqp/kqp.h>
 #include <ydb/core/kqp/executer/kqp_executer.h>
 #include <ydb/core/viewer/json/json.h>
-#include <ydb/public/lib/deprecated/kicli/kicli.h>
+//#include <ydb/public/lib/deprecated/kicli/kicli.h>
+#include <ydb/public/lib/json_value/ydb_json_value.h>
 #include <ydb/public/sdk/cpp/client/ydb_result/result.h>
 
 namespace NKikimr {
@@ -30,28 +33,29 @@ class TJsonQuery : public TActorBootstrapped<TJsonQuery> {
     TVector<Ydb::ResultSet> ResultSets;
     TString Action;
     TString Stats;
+    TString Schema = "classic";
 
 public:
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
         return NKikimrServices::TActivity::VIEWER_HANDLER;
     }
 
-    TJsonQuery(IViewer* viewer, NMon::TEvHttpInfo::TPtr& ev)
+    TJsonQuery(IViewer* viewer, const TRequest& request)
         : Viewer(viewer)
-        , Initiator(ev->Sender)
-        , Event(ev)
+        , Initiator(request.Event->Sender)
+        , Event(request.Event)
     {}
 
-    STFUNC(StateWork) {
+    STATEFN(StateWork) {
         switch (ev->GetTypeRewrite()) {
-            HFunc(NKqp::TEvKqp::TEvQueryResponse, HandleReply);
-            HFunc(NKqp::TEvKqp::TEvProcessResponse, HandleReply);
-            HFunc(NKqp::TEvKqp::TEvAbortExecution, HandleReply);
-            HFunc(NKqp::TEvKqpExecuter::TEvStreamData, HandleReply);
-            HFunc(NKqp::TEvKqpExecuter::TEvStreamProfile, HandleReply);
-            HFunc(NKqp::TEvKqpExecuter::TEvExecuterProgress, HandleReply);
+            hFunc(NKqp::TEvKqp::TEvQueryResponse, HandleReply);
+            hFunc(NKqp::TEvKqp::TEvProcessResponse, HandleReply);
+            hFunc(NKqp::TEvKqp::TEvAbortExecution, HandleReply);
+            hFunc(NKqp::TEvKqpExecuter::TEvStreamData, HandleReply);
+            hFunc(NKqp::TEvKqpExecuter::TEvStreamProfile, HandleReply);
+            hFunc(NKqp::TEvKqpExecuter::TEvExecuterProgress, HandleReply);
 
-            CFunc(TEvents::TSystem::Wakeup, HandleTimeout);
+            cFunc(TEvents::TSystem::Wakeup, HandleTimeout);
 
             default: {
                 Cerr << "Unexpected event received in TJsonQuery::StateWork: " << ev->GetTypeRewrite() << Endl;
@@ -59,7 +63,7 @@ public:
         }
     }
 
-    void Bootstrap(const TActorContext& ctx) {
+    void Bootstrap() {
         const auto& params(Event->Get()->Request.GetParams());
         auto event = MakeHolder<NKqp::TEvKqp::TEvQueryRequest>();
         JsonSettings.EnumAsNumbers = !FromStringWithDefault<bool>(params.Get("enums"), false);
@@ -69,6 +73,10 @@ public:
         TString database = params.Get("database");
         Stats = params.Get("stats");
         Action = params.Get("action");
+        Schema = params.Get("schema");
+        if (Schema.empty()) {
+            Schema = "classic";
+        }
         if (query.empty() && Event->Get()->Request.GetMethod() == HTTP_METHOD_POST) {
             TStringBuf content = Event->Get()->Request.GetPostContent();
             const THttpHeaders& headers = Event->Get()->Request.GetHeaders();
@@ -90,7 +98,7 @@ public:
             }
         }
         if (query.empty()) {
-            ReplyAndDie(HTTPBADREQUEST, ctx);
+            ReplyAndPassAway(HTTPBADREQUEST);
             return;
         }
         NKikimrKqp::TQueryRequest& request = *event->Record.MutableRequest();
@@ -117,9 +125,9 @@ public:
             event->Record.SetUserToken(Event->Get()->UserToken);
         }
         ActorIdToProto(SelfId(), event->Record.MutableRequestActorId());
-        ctx.Send(NKqp::MakeKqpProxyID(ctx.SelfID.NodeId()), event.Release());
+        Send(NKqp::MakeKqpProxyID(SelfId().NodeId()), event.Release());
 
-        Become(&TThis::StateWork, ctx, TDuration::MilliSeconds(Timeout), new TEvents::TEvWakeup());
+        Become(&TThis::StateWork, TDuration::MilliSeconds(Timeout), new TEvents::TEvWakeup());
     }
 
 private:
@@ -202,104 +210,143 @@ private:
         }
     }
 
-    void HandleReply(NKqp::TEvKqp::TEvQueryResponse::TPtr& ev, const TActorContext& ctx) {
+    void HandleReply(NKqp::TEvKqp::TEvQueryResponse::TPtr& ev) {
         TStringBuilder out;
+        NJson::TJsonValue jsonResponse;
         NKikimrKqp::TEvQueryResponse& record = ev->Get()->Record.GetRef();
         if (record.GetYdbStatus() == Ydb::StatusIds::SUCCESS) {
             const auto& response = record.GetResponse();
-            out << Viewer->GetHTTPOKJSON(Event->Get());
-            if (!Stats.empty()) {
-                out << "{\"result\":";
-            }
-            if (response.ResultsSize() > 0) {
-                const auto &result = response.GetResults();
-                if (result.empty()) {
-                    out << "[]";
-                } else {
-                    const auto &first = *result.begin();
 
-                    if (first.HasType() && first.HasValue()) {
-                        auto value = NClient::TValue::Create(first.GetValue(), first.GetType());
-                        auto data = value["Data"];
-                        if (data.HaveValue()) {
-                            out << data.GetValueText<NClient::TFormatJSON>({JsonSettings.UI64AsString});
-                        } else {
-                            out << "[]";
-                        }
-                    } else {
-                        out << "[]";
-                    }
+            if (response.ResultsSize() > 0) {
+                for (const auto& result : response.GetResults()) {
+                    Ydb::ResultSet resultSet;
+                    NGRpcService::ConvertKqpQueryResultToDbResult(result, &resultSet);
+                    ResultSets.emplace_back(std::move(resultSet));
                 }
-            } else if (ResultSets.size() > 0) {
-                out << "[";
-                bool comma = false;
-                for (auto it = ResultSets.begin(); it != ResultSets.end(); ++it) {
-                    NYdb::TResultSet resultSet(*it);
-                    const auto& columnsMeta = resultSet.GetColumnsMeta();
-                    NYdb::TResultSetParser rsParser(resultSet);
-                    while (rsParser.TryNextRow()) {
-                        if (comma) {
-                            out << ",";
-                        }
-                        out << "{";
-                        for (size_t columnNum = 0; columnNum < columnsMeta.size(); ++columnNum) {
-                            const NYdb::TColumn& columnMeta = columnsMeta[columnNum];
-                            out << "\"" << TProtoToJson::EscapeJsonString(columnMeta.Name) << "\":";
-                            out << NJson::WriteJson(ColumnValueToJsonValue(rsParser.ColumnParser(columnNum)), false);
-                            if (columnNum + 1 < columnsMeta.size()) {
-                                out << ",";
+            }
+
+            out << Viewer->GetHTTPOKJSON(Event->Get());
+            if (ResultSets.size() > 0) {
+                if (Schema == "classic") {
+                    NJson::TJsonValue& jsonResults = jsonResponse["result"];
+                    jsonResults.SetType(NJson::JSON_ARRAY);
+                    for (auto it = ResultSets.begin(); it != ResultSets.end(); ++it) {
+                        NYdb::TResultSet resultSet(*it);
+                        const auto& columnsMeta = resultSet.GetColumnsMeta();
+                        NYdb::TResultSetParser rsParser(resultSet);
+                        while (rsParser.TryNextRow()) {
+                            NJson::TJsonValue& jsonRow = jsonResults.AppendValue({});
+                            for (size_t columnNum = 0; columnNum < columnsMeta.size(); ++columnNum) {
+                                const NYdb::TColumn& columnMeta = columnsMeta[columnNum];
+                                jsonRow[columnMeta.Name] = ColumnValueToJsonValue(rsParser.ColumnParser(columnNum));
                             }
                         }
-                        out << "}";
-                        comma = true;
                     }
                 }
-                out << ']';
-            } else if (response.HasQueryPlan()) {
-                if (Action == "explain-ast") {
-                    out << "{\"ast\":\"" << TProtoToJson::EscapeJsonString(response.GetQueryAst()) << "\"}";
-                } else {
-                    out << response.GetQueryPlan();
+
+                if (Schema == "modern") {
+                    {
+                        NJson::TJsonValue& jsonColumns = jsonResponse["columns"];
+                        NYdb::TResultSet resultSet(ResultSets.front());
+                        const auto& columnsMeta = resultSet.GetColumnsMeta();
+                        jsonColumns.SetType(NJson::JSON_ARRAY);
+                        for (size_t columnNum = 0; columnNum < columnsMeta.size(); ++columnNum) {
+                            NJson::TJsonValue& jsonColumn = jsonColumns.AppendValue({});
+                            const NYdb::TColumn& columnMeta = columnsMeta[columnNum];
+                            jsonColumn["name"] = columnMeta.Name;
+                            jsonColumn["type"] = columnMeta.Type.ToString();
+                        }
+                    }
+
+                    NJson::TJsonValue& jsonResults = jsonResponse["result"];
+                    jsonResults.SetType(NJson::JSON_ARRAY);
+                    for (auto it = ResultSets.begin(); it != ResultSets.end(); ++it) {
+                        NYdb::TResultSet resultSet(*it);
+                        const auto& columnsMeta = resultSet.GetColumnsMeta();
+                        NYdb::TResultSetParser rsParser(resultSet);
+                        while (rsParser.TryNextRow()) {
+                            NJson::TJsonValue& jsonRow = jsonResults.AppendValue({});
+                            jsonRow.SetType(NJson::JSON_ARRAY);
+                            for (size_t columnNum = 0; columnNum < columnsMeta.size(); ++columnNum) {
+                                NJson::TJsonValue& jsonColumn = jsonRow.AppendValue({});
+                                jsonColumn = ColumnValueToJsonValue(rsParser.ColumnParser(columnNum));
+                            }
+                        }
+                    }
+                }
+
+                if (Schema == "ydb") {
+                    NJson::TJsonValue& jsonResults = jsonResponse["result"];
+                    jsonResults.SetType(NJson::JSON_ARRAY);
+                    for (auto it = ResultSets.begin(); it != ResultSets.end(); ++it) {
+                        NYdb::TResultSet resultSet(*it);
+                        const auto& columnsMeta = resultSet.GetColumnsMeta();
+                        NYdb::TResultSetParser rsParser(resultSet);
+                        while (rsParser.TryNextRow()) {
+                            NJson::TJsonValue& jsonRow = jsonResults.AppendValue({});
+                            TString row = NYdb::FormatResultRowJson(rsParser, columnsMeta, NYdb::EBinaryStringEncoding::Base64);
+                            NJson::ReadJsonTree(row, &jsonRow);
+                        }
+                    }
                 }
             }
-            if (!Stats.empty()) {
-                out << ",\"stats\":";
-                TStringStream json;
-                TProtoToJson::ProtoToJson(json, response.GetQueryStats(), JsonSettings);
-                out << json.Str() << "}";
+            if (response.HasQueryAst()) {
+                jsonResponse["ast"] = response.GetQueryAst();
+            }
+            if (response.HasQueryPlan()) {
+                NJson::ReadJsonTree(response.GetQueryPlan(), &(jsonResponse["plan"]));
+            }
+            if (response.HasQueryStats()) {
+                NProtobufJson::Proto2Json(response.GetQueryStats(), jsonResponse["stats"]);
             }
         } else {
-            out << "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: Close\r\n\r\n";
+            out << "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: Close\r\n\r\n";
+            NJson::TJsonValue& jsonIssues = jsonResponse["issues"];
 
-            TStringBuilder err;
-            for (const auto& queryIssue : record.GetResponse().GetQueryIssues()) {
-                if (!err.empty()) {
-                    err << '\n';
-                }
-                if (queryIssue.has_position()) {
-                    err << queryIssue.position().row() << ':' << queryIssue.position().column() << ' ';
-                }
-                err << queryIssue.message();
+            // find first deepest error
+            google::protobuf::RepeatedPtrField<Ydb::Issue::IssueMessage>* protoIssues = record.MutableResponse()->MutableQueryIssues();
+            std::stable_sort(protoIssues->begin(), protoIssues->end(), [](const Ydb::Issue::IssueMessage& a, const Ydb::Issue::IssueMessage& b) -> bool {
+                return a.severity() < b.severity();
+            });
+            while (protoIssues->size() > 0 && (*protoIssues)[0].issuesSize() > 0) {
+                protoIssues = (*protoIssues)[0].mutable_issues();
             }
-            out << err;
-
-            out << "\r\n";
+            if (protoIssues->size() > 0) {
+                const Ydb::Issue::IssueMessage& issue = (*protoIssues)[0];
+                NProtobufJson::Proto2Json(issue, jsonResponse["error"]);
+            }
+            for (const auto& queryIssue : record.GetResponse().GetQueryIssues()) {
+                NJson::TJsonValue& issue = jsonIssues.AppendValue({});
+                NProtobufJson::Proto2Json(queryIssue, issue);
+            }
         }
 
-        ReplyAndDie(out, ctx);
+        if (Schema == "classic" && Stats.empty()) {
+            jsonResponse = std::move(jsonResponse["result"]);
+        }
+
+        out << NJson::WriteJson(jsonResponse, false);
+
+        ReplyAndPassAway(out);
     }
 
-    void HandleReply(NKqp::TEvKqp::TEvProcessResponse::TPtr& ev, const TActorContext& ctx) {
+    void HandleReply(NKqp::TEvKqp::TEvProcessResponse::TPtr& ev) {
         Y_UNUSED(ev);
-        Y_UNUSED(ctx);
     }
 
-    void HandleReply(NKqp::TEvKqp::TEvAbortExecution::TPtr& ev, const TActorContext& ctx) {
+    void HandleReply(NKqp::TEvKqp::TEvAbortExecution::TPtr& ev) {
         Y_UNUSED(ev);
-        Y_UNUSED(ctx);
     }
 
-    void HandleReply(NKqp::TEvKqpExecuter::TEvStreamData::TPtr& ev, const TActorContext& ctx) {
+    void HandleReply(NKqp::TEvKqpExecuter::TEvStreamProfile::TPtr& ev) {
+        Y_UNUSED(ev);
+    }
+
+    void HandleReply(NKqp::TEvKqpExecuter::TEvExecuterProgress::TPtr& ev) {
+        Y_UNUSED(ev);
+    }
+
+    void HandleReply(NKqp::TEvKqpExecuter::TEvStreamData::TPtr& ev) {
         const NKikimrKqp::TEvExecuterStreamData& data(ev->Get()->Record);
 
         ResultSets.emplace_back();
@@ -307,26 +354,16 @@ private:
 
         THolder<NKqp::TEvKqpExecuter::TEvStreamDataAck> ack = MakeHolder<NKqp::TEvKqpExecuter::TEvStreamDataAck>();
         ack->Record.SetSeqNo(ev->Get()->Record.GetSeqNo());
-        ctx.Send(ev->Sender, ack.Release());
+        Send(ev->Sender, ack.Release());
     }
 
-    void HandleReply(NKqp::TEvKqpExecuter::TEvStreamProfile::TPtr& ev, const TActorContext& ctx) {
-        Y_UNUSED(ev);
-        Y_UNUSED(ctx);
+    void HandleTimeout() {
+        ReplyAndPassAway(Viewer->GetHTTPGATEWAYTIMEOUT());
     }
 
-    void HandleReply(NKqp::TEvKqpExecuter::TEvExecuterProgress::TPtr& ev, const TActorContext& ctx) {
-        Y_UNUSED(ev);
-        Y_UNUSED(ctx);
-    }
-
-    void HandleTimeout(const TActorContext& ctx) {
-        ReplyAndDie(Viewer->GetHTTPGATEWAYTIMEOUT(), ctx);
-    }
-
-    void ReplyAndDie(TString data, const TActorContext& ctx) {
-        ctx.Send(Initiator, new NMon::TEvHttpInfoRes(std::move(data), 0, NMon::IEvHttpInfoRes::EContentType::Custom));
-        Die(ctx);
+    void ReplyAndPassAway(TString data) {
+        Send(Initiator, new NMon::TEvHttpInfoRes(std::move(data), 0, NMon::IEvHttpInfoRes::EContentType::Custom));
+        PassAway();
     }
 };
 
@@ -336,6 +373,7 @@ struct TJsonRequestParameters<TJsonQuery> {
         return R"___([{"name":"ui64","in":"query","description":"return ui64 as number","required":false,"type":"boolean"},
                       {"name":"query","in":"query","description":"query text","required":true,"type":"string"},
                       {"name":"database","in":"query","description":"database name","required":false,"type":"string"},
+                      {"name":"schema","in":"query","description":"result format schema (classic, modern, ydb)","required":false,"type":"string"},
                       {"name":"stats","in":"query","description":"return stats (profile)","required":false,"type":"string"},
                       {"name":"action","in":"query","description":"execute method (execute-scan, execute-script, explain, explain-ast)","required":false,"type":"string"},
                       {"name":"timeout","in":"query","description":"timeout in ms","required":false,"type":"integer"}])___";

@@ -4,6 +4,7 @@
 #include "proto_builder.h"
 #include "actor_helpers.h"
 #include "executer_actor.h"
+#include "grouped_issues.h"
 
 #include <ydb/library/yql/providers/dq/counters/counters.h>
 
@@ -62,13 +63,14 @@ public:
         , ServiceCounters(serviceCounters, "task_controller")
         , PingPeriod(pingPeriod)
         , AggrPeriod(aggrPeriod)
+        , Issues(CreateDefaultTimeProvider())
     {
         if (Settings) {
             if (Settings->_AllResultsBytesLimit.Get()) {
-                YQL_LOG(DEBUG) << "_AllResultsBytesLimit = " << *Settings->_AllResultsBytesLimit.Get();
+                YQL_CLOG(DEBUG, ProviderDq) << "_AllResultsBytesLimit = " << *Settings->_AllResultsBytesLimit.Get();
             }
             if (Settings->_RowsLimitPerWrite.Get()) {
-                YQL_LOG(DEBUG) << "_RowsLimitPerWrite = " << *Settings->_RowsLimitPerWrite.Get();
+                YQL_CLOG(DEBUG, ProviderDq) << "_RowsLimitPerWrite = " << *Settings->_RowsLimitPerWrite.Get();
             }
         }
     }
@@ -96,70 +98,74 @@ private:
             return;
         }
 
-        TString message = "Undelivered Event " + ToString(ev->Get()->SourceType)
-            + " from " + ToString(SelfId()) + " (Self) to " + ToString(ev->Sender) +
-            + " Reason: " + ToString(ev->Get()->Reason) + " Cookie: " + ToString(ev->Cookie);
-        OnError(NYql::NDqProto::StatusIds::UNAVAILABLE, message, true, true);
+        TStringBuilder message;
+        message << "Undelivered Event " << ev->Get()->SourceType
+            << " from " << SelfId() << " (Self) to " << ev->Sender
+            << " Reason: " << ev->Get()->Reason << " Cookie: " << ev->Cookie;
+        OnError(NYql::NDqProto::StatusIds::UNAVAILABLE, message);
     }
 
     void OnAbortExecution(NDq::TEvDq::TEvAbortExecution::TPtr& ev) {
-        YQL_LOG_CTX_SCOPE(TraceId);
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
         auto statusCode = ev->Get()->Record.GetStatusCode();
         TIssues issues = ev->Get()->GetIssues();
-        YQL_LOG(DEBUG) << "AbortExecution from " << ev->Sender << ":" << NYql::NDqProto::StatusIds_StatusCode_Name(statusCode) << " " << issues.ToOneLineString();
-        OnError(statusCode, issues, NCommon::IsRetriable(ev), NCommon::NeedFallback(ev));
+        YQL_CLOG(DEBUG, ProviderDq) << "AbortExecution from " << ev->Sender << ":" << NYql::NDqProto::StatusIds_StatusCode_Name(statusCode) << " " << issues.ToOneLineString();
+        OnError(statusCode, issues);
+    }
+
+    void SendNonFatalIssues() {
+        auto req = MakeHolder<TEvDqStats>(Issues.ToIssues());
+        Send(ExecuterId, req.Release());
     }
 
     void OnComputeActorState(NDq::TEvDqCompute::TEvState::TPtr& ev) {
         TActorId computeActor = ev->Sender;
         auto& state = ev->Get()->Record;
         ui64 taskId = state.GetTaskId();
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG)
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(TRACE, ProviderDq)
             << SelfId()
             << " EvState TaskId: " << taskId
             << " State: " << state.GetState()
             << " PingCookie: " << ev->Cookie
             << " StatusCode: " << NYql::NDqProto::StatusIds_StatusCode_Name(state.GetStatusCode());
- 
+
         if (state.HasStats() && state.GetStats().GetTasks().size()) {
-            YQL_LOG(DEBUG) << " " << SelfId() << " AddStats " << taskId;
+            YQL_CLOG(TRACE, ProviderDq) << " " << SelfId() << " AddStats " << taskId;
             AddStats(state.GetStats());
             if (ServiceCounters.Counters && !AggrPeriod) {
                 ExportStats(TaskStat, taskId);
             }
         }
 
+        TIssues localIssues;
+        // TODO: don't convert issues to string
+        NYql::IssuesFromMessage(state.GetIssues(), localIssues);
+
         switch (state.GetState()) {
             case NDqProto::COMPUTE_STATE_UNKNOWN: {
                 // TODO: use issues
                 TString message = "unexpected state from " + ToString(computeActor) + ", task: " + ToString(taskId);
-                OnError(NYql::NDqProto::StatusIds::INTERNAL_ERROR, message, false, false);
+                OnError(NYql::NDqProto::StatusIds::BAD_REQUEST, message);
                 break;
             }
             case NDqProto::COMPUTE_STATE_FAILURE: {
-                // TODO: don't convert issues to string
-                NYql::IssuesFromMessage(state.GetIssues(), Issues);
-                bool retriable = true;
-                for (const auto& issue : Issues) {
-                    if (issue.IssueCode == TIssuesIds::UNEXPECTED) {
-                        retriable = false;
-                        break;
-                    }
-                }
-                OnError(state.GetStatusCode(), Issues, retriable, false);
+                Issues.AddIssues(localIssues);
+                OnError(state.GetStatusCode(), Issues.ToIssues());
                 break;
             }
             case NDqProto::COMPUTE_STATE_EXECUTING: {
-                YQL_LOG(DEBUG) << " " << SelfId() << " Executing TaskId: " << taskId;
+                Issues.AddIssues(localIssues);
+                YQL_CLOG(TRACE, ProviderDq) << " " << SelfId() << " Executing TaskId: " << taskId;
                 if (!FinishedTasks.contains(taskId)) {
                     // may get late/reordered? message
                     Executing[taskId] = Now();
                 }
+                SendNonFatalIssues();
                 break;
             }
             case NDqProto::COMPUTE_STATE_FINISHED: {
-                YQL_LOG(DEBUG) << " " << SelfId() << " Finish TaskId: " << taskId;
+                YQL_CLOG(DEBUG, ProviderDq) << " " << SelfId() << " Finish TaskId: " << taskId;
                 Executing.erase(taskId);
                 FinishedTasks.insert(taskId);
                 break;
@@ -178,7 +184,7 @@ private:
                 for (auto& taskActors: Executing) {
                     if (now > taskActors.second + PingPeriod) {
                         PingCookie++;
-                        YQL_LOG(DEBUG) << " Ping TaskId: " << taskActors.first << ", Compute ActorId: " << ActorIds[taskActors.first] << ", PingCookie: " << PingCookie;
+                        YQL_CLOG(TRACE, ProviderDq) << " Ping TaskId: " << taskActors.first << ", Compute ActorId: " << ActorIds[taskActors.first] << ", PingCookie: " << PingCookie;
                         Send(ActorIds[taskActors.first], new NDq::TEvDqCompute::TEvStateRequest(), IEventHandle::FlagTrackDelivery | IEventHandle::FlagGenerateUnsureUndelivered, PingCookie);
                         taskActors.second = now;
                     }
@@ -197,7 +203,7 @@ private:
         }
     };
 
-    NMonitoring::TDynamicCounterPtr GroupForExport(const TCounters& stat, const TString& counterName, ui64 taskId, TString& name, std::map<TString, TString>& labels) {
+    ::NMonitoring::TDynamicCounterPtr GroupForExport(const TCounters& stat, const TString& counterName, ui64 taskId, TString& name, std::map<TString, TString>& labels) {
         Y_UNUSED(stat);
         TString prefix;
         if (NCommon::ParseCounterName(&prefix, &labels, &name, counterName)) {
@@ -212,8 +218,13 @@ private:
         return nullptr;
     }
 
+    static bool IsAggregatedStage(const std::map<TString, TString>& labels) {
+        const auto it = labels.find("Stage");
+        return it != labels.end() && it->second == "Total";
+    }
+
     void ExportStats(const TCounters& stat, ui64 taskId) {
-        YQL_LOG(DEBUG) << " " << SelfId() << " ExportStats " << (taskId ? ToString(taskId) : "Summary");
+        YQL_CLOG(TRACE, ProviderDq) << " " << SelfId() << " ExportStats " << (taskId ? ToString(taskId) : "Summary");
         TString name;
         std::map<TString, TString> labels;
         static const TString SourceLabel = "Source";
@@ -222,12 +233,12 @@ private:
             labels.clear();
             if (auto group = GroupForExport(stat, k, taskId, name, labels)) {
                 *group->GetCounter(name) = v.Count;
-                if (ServiceCounters.PublicCounters && taskId == 0) {
+                if (ServiceCounters.PublicCounters && taskId == 0 && IsAggregatedStage(labels)) {
                     TString publicCounterName;
                     bool isDeriv = false;
                     if (name == "MkqlMaxMemoryUsage") {
                         publicCounterName = "query.memory_usage_bytes";
-                    } else if (name == "ComputeCpuTimeUs") {
+                    } else if (name == "CpuTimeUs") {
                         publicCounterName = "query.cpu_usage_us";
                         isDeriv = true;
                     } else if (name == "Bytes") {
@@ -238,13 +249,18 @@ private:
                         if (labels.count(SourceLabel)) publicCounterName = "query.source_input_records";
                         else if (labels.count(SinkLabel)) publicCounterName = "query.sink_output_records"; // RowsIn == RowsOut for Sinks
                         isDeriv = true;
-                    } else if (name == "MultiHop_ThrownEventsCount") {
+                    } else if (name == "MultiHop_LateThrownEventsCount") {
                         publicCounterName = "query.late_events";
                         isDeriv = true;
                     }
 
                     if (publicCounterName) {
-                        *ServiceCounters.PublicCounters->GetNamedCounter("name", publicCounterName, isDeriv) = v.Count;
+                        auto& counter = *ServiceCounters.PublicCounters->GetNamedCounter("name", publicCounterName, isDeriv);
+                        if (isDeriv) {
+                            counter += v.Count;
+                        } else {
+                            counter = v.Count;
+                        }
                     }
                 }
             }
@@ -277,6 +293,7 @@ private:
 
         auto& stats = s;
         // basic stats
+        ADD_COUNTER(CpuTimeUs)
         ADD_COUNTER(ComputeCpuTimeUs)
         ADD_COUNTER(PendingInputTimeUs)
         ADD_COUNTER(PendingOutputTimeUs)
@@ -418,7 +435,7 @@ private:
     }
 
     void OnReadyState(TEvReadyState::TPtr& ev) {
-        YQL_LOG_CTX_SCOPE(TraceId);
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
 
         TaskStat.AddCounters(ev->Get()->Record);
 
@@ -439,7 +456,7 @@ private:
             Stages.emplace(task.GetId(), taskMeta.GetStageId());
         }
 
-        YQL_LOG(DEBUG) << "Ready State:  X1=" << SelfId().RawX1() << ", X2=" << SelfId().RawX2();
+        YQL_CLOG(DEBUG, ProviderDq) << "Ready State: " << SelfId();
 
         MaybeUpdateChannels();
 
@@ -456,7 +473,7 @@ private:
             return;
         }
 
-        YQL_LOG(DEBUG) << "Update channels";
+        YQL_CLOG(DEBUG, ProviderDq) << "Update channels";
         for (const auto& [task, actorId] : Tasks) {
             auto ev = MakeHolder<NDq::TEvDqCompute::TEvChannelsInfo>();
 
@@ -472,7 +489,7 @@ private:
                 }
             }
 
-            YQL_LOG(DEBUG) << task.GetId() << " " << ev->Record.ShortDebugString();
+            YQL_CLOG(DEBUG, ProviderDq) << task.GetId() << " " << ev->Record.ShortDebugString();
 
             Send(actorId, ev.Release());
         }
@@ -481,8 +498,8 @@ private:
 
     void OnResultFailure(TEvDqFailure::TPtr& ev) {
         if (Finished) {
-            YQL_LOG_CTX_SCOPE(TraceId);
-            YQL_LOG(WARN) << "TEvDqFailure IGNORED when Finished from " << ev->Sender;
+            YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+            YQL_CLOG(WARN, ProviderDq) << "TEvDqFailure IGNORED when Finished from " << ev->Sender;
         } else {
             FinalStat().FlushCounters(ev->Get()->Record); // histograms will NOT be reported
             Send(ExecuterId, ev->Release().Release());
@@ -490,25 +507,25 @@ private:
         }
     }
 
-    void OnError(NYql::NDqProto::StatusIds::StatusCode statusCode, const TIssues& issues, bool retriable, bool needFallback) {
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG) << "OnError " << issues.ToOneLineString() << " " << NYql::NDqProto::StatusIds_StatusCode_Name(statusCode);
+    void OnError(NYql::NDqProto::StatusIds::StatusCode statusCode, const TIssues& issues) {
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << "OnError " << issues.ToOneLineString() << " " << NYql::NDqProto::StatusIds_StatusCode_Name(statusCode);
         if (Finished) {
-            YQL_LOG_CTX_SCOPE(TraceId);
-            YQL_LOG(WARN) << "OnError IGNORED when Finished, Retriable=" << retriable << ", NeedFallback=" << needFallback;
+            YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+            YQL_CLOG(WARN, ProviderDq) << "OnError IGNORED when Finished";
         } else {
-            auto req = MakeHolder<TEvDqFailure>(statusCode, issues, retriable, needFallback);
+            auto req = MakeHolder<TEvDqFailure>(statusCode, issues);
             FinalStat().FlushCounters(req->Record);
             Send(ExecuterId, req.Release());
             Finished = true;
         }
     }
 
-    void OnError(NYql::NDqProto::StatusIds::StatusCode statusCode, const TString& message, bool retriable, bool needFallback) {
-        auto issueCode = needFallback
+    void OnError(NYql::NDqProto::StatusIds::StatusCode statusCode, const TString& message) {
+        auto issueCode = NCommon::NeedFallback(statusCode)
             ? TIssuesIds::DQ_GATEWAY_NEED_FALLBACK_ERROR
             : TIssuesIds::DQ_GATEWAY_ERROR;
-        OnError(statusCode, TIssues({TIssue(message).SetCode(issueCode, TSeverityIds::S_ERROR)}), retriable, needFallback);
+        OnError(statusCode, TIssues({TIssue(message).SetCode(issueCode, TSeverityIds::S_ERROR)}));
     }
 
     void Finish() {
@@ -523,7 +540,7 @@ private:
         YQL_ENSURE(!ev->Get()->Record.HasResultSet() && ev->Get()->Record.GetYson().empty());
         FinalStat().FlushCounters(ev->Get()->Record);
         if (!Issues.Empty()) {
-            IssuesToMessage(Issues, ev->Get()->Record.MutableIssues());
+            IssuesToMessage(Issues.ToIssues(), ev->Get()->Record.MutableIssues());
         }
         Send(ResultId, ev->Release().Release());
     }
@@ -531,6 +548,7 @@ private:
     TCounters FinalStat() {
         return AggrPeriod ? AggregateQueryStatsByStage(TaskStat, Stages) : TaskStat;
     }
+
 
     bool ChannelsUpdated = false;
     TVector<std::pair<NDqProto::TDqTask, TActorId>> Tasks;
@@ -548,7 +566,7 @@ private:
     NYql::NCommon::TServiceCounters ServiceCounters;
     TDuration PingPeriod = TDuration::Zero();
     TDuration AggrPeriod = TDuration::Zero();
-    TIssues Issues;
+    NYql::NDq::GroupedIssues Issues;
     ui64 PingCookie = 0;
 };
 

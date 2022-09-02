@@ -7,12 +7,14 @@
 
 
 find_package(OpenSSL REQUIRED)
+find_package(ZLIB REQUIRED)
 
 add_library(cpp-actors-http)
 target_link_libraries(cpp-actors-http PUBLIC
   contrib-libs-cxxsupp
   yutil
   OpenSSL::OpenSSL
+  ZLIB::ZLIB
   cpp-actors-core
   cpp-actors-interconnect
   library-cpp-dns
@@ -21,6 +23,7 @@ target_link_libraries(cpp-actors-http PUBLIC
 )
 target_sources(cpp-actors-http PRIVATE
   ${CMAKE_SOURCE_DIR}/library/cpp/actors/http/http_cache.cpp
+  ${CMAKE_SOURCE_DIR}/library/cpp/actors/http/http_compress.cpp
   ${CMAKE_SOURCE_DIR}/library/cpp/actors/http/http_proxy_acceptor.cpp
   ${CMAKE_SOURCE_DIR}/library/cpp/actors/http/http_proxy_incoming.cpp
   ${CMAKE_SOURCE_DIR}/library/cpp/actors/http/http_proxy_outgoing.cpp

@@ -83,6 +83,53 @@ bool DataHasOnly(const TVector<TString>& blobs, const TString& srtSchema, std::p
     return true;
 }
 
+template <typename TArrowType>
+bool CheckTypedIntValues(const std::shared_ptr<arrow::Array>& array, const TVector<int64_t>& expected) {
+    UNIT_ASSERT(array);
+    UNIT_ASSERT_VALUES_EQUAL(array->length(), (int)expected.size());
+
+    auto& column = dynamic_cast<const arrow::NumericArray<TArrowType>&>(*array);
+
+    for (int i = 0; i < column.length(); ++i) {
+        auto value = column.Value(i);
+        UNIT_ASSERT_VALUES_EQUAL(value, expected[i]);
+    }
+    return true;
+}
+
+bool CheckIntValues(const std::shared_ptr<arrow::Array>& array, const TVector<int64_t>& expected) {
+    UNIT_ASSERT(array);
+
+    switch (array->type()->id()) {
+        case arrow::Type::UINT8:
+            return CheckTypedIntValues<arrow::UInt8Type>(array, expected);
+        case arrow::Type::UINT16:
+            return CheckTypedIntValues<arrow::UInt16Type>(array, expected);
+        case arrow::Type::UINT32:
+            return CheckTypedIntValues<arrow::UInt32Type>(array, expected);
+        case arrow::Type::UINT64:
+            return CheckTypedIntValues<arrow::UInt64Type>(array, expected);
+        case arrow::Type::INT8:
+            return CheckTypedIntValues<arrow::Int8Type>(array, expected);
+        case arrow::Type::INT16:
+            return CheckTypedIntValues<arrow::Int16Type>(array, expected);
+        case arrow::Type::INT32:
+            return CheckTypedIntValues<arrow::Int32Type>(array, expected);
+        case arrow::Type::INT64:
+            return CheckTypedIntValues<arrow::Int64Type>(array, expected);
+
+        case arrow::Type::TIMESTAMP:
+            return CheckTypedIntValues<arrow::TimestampType>(array, expected);
+        case arrow::Type::DURATION:
+            return CheckTypedIntValues<arrow::DurationType>(array, expected);
+
+        default:
+            UNIT_ASSERT(false);
+            //return false;
+    }
+    return true;
+}
+
 bool CheckOrdered(const TString& blob, const TString& srtSchema) {
     auto schema = NArrow::DeserializeSchema(srtSchema);
     auto batch = NArrow::DeserializeBatch(blob, schema);
@@ -135,12 +182,12 @@ void SetupSchema(TTestBasicRuntime& runtime, TActorId& sender, ui64 pathId,
     PlanSchemaTx(runtime, sender, snap);
 }
 
-void TestWriteImpl(const TVector<std::pair<TString, TTypeId>>& ydbSchema) {
+void TestWrite(const TVector<std::pair<TString, TTypeId>>& ydbSchema) {
     TTestBasicRuntime runtime;
     TTester::Setup(runtime);
 
     TActorId sender = runtime.AllocateEdgeActor();
-    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD), &CreateColumnShard);
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
 
     TDispatchOptions options;
     options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
@@ -218,15 +265,75 @@ void TestWriteImpl(const TVector<std::pair<TString, TTypeId>>& ydbSchema) {
     UNIT_ASSERT(!ok);
 }
 
-void TestWriteReadImpl(bool reboots, const TVector<std::pair<TString, TTypeId>>& ydbSchema = TTestSchema::YdbSchema(),
-                       TString codec = "") {
+// TODO: Improve test. It does not catch KIKIMR-14890
+void TestWriteReadDup() {
+    TTestBasicRuntime runtime;
+    TTester::Setup(runtime);
+
+    TActorId sender = runtime.AllocateEdgeActor();
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
+
+    TDispatchOptions options;
+    options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
+    runtime.DispatchEvents(options);
+
+    //
+
+    ui64 metaShard = TTestTxConfig::TxTablet1;
+    ui64 writeId = 0;
+    ui64 tableId = 1;
+
+    auto ydbSchema = TTestSchema::YdbSchema();
+    SetupSchema(runtime, sender, tableId, ydbSchema);
+
+    constexpr ui32 numRows = 10;
+    std::pair<ui64, ui64> portion = {10, 10 + numRows};
+    auto testData = MakeTestBlob(portion, ydbSchema);
+    TAutoPtr<IEventHandle> handle;
+
+    ui64 txId = 0;
+    ui64 initPlanStep = 100;
+    for (ui64 planStep = initPlanStep; planStep < initPlanStep + 50; ++planStep) {
+        TSet<ui64> txIds;
+        for (ui32 i = 0; i <= 5; ++i) {
+            UNIT_ASSERT(WriteData(runtime, sender, metaShard, ++writeId, tableId, testData));
+            ProposeCommit(runtime, sender, metaShard, ++txId, {writeId});
+            txIds.insert(txId);
+        }
+        PlanCommit(runtime, sender, planStep, txIds);
+
+        // read
+        if (planStep != initPlanStep) {
+            ForwardToTablet(runtime, TTestTxConfig::TxTablet0, sender,
+                        new TEvColumnShard::TEvRead(sender, metaShard, planStep-1, Max<ui64>(), tableId));
+            auto event = runtime.GrabEdgeEvent<TEvColumnShard::TEvReadResult>(handle);
+            UNIT_ASSERT(event);
+
+            auto& resRead = Proto(event);
+            UNIT_ASSERT_EQUAL(resRead.GetOrigin(), TTestTxConfig::TxTablet0);
+            UNIT_ASSERT_EQUAL(resRead.GetTxInitiator(), metaShard);
+            UNIT_ASSERT_EQUAL(resRead.GetStatus(), NKikimrTxColumnShard::EResultStatus::SUCCESS);
+            UNIT_ASSERT_EQUAL(resRead.GetBatch(), 0);
+            UNIT_ASSERT_EQUAL(resRead.GetFinished(), true);
+            UNIT_ASSERT(resRead.GetData().size() > 0);
+
+            auto data = resRead.GetData();
+            auto meta = resRead.GetMeta();
+            UNIT_ASSERT(CheckColumns(data, meta, TTestSchema::ExtractNames(ydbSchema), numRows));
+            UNIT_ASSERT(DataHas(TVector<TString>{data}, meta.GetSchema(), portion, true));
+        }
+    }
+}
+
+void TestWriteRead(bool reboots, const TVector<std::pair<TString, TTypeId>>& ydbSchema = TTestSchema::YdbSchema(),
+                   TString codec = "") {
     TTestBasicRuntime runtime;
     TTester::Setup(runtime);
 
     runtime.SetLogPriority(NKikimrServices::BLOB_CACHE, NActors::NLog::PRI_DEBUG);
 
     TActorId sender = runtime.AllocateEdgeActor();
-    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD), &CreateColumnShard);
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
 
     TDispatchOptions options;
     options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
@@ -664,7 +771,7 @@ void TestCompactionInGranuleImpl(bool reboots) {
     TTester::Setup(runtime);
 
     TActorId sender = runtime.AllocateEdgeActor();
-    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD), &CreateColumnShard);
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
 
     TDispatchOptions options;
     options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
@@ -796,28 +903,190 @@ void TestCompactionInGranuleImpl(bool reboots) {
     }
 }
 
-void TestReadWithProgramImpl()
+using TAssignment = NKikimrSSA::TProgram::TAssignment;
+using TAggAssignment = NKikimrSSA::TProgram::TAggregateAssignment;
+
+// SELECT timestamp FROM t WHERE timestamp <op> saved_at
+static NKikimrSSA::TProgram MakeSelect(TAssignment::EFunction compareId = TAssignment::FUNC_CMP_EQUAL) {
+    NKikimrSSA::TProgram ssa;
+
+    std::vector<ui32> columnIds = {1, 9};
+    ui32 tmpColumnId = 100;
+
+    auto* line1 = ssa.AddCommand();
+    auto* l1_assign = line1->MutableAssign();
+    l1_assign->MutableColumn()->SetId(tmpColumnId);
+    auto* l1_func = l1_assign->MutableFunction();
+    l1_func->SetId(compareId);
+    l1_func->AddArguments()->SetId(columnIds[0]);
+    l1_func->AddArguments()->SetId(columnIds[1]);
+
+    auto* line2 = ssa.AddCommand();
+    line2->MutableFilter()->MutablePredicate()->SetId(tmpColumnId);
+
+    auto* line3 = ssa.AddCommand();
+    line3->MutableProjection()->AddColumns()->SetId(columnIds[0]);
+    return ssa;
+}
+
+// SELECT min(x), max(x), some(x), count(x) FROM t
+NKikimrSSA::TProgram MakeSelectAggregates(ui32 columnId)
+{
+    NKikimrSSA::TProgram ssa;
+
+    auto* line1 = ssa.AddCommand();
+    auto* groupBy = line1->MutableGroupBy();
+    //
+    auto* l1_agg1 = groupBy->AddAggregates();
+    l1_agg1->MutableColumn()->SetId(100);
+    auto* l1_agg1_f = l1_agg1->MutableFunction();
+    l1_agg1_f->SetId(TAggAssignment::AGG_MIN);
+    l1_agg1_f->AddArguments()->SetId(columnId);
+    //
+    auto* l1_agg2 = groupBy->AddAggregates();
+    l1_agg2->MutableColumn()->SetId(101);
+    auto* l1_agg2_f = l1_agg2->MutableFunction();
+    l1_agg2_f->SetId(TAggAssignment::AGG_MAX);
+    l1_agg2_f->AddArguments()->SetId(columnId);
+    //
+    auto* l1_agg3 = groupBy->AddAggregates();
+    l1_agg3->MutableColumn()->SetId(102);
+    auto* l1_agg3_f = l1_agg3->MutableFunction();
+    l1_agg3_f->SetId(TAggAssignment::AGG_ANY);
+    l1_agg3_f->AddArguments()->SetId(columnId);
+    //
+    auto* l1_agg4 = groupBy->AddAggregates();
+    l1_agg4->MutableColumn()->SetId(103);
+    auto* l1_agg4_f = l1_agg4->MutableFunction();
+    l1_agg4_f->SetId(TAggAssignment::AGG_COUNT);
+    l1_agg4_f->AddArguments()->SetId(columnId);
+
+    auto* line2 = ssa.AddCommand();
+    auto* proj = line2->MutableProjection();
+    proj->AddColumns()->SetId(100);
+    proj->AddColumns()->SetId(101);
+    proj->AddColumns()->SetId(102);
+    proj->AddColumns()->SetId(103);
+    return ssa;
+}
+
+// SELECT min(x), max(x), some(x), count(x) FROM t WHERE y = 1
+NKikimrSSA::TProgram MakeSelectAggregatesWithFilter(ui32 columnId, ui32 filterColumnId)
+{
+    NKikimrSSA::TProgram ssa;
+
+    auto* line1 = ssa.AddCommand();
+    auto* l1_assign = line1->MutableAssign();
+    l1_assign->MutableColumn()->SetId(50);
+    l1_assign->MutableConstant()->SetInt32(1);
+
+    auto* line2 = ssa.AddCommand();
+    auto* l2_assign = line2->MutableAssign();
+    l2_assign->MutableColumn()->SetId(51);
+    auto* l2_func = l2_assign->MutableFunction();
+    l2_func->SetId(TAssignment::FUNC_CMP_EQUAL);
+    l2_func->AddArguments()->SetId(filterColumnId);
+    l2_func->AddArguments()->SetId(50);
+
+    auto* line3 = ssa.AddCommand();
+    line3->MutableFilter()->MutablePredicate()->SetId(51);
+
+    auto* line4 = ssa.AddCommand();
+    auto* groupBy = line4->MutableGroupBy();
+    //
+    auto* l4_agg1 = groupBy->AddAggregates();
+    l4_agg1->MutableColumn()->SetId(100);
+    auto* l4_agg1_f = l4_agg1->MutableFunction();
+    l4_agg1_f->SetId(TAggAssignment::AGG_MIN);
+    l4_agg1_f->AddArguments()->SetId(columnId);
+    //
+    auto* l4_agg2 = groupBy->AddAggregates();
+    l4_agg2->MutableColumn()->SetId(101);
+    auto* l4_agg2_f = l4_agg2->MutableFunction();
+    l4_agg2_f->SetId(TAggAssignment::AGG_MAX);
+    l4_agg2_f->AddArguments()->SetId(columnId);
+    //
+    auto* l4_agg3 = groupBy->AddAggregates();
+    l4_agg3->MutableColumn()->SetId(102);
+    auto* l4_agg3_f = l4_agg3->MutableFunction();
+    l4_agg3_f->SetId(TAggAssignment::AGG_ANY);
+    l4_agg3_f->AddArguments()->SetId(columnId);
+    //
+    auto* l4_agg4 = groupBy->AddAggregates();
+    l4_agg4->MutableColumn()->SetId(103);
+    auto* l4_agg4_f = l4_agg4->MutableFunction();
+    l4_agg4_f->SetId(TAggAssignment::AGG_COUNT);
+    l4_agg4_f->AddArguments()->SetId(columnId);
+
+    auto* line5 = ssa.AddCommand();
+    auto* proj = line5->MutableProjection();
+    proj->AddColumns()->SetId(100);
+    proj->AddColumns()->SetId(101);
+    proj->AddColumns()->SetId(102);
+    proj->AddColumns()->SetId(103);
+    return ssa;
+}
+
+void TestReadWithProgram(const TVector<std::pair<TString, TTypeId>>& ydbSchema = TTestSchema::YdbSchema())
 {
     TTestBasicRuntime runtime;
     TTester::Setup(runtime);
 
     TActorId sender = runtime.AllocateEdgeActor();
-    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD), &CreateColumnShard);
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
 
     TDispatchOptions options;
     options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
     runtime.DispatchEvents(options);
 
     ui64 metaShard = TTestTxConfig::TxTablet1;
+    ui64 writeId = 0;
     ui64 tableId = 1;
+    ui64 planStep = 100;
+    ui64 txId = 100;
 
     SetupSchema(runtime, sender, tableId);
+
+    { // write some data
+        bool ok = WriteData(runtime, sender, metaShard, writeId, tableId, MakeTestBlob({0, 100}, ydbSchema));
+        UNIT_ASSERT(ok);
+
+        ProposeCommit(runtime, sender, metaShard, txId, {writeId});
+        PlanCommit(runtime, sender, planStep, txId);
+    }
+
+    ui32 numWrong = 1;
+    std::vector<TString> programs;
+    programs.push_back("XXXYYYZZZ");
+
     {
-        auto* readEvent = new TEvColumnShard::TEvRead(sender, metaShard, 0, 0, tableId);
+        NKikimrSSA::TProgram ssa = MakeSelect(TAssignment::FUNC_CMP_EQUAL);
+        TString serialized;
+        UNIT_ASSERT(ssa.SerializeToString(&serialized));
+        NKikimrSSA::TOlapProgram program;
+        program.SetProgram(serialized);
+
+        programs.push_back("");
+        UNIT_ASSERT(program.SerializeToString(&programs.back()));
+    }
+
+    {
+        NKikimrSSA::TProgram ssa = MakeSelect(TAssignment::FUNC_CMP_NOT_EQUAL);
+        TString serialized;
+        UNIT_ASSERT(ssa.SerializeToString(&serialized));
+        NKikimrSSA::TOlapProgram program;
+        program.SetProgram(serialized);
+
+        programs.push_back("");
+        UNIT_ASSERT(program.SerializeToString(&programs.back()));
+    }
+
+    for (auto& programText : programs) {
+        auto* readEvent = new TEvColumnShard::TEvRead(sender, metaShard, planStep, txId, tableId);
         auto& readProto = Proto(readEvent);
 
         readProto.SetOlapProgramType(::NKikimrSchemeOp::EOlapProgramType::OLAP_PROGRAM_SSA_PROGRAM);
-        readProto.SetOlapProgram("XXXYYYZZZ");
+        readProto.SetOlapProgram(programText);
 
         ForwardToTablet(runtime, TTestTxConfig::TxTablet0, sender, readEvent);
 
@@ -835,12 +1104,13 @@ void TestReadWithProgramImpl()
         UNIT_ASSERT_EQUAL(resRead.GetData(), "");
     }
 
-    {
-        auto* readEvent = new TEvColumnShard::TEvRead(sender, metaShard, 0, 0, tableId);
+    ui32 i = 0;
+    for (auto& programText : programs) {
+        auto* readEvent = new TEvColumnShard::TEvRead(sender, metaShard, planStep, txId, tableId);
         auto& readProto = Proto(readEvent);
 
         readProto.SetOlapProgramType(::NKikimrSchemeOp::EOlapProgramType::OLAP_PROGRAM_SSA_PROGRAM_WITH_PARAMETERS);
-        readProto.SetOlapProgram("XXXYYYZZZ");
+        readProto.SetOlapProgram(programText);
 
         ForwardToTablet(runtime, TTestTxConfig::TxTablet0, sender, readEvent);
 
@@ -851,10 +1121,162 @@ void TestReadWithProgramImpl()
         auto& resRead = Proto(result);
         UNIT_ASSERT_EQUAL(resRead.GetOrigin(), TTestTxConfig::TxTablet0);
         UNIT_ASSERT_EQUAL(resRead.GetTxInitiator(), metaShard);
-        UNIT_ASSERT_EQUAL(resRead.GetStatus(), NKikimrTxColumnShard::EResultStatus::ERROR);
-        UNIT_ASSERT_EQUAL(resRead.GetBatch(), 0);
-        UNIT_ASSERT_EQUAL(resRead.GetFinished(), true);
-        UNIT_ASSERT_EQUAL(resRead.GetData(), "");
+        if (i < numWrong) {
+            UNIT_ASSERT_EQUAL(resRead.GetStatus(), NKikimrTxColumnShard::EResultStatus::ERROR);
+            UNIT_ASSERT_EQUAL(resRead.GetBatch(), 0);
+            UNIT_ASSERT_EQUAL(resRead.GetFinished(), true);
+            UNIT_ASSERT_EQUAL(resRead.GetData(), "");
+        } else {
+            UNIT_ASSERT_EQUAL(resRead.GetStatus(), NKikimrTxColumnShard::EResultStatus::SUCCESS);
+            UNIT_ASSERT_EQUAL(resRead.GetBatch(), 0);
+            UNIT_ASSERT_EQUAL(resRead.GetFinished(), true);
+            UNIT_ASSERT(resRead.GetData().size() > 0);
+
+            auto& meta = resRead.GetMeta();
+            auto& schema = meta.GetSchema();
+
+            TVector<TString> readData;
+            readData.push_back(resRead.GetData());
+
+            switch (i) {
+                case 1:
+                    UNIT_ASSERT(CheckColumns(readData[0], meta, {"timestamp"}));
+                    UNIT_ASSERT(DataHas(readData, schema, {0, 100}, true));
+                    break;
+                case 2:
+                    UNIT_ASSERT(CheckColumns(readData[0], meta, {"timestamp"}, 0));
+                    break;
+                default:
+                    break;
+            }
+        }
+        ++i;
+    }
+}
+
+void TestReadAggregate(const TVector<std::pair<TString, TTypeId>>& ydbSchema = TTestSchema::YdbAllTypesSchema()) {
+    TTestBasicRuntime runtime;
+    TTester::Setup(runtime);
+
+    TActorId sender = runtime.AllocateEdgeActor();
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
+
+    TDispatchOptions options;
+    options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
+    runtime.DispatchEvents(options);
+
+    ui64 metaShard = TTestTxConfig::TxTablet1;
+    ui64 writeId = 0;
+    ui64 tableId = 1;
+    ui64 planStep = 100;
+    ui64 txId = 100;
+
+    SetupSchema(runtime, sender, tableId, ydbSchema);
+
+    { // write some data
+        bool ok = WriteData(runtime, sender, metaShard, writeId, tableId, MakeTestBlob({0, 100}, ydbSchema));
+        UNIT_ASSERT(ok);
+
+        ProposeCommit(runtime, sender, metaShard, txId, {writeId});
+        PlanCommit(runtime, sender, planStep, txId);
+    }
+
+    // TODO: write some into index
+
+    std::vector<TString> programs;
+    THashSet<ui32> intResult;
+    THashSet<ui32> isFiltered;
+    THashSet<NScheme::TTypeId> intTypes = {
+        NTypeIds::Int8, NTypeIds::Int16, NTypeIds::Int32, NTypeIds::Int64,
+        NTypeIds::Uint8, NTypeIds::Uint16, NTypeIds::Uint32, NTypeIds::Uint64,
+        NTypeIds::Timestamp
+    };
+
+    ui32 prog = 0;
+    for (ui32 i = 0; i < ydbSchema.size(); ++i, ++prog) {
+        if (intTypes.count(ydbSchema[i].second)) {
+            intResult.insert(prog);
+        }
+
+        NKikimrSSA::TProgram ssa = MakeSelectAggregates(i + 1);
+        TString serialized;
+        UNIT_ASSERT(ssa.SerializeToString(&serialized));
+        NKikimrSSA::TOlapProgram program;
+        program.SetProgram(serialized);
+
+        programs.push_back("");
+        UNIT_ASSERT(program.SerializeToString(&programs.back()));
+    }
+
+    for (ui32 i = 0; i < ydbSchema.size(); ++i, ++prog) {
+        isFiltered.insert(prog);
+        if (intTypes.count(ydbSchema[i].second)) {
+            intResult.insert(prog);
+        }
+
+        NKikimrSSA::TProgram ssa = MakeSelectAggregatesWithFilter(i + 1, 4);
+        TString serialized;
+        UNIT_ASSERT(ssa.SerializeToString(&serialized));
+        NKikimrSSA::TOlapProgram program;
+        program.SetProgram(serialized);
+
+        programs.push_back("");
+        UNIT_ASSERT(program.SerializeToString(&programs.back()));
+    }
+
+    prog = 0;
+    for (auto& programText : programs) {
+        auto* readEvent = new TEvColumnShard::TEvRead(sender, metaShard, planStep, txId, tableId);
+        auto& readProto = Proto(readEvent);
+
+        readProto.SetOlapProgramType(::NKikimrSchemeOp::EOlapProgramType::OLAP_PROGRAM_SSA_PROGRAM_WITH_PARAMETERS);
+        readProto.SetOlapProgram(programText);
+
+        ForwardToTablet(runtime, TTestTxConfig::TxTablet0, sender, readEvent);
+
+        TAutoPtr<IEventHandle> handle;
+        auto result = runtime.GrabEdgeEvent<TEvColumnShard::TEvReadResult>(handle);
+        UNIT_ASSERT(result);
+
+        auto& resRead = Proto(result);
+        UNIT_ASSERT_EQUAL(resRead.GetOrigin(), TTestTxConfig::TxTablet0);
+        UNIT_ASSERT_EQUAL(resRead.GetTxInitiator(), metaShard);
+
+        {
+            UNIT_ASSERT_EQUAL(resRead.GetStatus(), NKikimrTxColumnShard::EResultStatus::SUCCESS);
+            UNIT_ASSERT_EQUAL(resRead.GetBatch(), 0);
+            UNIT_ASSERT_EQUAL(resRead.GetFinished(), true);
+            UNIT_ASSERT(resRead.GetData().size() > 0);
+
+            auto& meta = resRead.GetMeta();
+            auto& schema = meta.GetSchema();
+
+            TVector<TString> readData;
+            readData.push_back(resRead.GetData());
+            auto& data = readData[0];
+
+            auto batch = NArrow::DeserializeBatch(data, NArrow::DeserializeSchema(schema));
+            UNIT_ASSERT(batch);
+
+            UNIT_ASSERT(CheckColumns(data, meta, {"100", "101", "102", "103"}, 1));
+
+            // min, max, any, count
+            if (intResult.count(prog)) {
+                if (isFiltered.count(prog)) {
+                    UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("100"), {1}));
+                    UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("101"), {1}));
+                    UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("102"), {1}));
+                    UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("103"), {1}));
+                } else {
+                    UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("100"), {0}));
+                    UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("101"), {99}));
+                    //UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("102"), {0}));
+                    UNIT_ASSERT(CheckIntValues(batch->GetColumnByName("103"), {100}));
+                }
+            }
+        }
+
+        ++prog;
     }
 }
 
@@ -862,31 +1284,35 @@ void TestReadWithProgramImpl()
 
 Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
     Y_UNIT_TEST(Write) {
-        TestWriteImpl(TTestSchema::YdbSchema());
+        TestWrite(TTestSchema::YdbSchema());
     }
 
     Y_UNIT_TEST(WriteExoticTypes) {
-        TestWriteImpl(TTestSchema::YdbExoticSchema());
+        TestWrite(TTestSchema::YdbExoticSchema());
+    }
+
+    Y_UNIT_TEST(WriteReadDuplicate) {
+        TestWriteReadDup();
     }
 
     Y_UNIT_TEST(WriteRead) {
-        TestWriteReadImpl(false);
+        TestWriteRead(false);
     }
 
     Y_UNIT_TEST(WriteReadExoticTypes) {
-        TestWriteReadImpl(false, TTestSchema::YdbExoticSchema());
+        TestWriteRead(false, TTestSchema::YdbExoticSchema());
     }
 
     Y_UNIT_TEST(RebootWriteRead) {
-        TestWriteReadImpl(true);
+        TestWriteRead(true);
     }
 
     Y_UNIT_TEST(WriteReadNoCompression) {
-        TestWriteReadImpl(true, TTestSchema::YdbSchema(), "none");
+        TestWriteRead(true, TTestSchema::YdbSchema(), "none");
     }
 
     Y_UNIT_TEST(WriteReadZSTD) {
-        TestWriteReadImpl(true, TTestSchema::YdbSchema(), "zstd");
+        TestWriteRead(true, TTestSchema::YdbSchema(), "zstd");
     }
 
     Y_UNIT_TEST(CompactionInGranule) {
@@ -897,8 +1323,12 @@ Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
         TestCompactionInGranuleImpl(true);
     }
 
-    Y_UNIT_TEST(TestReadWithProgram) {
-        TestReadWithProgramImpl();
+    Y_UNIT_TEST(ReadWithProgram) {
+        TestReadWithProgram();
+    }
+
+    Y_UNIT_TEST(ReadAggregate) {
+        TestReadAggregate();
     }
 
     Y_UNIT_TEST(CompactionSplitGranule) {
@@ -906,7 +1336,7 @@ Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
         TTester::Setup(runtime);
 
         TActorId sender = runtime.AllocateEdgeActor();
-        CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD), &CreateColumnShard);
+        CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
 
         TDispatchOptions options;
         options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
@@ -1156,7 +1586,7 @@ Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
         TTester::Setup(runtime);
 
         TActorId sender = runtime.AllocateEdgeActor();
-        CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD), &CreateColumnShard);
+        CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
 
         TDispatchOptions options;
         options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));
@@ -1245,7 +1675,7 @@ Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
         runtime.SetLogPriority(NKikimrServices::BLOB_CACHE, NActors::NLog::PRI_DEBUG);
 
         TActorId sender = runtime.AllocateEdgeActor();
-        CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD), &CreateColumnShard);
+        CreateTestBootstrapper(runtime, CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard), &CreateColumnShard);
 
         TDispatchOptions options;
         options.FinalEvents.push_back(TDispatchOptions::TFinalEventCondition(TEvTablet::EvBoot));

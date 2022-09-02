@@ -32,11 +32,24 @@ public:
     ~THTTPMockGateway() {
     }
 
+    static TString PrintKey(const TKeyType& key) {
+        TStringBuilder ret;
+        ret << "{ Url: \"" << std::get<0>(key) << "\"";
+        ret << " Headers: [";
+        for (const TString& header : std::get<1>(key)) {
+            ret << " \"" << header << "\"";
+        }
+        ret << " ] Data: \"" << std::get<2>(key) << "\" }";
+        return std::move(ret);
+    }
+
+    void Upload(TString, THeaders, TString, TOnResult, bool, IRetryPolicy<long>::TPtr) {}
+
     void Download(
             TString url,
-            IHTTPGateway::THeaders headers,
+            THeaders headers,
             std::size_t expectedSize,
-            IHTTPGateway::TOnResult callback,
+            TOnResult callback,
             TString data,
             IRetryPolicy<long>::TPtr retryPolicy)
     {
@@ -52,16 +65,18 @@ public:
         } else if (DefaultResponse) {
             callback(DefaultResponse(url, headers, data));
         } else {
-            YQL_ENSURE(false, "There isn't any response callback at url "  + url);
+            YQL_ENSURE(false, "There isn't any response callback for " + PrintKey(key));
         }
     }
 
-     virtual void Download(
+     TCancelHook Download(
             TString ,
-            IHTTPGateway::THeaders ,
+            THeaders ,
             std::size_t ,
-            IHTTPGateway::TOnNewDataPart ,
-            IHTTPGateway::TOnDowloadFinsh ) {
+            TOnDownloadStart ,
+            TOnNewDataPart ,
+            TOnDownloadFinish ) final {
+        return {};
     }
 
     void AddDefaultResponse(TDataDefaultResponse response) {
@@ -70,7 +85,7 @@ public:
 
     void AddDownloadResponse(
             TString url,
-            IHTTPGateway::THeaders headers,
+            THeaders headers,
             TString data,
             TDataResponse response) {
 

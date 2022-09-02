@@ -4,7 +4,7 @@
 
 namespace NKikimr {
 
-TPDiskMon::TPDiskMon(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters, ui32 pDiskId,
+TPDiskMon::TPDiskMon(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, ui32 pDiskId,
         TPDiskConfig *cfg)
     : Counters(counters)
     , PDiskId(pDiskId)
@@ -95,7 +95,7 @@ TPDiskMon::TPDiskMon(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counter
     QueueRequests = QueueGroup->GetCounter("QueueRequests", true);
     QueueBytes = QueueGroup->GetCounter("QueueBytes", true);
 
-    auto deviceType = cfg ? cfg->PDiskCategory.Type() : TPDiskCategory::DEVICE_TYPE_UNKNOWN;
+    auto deviceType = cfg ? cfg->PDiskCategory.Type() : NPDisk::DEVICE_TYPE_UNKNOWN;
 
     // scheduler subgroup
     ForsetiCbsNotFound = SchedulerGroup->GetCounter("ForsetiCbsNotFound");
@@ -188,6 +188,7 @@ TPDiskMon::TPDiskMon(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counter
     CheckSpace.Setup(PDiskGroup, "YardCheckSpace");
     YardConfigureScheduler.Setup(PDiskGroup, "YardConfigureScheduler");
     ChunkReserve.Setup(PDiskGroup, "YardChunkReserve");
+    ChunkForget.Setup(PDiskGroup, "YardChunkForget");
     Harakiri.Setup(PDiskGroup, "YardHarakiri");
     YardSlay.Setup(PDiskGroup, "YardSlay");
     YardControl.Setup(PDiskGroup, "YardControl");
@@ -218,7 +219,7 @@ TPDiskMon::TPDiskMon(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counter
     CompletionThreadCPU = PDiskGroup->GetCounter("CompletionThreadCPU", true);
 }
 
-NMonitoring::TDynamicCounters::TCounterPtr TPDiskMon::GetBusyPeriod(const TString& owner, const TString& queue) {
+::NMonitoring::TDynamicCounters::TCounterPtr TPDiskMon::GetBusyPeriod(const TString& owner, const TString& queue) {
     return SchedulerGroup->GetCounter("SchedulerBusyPeriod_" + owner + "_" + queue, true);
 }
 

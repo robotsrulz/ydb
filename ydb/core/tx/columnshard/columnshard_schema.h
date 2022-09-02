@@ -47,6 +47,7 @@ struct Schema : NIceDb::Schema {
         LastGcBarrierGen = 8,
         LastGcBarrierStep = 9,
         LastExportNumber = 10,
+        StorePathId = 11,
     };
 
     enum class EInsertTableIds : ui8 {
@@ -189,13 +190,13 @@ struct Schema : NIceDb::Schema {
         struct Committed : Column<1, NScheme::NTypeIds::Byte> {};
         struct ShardOrPlan : Column<2, NScheme::NTypeIds::Uint64> {};
         struct WriteTxId : Column<3, NScheme::NTypeIds::Uint64> {};
-        struct LogicalTableId : Column<4, NScheme::NTypeIds::Uint64> {};
+        struct PathId : Column<4, NScheme::NTypeIds::Uint64> {};
         struct DedupId : Column<5, NScheme::NTypeIds::String> {};
         struct BlobId : Column<6, NScheme::NTypeIds::String> {};
         struct Meta : Column<7, NScheme::NTypeIds::String> {};
 
-        using TKey = TableKey<Committed, ShardOrPlan, WriteTxId, LogicalTableId, DedupId>;
-        using TColumns = TableColumns<Committed, ShardOrPlan, WriteTxId, LogicalTableId, DedupId, BlobId, Meta>;
+        using TKey = TableKey<Committed, ShardOrPlan, WriteTxId, PathId, DedupId>;
+        using TColumns = TableColumns<Committed, ShardOrPlan, WriteTxId, PathId, DedupId, BlobId, Meta>;
     };
 
     struct IndexGranules : NIceDb::Schema::Table<GranulesTableId> {
@@ -360,37 +361,7 @@ struct Schema : NIceDb::Schema {
     static void EraseSchemaPresetInfo(NIceDb::TNiceDb& db, ui64 id) {
         db.Table<SchemaPresetInfo>().Key(id).Delete();
     }
-#if 0
-    static void SaveTtlSettingsPresetInfo(NIceDb::TNiceDb& db, ui64 id, const TString& name) {
-        db.Table<TtlSettingsPresetInfo>().Key(id).Update(
-            NIceDb::TUpdate<TtlSettingsPresetInfo::Name>(name));
-    }
 
-    static void SaveTtlSettingsPresetVersionInfo(
-            NIceDb::TNiceDb& db,
-            ui64 id, const TRowVersion& version,
-            const NKikimrTxColumnShard::TTtlSettingsPresetVersionInfo& info)
-    {
-        TString serialized;
-        Y_VERIFY(info.SerializeToString(&serialized));
-        db.Table<TtlSettingsPresetVersionInfo>().Key(id, version.Step, version.TxId).Update(
-            NIceDb::TUpdate<TtlSettingsPresetVersionInfo::InfoProto>(serialized));
-    }
-
-    static void SaveTtlSettingsPresetDropVersion(NIceDb::TNiceDb& db, ui64 id, const TRowVersion& dropVersion) {
-        db.Table<TtlSettingsPresetInfo>().Key(id).Update(
-            NIceDb::TUpdate<TtlSettingsPresetInfo::DropStep>(dropVersion.Step),
-            NIceDb::TUpdate<TtlSettingsPresetInfo::DropTxId>(dropVersion.TxId));
-    }
-
-    static void EraseTtlSettingsPresetVersionInfo(NIceDb::TNiceDb& db, ui64 id, const TRowVersion& version) {
-        db.Table<TtlSettingsPresetVersionInfo>().Key(id, version.Step, version.TxId).Delete();
-    }
-
-    static void EraseTtlSettingsPresetInfo(NIceDb::TNiceDb& db, ui64 id) {
-        db.Table<TtlSettingsPresetInfo>().Key(id).Delete();
-    }
-#endif
     static void SaveTableInfo(NIceDb::TNiceDb& db, ui64 pathId) {
         db.Table<TableInfo>().Key(pathId).Update();
     }
@@ -486,7 +457,7 @@ struct Schema : NIceDb::Schema {
             EInsertTableIds recType = (EInsertTableIds)rowset.GetValue<InsertTable::Committed>();
             ui64 shardOrPlan = rowset.GetValue<InsertTable::ShardOrPlan>();
             ui64 writeTxId = rowset.GetValueOrDefault<InsertTable::WriteTxId>();
-            ui64 tableId = rowset.GetValue<InsertTable::LogicalTableId>();
+            ui64 pathId = rowset.GetValue<InsertTable::PathId>();
             TString dedupId = rowset.GetValue<InsertTable::DedupId>();
             TString strBlobId = rowset.GetValue<InsertTable::BlobId>();
             TString metaStr = rowset.GetValue<InsertTable::Meta>();
@@ -501,17 +472,17 @@ struct Schema : NIceDb::Schema {
                 writeTime = TInstant::Seconds(meta.GetDirtyWriteTimeSeconds());
             }
 
-            TInsertedData data(shardOrPlan, writeTxId, tableId, dedupId, blobId, metaStr, writeTime);
+            TInsertedData data(shardOrPlan, writeTxId, pathId, dedupId, blobId, metaStr, writeTime);
 
             switch (recType) {
                 case EInsertTableIds::Inserted:
-                    inserted[TWriteId{data.WriteTxId}] = std::move(data);
+                    inserted.emplace(TWriteId{data.WriteTxId}, std::move(data));
                     break;
                 case EInsertTableIds::Committed:
                     committed[data.PathId].emplace(data);
                     break;
                 case EInsertTableIds::Aborted:
-                    aborted[TWriteId{data.WriteTxId}] = std::move(data);
+                    aborted.emplace(TWriteId{data.WriteTxId}, std::move(data));
                     break;
             }
 

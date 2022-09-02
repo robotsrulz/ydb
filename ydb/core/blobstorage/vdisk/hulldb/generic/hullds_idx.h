@@ -187,7 +187,7 @@ namespace NKikimr {
         TAtomic HullCompReadsInFlight = 0;
         TAtomic HullCompWritesInFlight = 0;
 
-        TIntrusivePtr<TDelayedHugeBlobDeleterInfo> DelayedHugeBlobDeleterInfo;
+        TIntrusivePtr<TDelayedCompactionDeleterInfo> DelayedCompactionDeleterInfo;
         std::shared_ptr<TLevelIndexActorCtx> ActorCtx;
 
     private:
@@ -205,7 +205,7 @@ namespace NKikimr {
         TLevelIndexSnapshot PrivateGetSnapshot(TActorSystem *actorSystemToNotifyLevelIndex) {
             Y_VERIFY_DEBUG(Loaded);
             return TLevelIndexSnapshot(CurSlice, Fresh.GetSnapshot(), CurSlice->Level0CurSstsNum(),
-                    actorSystemToNotifyLevelIndex, DelayedHugeBlobDeleterInfo);
+                    actorSystemToNotifyLevelIndex, DelayedCompactionDeleterInfo);
         }
 
     public:
@@ -230,7 +230,7 @@ namespace NKikimr {
             , Ctx(std::make_shared<TLevelIndexCtx>())
             , Fresh(settings, TAppData::TimeProvider, std::move(arena))
             , CurSlice(MakeIntrusive<TLevelSlice>(settings, Ctx))
-            , DelayedHugeBlobDeleterInfo(new TDelayedHugeBlobDeleterInfo)
+            , DelayedCompactionDeleterInfo(new TDelayedCompactionDeleterInfo)
             , ActorCtx(std::make_shared<TLevelIndexActorCtx>())
             , CompactedLsn()
         {}
@@ -244,7 +244,7 @@ namespace NKikimr {
             , Fresh(settings, TAppData::TimeProvider, std::move(arena))
             , CurSlice(MakeIntrusive<TLevelSlice>(settings, Ctx, pb))
             , CurEntryPointLsn(entryPointLsn)
-            , DelayedHugeBlobDeleterInfo(new TDelayedHugeBlobDeleterInfo)
+            , DelayedCompactionDeleterInfo(new TDelayedCompactionDeleterInfo)
             , ActorCtx(std::make_shared<TLevelIndexActorCtx>())
             , NextSstId(pb.GetNextSstId())
             , CompactedLsn(pb)
@@ -282,9 +282,9 @@ namespace NKikimr {
         }
 
         // Fresh Compaction
-        bool NeedsFreshCompaction(ui64 yardFreeUpToLsn) const {
+        bool NeedsFreshCompaction(ui64 yardFreeUpToLsn, bool force) const {
             Y_VERIFY_DEBUG(Loaded);
-            return Fresh.NeedsCompaction(yardFreeUpToLsn);
+            return Fresh.NeedsCompaction(yardFreeUpToLsn, force);
         }
 
         TIntrusivePtr<TFreshSegment> FindFreshSegmentForCompaction() {
@@ -361,6 +361,7 @@ namespace NKikimr {
         }
 
         void OutputHtml(const TString &name, IOutputStream &str) const;
+        void OutputProto(NKikimrVDisk::LevelIndexStat *stat) const;
         void OutputHugeStatButton(const TString &name, IOutputStream &str) const;
         void OutputQueryDbButton(const TString &name, IOutputStream &str) const;
 

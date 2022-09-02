@@ -90,6 +90,75 @@ Y_UNIT_TEST_SUITE(KqpSystemView) {
         ])", StreamResultToYson(it));
     }
 
+    Y_UNIT_TEST(PartitionStatsRanges) {
+        TKikimrRunner kikimr;
+        auto client = kikimr.GetTableClient();
+
+        auto it = client.StreamExecuteScanQuery(R"(
+            PRAGMA Kikimr.OptEnablePredicateExtract = "true";
+            SELECT OwnerId, PartIdx, Path, PathId
+            FROM `/Root/.sys/partition_stats`
+            WHERE
+            OwnerId = 72057594046644480ul
+            AND PathId = 5u
+            AND (PartIdx BETWEEN 0 AND 2 OR PartIdx BETWEEN 6 AND 9)
+            ORDER BY PathId, PartIdx;
+        )").GetValueSync();
+
+        UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
+
+        CompareYson(R"([
+            [[72057594046644480u];[0u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[1u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[2u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[6u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[7u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[8u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[9u];["/Root/BatchUpload"];[5u]];
+        ])", StreamResultToYson(it));
+    }
+
+    Y_UNIT_TEST(PartitionStatsParametricRanges) {
+        TKikimrRunner kikimr;
+        auto client = kikimr.GetTableClient();
+
+        auto paramsBuilder = client.GetParamsBuilder();
+        auto params = paramsBuilder
+            .AddParam("$l1").Int32(0).Build()
+            .AddParam("$r1").Int32(2).Build()
+            .AddParam("$l2").Int32(6).Build()
+            .AddParam("$r2").Int32(9).Build().Build();
+
+        auto it = client.StreamExecuteScanQuery(R"(
+            DECLARE $l1 AS Int32;
+            DECLARE $r1 AS Int32;
+
+            DECLARE $l2 AS Int32;
+            DECLARE $r2 AS Int32;
+
+            PRAGMA Kikimr.OptEnablePredicateExtract = "true";
+            SELECT OwnerId, PartIdx, Path, PathId
+            FROM `/Root/.sys/partition_stats`
+            WHERE
+            OwnerId = 72057594046644480ul
+            AND PathId = 5u
+            AND (PartIdx BETWEEN $l1 AND $r1 OR PartIdx BETWEEN $l2 AND $r2)
+            ORDER BY PathId, PartIdx;
+        )", params).GetValueSync();
+
+        UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
+
+        CompareYson(R"([
+            [[72057594046644480u];[0u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[1u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[2u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[6u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[7u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[8u];["/Root/BatchUpload"];[5u]];
+            [[72057594046644480u];[9u];["/Root/BatchUpload"];[5u]];
+        ])", StreamResultToYson(it));
+    }
+
     Y_UNIT_TEST(PartitionStatsRange1) {
         TKikimrRunner kikimr;
         auto client = kikimr.GetTableClient();
@@ -311,6 +380,52 @@ Y_UNIT_TEST_SUITE(KqpSystemView) {
         checkTable("`/Root/.sys/top_queries_by_cpu_time_one_hour`");
     }
 
+    Y_UNIT_TEST_TWIN(QueryStatsScan, UseSessionActor) {
+        auto checkTable = [&] (const TStringBuf tableName) {
+            auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
+            auto client = kikimr.GetTableClient();
+
+            {
+                auto it = kikimr.GetTableClient().StreamExecuteScanQuery(R"(
+                    SELECT COUNT(*) FROM `/Root/EightShard`
+                )").GetValueSync();
+
+                UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
+                CompareYson(R"([[24u]])", StreamResultToYson(it));
+            }
+
+            TStringStream request;
+            request << "SELECT ReadBytes FROM " << tableName << " ORDER BY ReadBytes";
+
+            auto it = client.StreamExecuteScanQuery(request.Str()).GetValueSync();
+            UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
+
+            TSet<ui64> readBytesSet;
+            for (;;) {
+                auto streamPart = it.ReadNext().GetValueSync();
+                if (!streamPart.IsSuccess()) {
+                    UNIT_ASSERT_C(streamPart.EOS(), streamPart.GetIssues().ToString());
+                    break;
+                }
+
+                if (streamPart.HasResultSet()) {
+                    auto resultSet = streamPart.ExtractResultSet();
+
+                    NYdb::TResultSetParser parser(resultSet);
+                    while (parser.TryNextRow()) {
+                        auto value = parser.ColumnParser("ReadBytes").GetOptionalUint64();
+                        UNIT_ASSERT(value);
+                        readBytesSet.emplace(*value);
+                    }
+                }
+            }
+
+            UNIT_ASSERT(readBytesSet.contains(192)); // EightShard
+        };
+
+        checkTable("`/Root/.sys/top_queries_by_read_bytes_one_minute`");
+    }
+
     Y_UNIT_TEST(FailNavigate) {
         TKikimrRunner kikimr("user0@builtin");
         auto client = kikimr.GetTableClient();
@@ -349,7 +464,8 @@ Y_UNIT_TEST_SUITE(KqpSystemView) {
 
         UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
         auto streamPart = it.ReadNext().GetValueSync();
-        UNIT_ASSERT_VALUES_EQUAL(streamPart.GetStatus(), EStatus::SCHEME_ERROR);
+        // TODO: Should be UNAUTHORIZED
+        UNIT_ASSERT_VALUES_EQUAL(streamPart.GetStatus(), EStatus::ABORTED);
         driver.Stop(true);
     }
 

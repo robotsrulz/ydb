@@ -64,12 +64,21 @@ bool TTxWrite::Execute(TTransactionContext& txc, const TActorContext&) {
         NOlap::TDbWrapper dbTable(txc.DB, &dsGroupSelector);
         ok = Self->InsertTable->Insert(dbTable, NOlap::TInsertedData(metaShard, writeId, tableId, dedupId, logoBlobId, metaStr, time));
         if (ok) {
-            auto newAborted = Self->InsertTable->AbortOld(dbTable, time);
-            for (auto& writeId : newAborted) {
-                Self->RemoveLongTxWrite(db, writeId);
+            auto writesToAbort = Self->InsertTable->OldWritesToAbort(time);
+            std::vector<TWriteId> failedAborts;
+            for (auto& writeId : writesToAbort) {
+                if (!Self->RemoveLongTxWrite(db, writeId)) {
+                    failedAborts.push_back(writeId);
+                }
+            }
+            for (auto& writeId : failedAborts) {
+                writesToAbort.erase(writeId);
+            }
+            if (!writesToAbort.empty()) {
+                Self->InsertTable->Abort(dbTable, {}, writesToAbort);
             }
 
-            // TODO: It leads to write+erase for new aborted rows. AbortOld() inserts rows, EraseAborted() erases them.
+            // TODO: It leads to write+erase for aborted rows. Abort() inserts rows, EraseAborted() erases them.
             // It's not optimal but correct.
             TBlobManagerDb blobManagerDb(txc.DB);
             auto allAborted = Self->InsertTable->GetAborted(); // copy (src is modified in cycle)
@@ -126,41 +135,75 @@ void TTxWrite::Complete(const TActorContext& ctx) {
 void TColumnShard::Handle(TEvColumnShard::TEvWrite::TPtr& ev, const TActorContext& ctx) {
     OnYellowChannels(std::move(ev->Get()->YellowMoveChannels), std::move(ev->Get()->YellowStopChannels));
 
-    auto& data = Proto(ev->Get()).GetData();
-    const ui64 tableId = ev->Get()->Record.GetTableId();
-    bool error = data.empty() || data.size() > TLimits::MAX_BLOB_SIZE || !PrimaryIndex || !IsTableWritable(tableId)
-        || ev->Get()->PutStatus == NKikimrProto::ERROR;
+    auto& record = Proto(ev->Get());
+    auto& data = record.GetData();
+    ui64 tableId = record.GetTableId();
+    ui64 metaShard = record.GetTxInitiator();
+    ui64 writeId = record.GetWriteId();
+    TString dedupId = record.GetDedupId();
 
-    if (error) {
-        LOG_S_WARN("Write (fail) " << data.size() << " bytes at tablet " << TabletID());
+    bool isWritable = IsTableWritable(tableId);
+    bool error = data.empty() || data.size() > TLimits::MAX_BLOB_SIZE || !PrimaryIndex || !isWritable;
+    bool errorReturned = (ev->Get()->PutStatus != NKikimrProto::OK) && (ev->Get()->PutStatus != NKikimrProto::UNKNOWN);
+    bool isOutOfSpace = IsAnyChannelYellowStop();
 
-        ev->Get()->PutStatus = NKikimrProto::ERROR;
-        Execute(new TTxWrite(this, ev), ctx);
-    } else if (InsertTable->IsOverloaded(tableId)) {
-        LOG_S_INFO("Write (overload) " << data.size() << " bytes for table " << tableId << " at tablet " << TabletID());
+    if (error || errorReturned) {
+        LOG_S_WARN("Write (fail) " << data.size() << " bytes into pathId " << tableId
+            << ", status " << ev->Get()->PutStatus
+            << (PrimaryIndex? "": ", no index") << (isWritable? "": ", ro")
+            << " at tablet " << TabletID());
 
-        ev->Get()->PutStatus = NKikimrProto::TRYLATER;
-        Execute(new TTxWrite(this, ev), ctx);
-    } else if (ev->Get()->BlobId.IsValid()) {
-        LOG_S_DEBUG("Write (record) " << data.size() << " bytes at tablet " << TabletID());
+        IncCounter(COUNTER_WRITE_FAIL);
 
-        Execute(new TTxWrite(this, ev), ctx);
-    } else {
-        if (IsAnyChannelYellowStop()) {
-            LOG_S_ERROR("Write (out of disk space) at tablet " << TabletID());
-
-            IncCounter(COUNTER_OUT_OF_SPACE);
-            ev->Get()->PutStatus = NKikimrProto::TRYLATER;
-            Execute(new TTxWrite(this, ev), ctx);
-        } else {
-            LOG_S_DEBUG("Write (blob) " << data.size() << " bytes at tablet " << TabletID());
-
-            ev->Get()->MaxSmallBlobSize = Settings.MaxSmallBlobSize;
-
-            ctx.Register(CreateWriteActor(TabletID(), PrimaryIndex->GetIndexInfo(), ctx.SelfID,
-                BlobManager->StartBlobBatch(), Settings.BlobWriteGrouppingEnabled, ev->Release()));
+        auto errCode = NKikimrTxColumnShard::EResultStatus::ERROR;
+        if (errorReturned) {
+            if (ev->Get()->PutStatus == NKikimrProto::TIMEOUT) {
+                errCode = NKikimrTxColumnShard::EResultStatus::TIMEOUT;
+            }
+            --WritesInFly; // write failed
         }
+
+        auto result = std::make_unique<TEvColumnShard::TEvWriteResult>(
+            TabletID(), metaShard, writeId, tableId, dedupId, errCode);
+        ctx.Send(ev->Get()->GetSource(), result.release());
+
+    } else if (ev->Get()->BlobId.IsValid()) {
+        LOG_S_DEBUG("Write (record) " << data.size() << " bytes into pathId " << tableId
+            << (writeId? (" writeId " + ToString(writeId)).c_str() : "") << " at tablet " << TabletID());
+
+        --WritesInFly; // write successed
+        Execute(new TTxWrite(this, ev), ctx);
+    } else if (isOutOfSpace || InsertTable->IsOverloaded(tableId) || ShardOverloaded()) {
+        IncCounter(COUNTER_WRITE_FAIL);
+
+        if (isOutOfSpace) {
+            IncCounter(COUNTER_OUT_OF_SPACE);
+            LOG_S_ERROR("Write (out of disk space) " << data.size() << " bytes into pathId " << tableId
+                << " at tablet " << TabletID());
+        } else {
+            IncCounter(COUNTER_WRITE_OVERLOAD);
+            bool tableOverload = InsertTable->IsOverloaded(tableId);
+            LOG_S_INFO("Write (overload) " << data.size() << " bytes into pathId " << tableId
+                << (ShardOverloaded()? " [shard]" : "") << (tableOverload? " [table]" : "")
+                << " at tablet " << TabletID());
+        }
+
+        auto result = std::make_unique<TEvColumnShard::TEvWriteResult>(
+            TabletID(), metaShard, writeId, tableId, dedupId, NKikimrTxColumnShard::EResultStatus::OVERLOADED);
+        ctx.Send(ev->Get()->GetSource(), result.release());
+    } else {
+        LOG_S_DEBUG("Write (blob) " << data.size() << " bytes into pathId " << tableId
+            << (writeId? (" writeId " + ToString(writeId)).c_str() : "")
+            << " at tablet " << TabletID());
+
+        ev->Get()->MaxSmallBlobSize = Settings.MaxSmallBlobSize;
+
+        ++WritesInFly; // write started
+        ctx.Register(CreateWriteActor(TabletID(), PrimaryIndex->GetIndexInfo(), ctx.SelfID,
+            BlobManager->StartBlobBatch(), Settings.BlobWriteGrouppingEnabled, ev->Release()));
     }
+
+    SetCounter(COUNTER_WRITES_IN_FLY, WritesInFly);
 }
 
 }

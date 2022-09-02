@@ -54,7 +54,7 @@ private:
             Processor = new TSearchEventsProcessor(
                     SchemePath,
                     TDuration::Minutes(10), TDuration::MilliSeconds(100),
-                    parent->TableClient,
+                    TString(),
                     EventsWriter,
                     true
             );
@@ -71,7 +71,7 @@ private:
         }
         ~TTestRunner() {
             if (Processor != nullptr) {
-                auto handle = new IEventHandle(ProcessorId, TActorId(), new TEvWakeup(TSearchEventsProcessor::StopAllTag));
+                auto handle = new IEventHandle(ProcessorId, TActorId(), new TEvents::TEvPoisonPill());
                 Parent->Server->GetRuntime()->Send(handle);
             }
         }
@@ -133,7 +133,7 @@ private:
             if (ts == TInstant::Zero())
                 ts = CurrTs;
             TStringBuilder queryBuilder;
-            queryBuilder << "UPSERT INTO [" << SchemePath << "/.Events] (Account, QueueName, EventType, CustomQueueName, EventTimestamp, FolderId) "
+            queryBuilder << "UPSERT INTO `" << SchemePath << "/.Events` (Account, QueueName, EventType, CustomQueueName, EventTimestamp, FolderId) "
                          << "VALUES (\"" << account << "\", \"" << queueName << "\", " << static_cast<ui64>(type) << ", \"myQueueCustomName\", "
                          << ts.MilliSeconds() << ", \"myFolder\");";
             ExecDataQuery(queryBuilder.c_str());
@@ -143,7 +143,7 @@ private:
             if (ts == TInstant::Zero())
                 ts = CurrTs;
             TStringBuilder queryBuilder;
-            queryBuilder << "UPSERT INTO [" << SchemePath << "/.Queues] (Account, QueueName, CustomQueueName, CreatedTimestamp, FolderId) "
+            queryBuilder << "UPSERT INTO `" << SchemePath << "/.Queues` (Account, QueueName, CustomQueueName, CreatedTimestamp, FolderId) "
                          << "VALUES (\"" << account << "\", \"" << queueName << "\", \"myQueueCustomName\", "
                          << ts.MilliSeconds() << ", \"myFolder\");";
             ExecDataQuery(queryBuilder.c_str());
@@ -158,7 +158,7 @@ private:
             auto session = getRessionResult.GetSession();
             TStringBuilder queryBuilder;
             queryBuilder << "DECLARE $QueueName as Utf8; "
-                         << "UPSERT INTO [" << SchemePath << "/.Queues] "
+                         << "UPSERT INTO `" << SchemePath << "/.Queues` "
                          << "(Account, QueueName, CustomQueueName, CreatedTimestamp, FolderId) "
                          << "VALUES (\"" << account << "\", $QueueName, \"myQueueCustomName\", "
                          << CurrTs.MilliSeconds() << ", \"myFolder\");";
@@ -201,7 +201,7 @@ private:
             TStringBuilder queryBuilder;
             TMaybe<NYdb::NTable::TDataQueryResult> countEventsResult;
 
-            queryBuilder << "select count(*) as Count from [" << SchemePath << "/." << table << "];";
+            queryBuilder << "select count(*) as Count from `" << SchemePath << "/." << table << "`;";
             auto status = Parent->TableClient->RetryOperation<NYdb::NTable::TDataQueryResult>([query = TString(queryBuilder), &countEventsResult](NYdb::NTable::TSession session) {
                 return session.ExecuteDataQuery(
                         query, NYdb::NTable::TTxControl::BeginTx().CommitTx(),
@@ -228,7 +228,7 @@ private:
             auto initialCount = Processor->GetReindexCount();
             DispatchOpts.CustomFinalCondition = [initialCount, processor = Processor]() { return processor->GetReindexCount() > initialCount; };
             if (!initialCount) {
-                auto handle = new IEventHandle(ProcessorId, TActorId(), new TEvWakeup(TSearchEventsProcessor::StartQueuesListingTag));
+                auto handle = new IEventHandle(ProcessorId, TActorId(), new TEvWakeup());
                 Parent->Server->GetRuntime()->Send(handle);
             }
             Parent->Server->GetRuntime()->DispatchEvents(DispatchOpts, TDuration::Minutes(1));

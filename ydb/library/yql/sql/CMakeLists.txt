@@ -6,6 +6,11 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(pg)
+add_subdirectory(pg_dummy)
+add_subdirectory(settings)
+add_subdirectory(v0)
+add_subdirectory(v1)
 
 add_library(library-yql-sql)
 target_link_libraries(library-yql-sql PUBLIC
@@ -16,6 +21,7 @@ target_link_libraries(library-yql-sql PUBLIC
   yql-sql-v0
   sql-v0-lexer
   yql-sql-v1
+  sql-v1-format
   sql-v1-lexer
   sql-v1-proto_parser
   library-yql-utils

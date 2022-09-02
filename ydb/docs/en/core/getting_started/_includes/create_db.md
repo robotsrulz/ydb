@@ -4,15 +4,15 @@ Detailed information about databases can be found in the article [Terms and defi
 
 {% include [create_db_overlay.md](create_db_overlay.md) %}
 
-## Self-hosted deployment {#self-hosted}
+## Simple self-hosted deployment {#self-hosted}
 
-There are three methods you can use to deploy {{ ydb-short-name }}:
+One of the following methods can be used to deploy a local single-node cluster of {{ ydb-short-name }} running a single database:
 
-* [Using Docker](../self_hosted/ydb_docker.md).
-* [In Kubernetes](../../deploy/orchestrated/concepts.md).
-* [Locally, from a downloaded executable file](../self_hosted/ydb_local.md).
+{% include [simple_options](../self_hosted/_includes/simple_options.md) %}
 
-## Next step {#next}
+Documentation on the deployment of mupltiple nodes clusters running number of databases is given in the [Cluster management](../../deploy/index.md) section.
 
-After creating your database, proceed to the [Authentication - Getting started](../auth.md) article.
+## Learn more about YDB {#next}
+
+After creating your database, proceed to the [Authentication - Getting started](../auth.md) article to learn more about YDB.
 

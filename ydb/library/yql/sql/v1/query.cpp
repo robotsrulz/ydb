@@ -1046,6 +1046,18 @@ public:
             actions = L(actions, Q(Y(Q("renameTo"), destination)));
         }
 
+        if (Params.RenameIndexTo) {
+            auto src = BuildQuotedAtom(Params.RenameIndexTo->first.Pos, Params.RenameIndexTo->first.Name);
+            auto dst = BuildQuotedAtom(Params.RenameIndexTo->second.Pos, Params.RenameIndexTo->second.Name);
+
+            auto desc = Y();
+
+            desc = L(desc, Q(Y(Q("src"), src)));
+            desc = L(desc, Q(Y(Q("dst"), dst)));
+
+            actions = L(actions, Q(Y(Q("renameIndexTo"), Q(desc))));
+        }
+
         for (const auto& cf : Params.AddChangefeeds) {
             const auto& desc = CreateChangefeedDesc(cf, *this);
             actions = L(actions, Q(Y(Q("addChangefeed"), Q(desc))));
@@ -1774,6 +1786,11 @@ public:
                         Add(Y("let", "world", Y(TString(ConfigureName), "world", rtmrSource,
                             BuildQuotedAtom(Pos, "Attr"), BuildQuotedAtom(Pos, "Dummy_"), BuildQuotedAtom(Pos, "1"))));
                     }
+                }
+
+                if (ctx.YsonCastToString.Defined()) {
+                    const TString pragmaName = *ctx.YsonCastToString ? "YsonCastToString" : "DisableYsonCastToString";
+                    Add(Y("let", "world", Y(TString(ConfigureName), "world", configSource, BuildQuotedAtom(Pos, pragmaName))));
                 }
             }
         }

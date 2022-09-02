@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
+add_subdirectory(ut_client)
 
 add_library(core-blobstorage-backpressure)
 target_link_libraries(core-blobstorage-backpressure PUBLIC
@@ -17,6 +19,7 @@ target_link_libraries(core-blobstorage-backpressure PUBLIC
   ydb-core-base
   core-blobstorage-groupinfo
   core-blobstorage-lwtrace_probes
+  blobstorage-vdisk-common
   ydb-core-protos
 )
 target_sources(core-blobstorage-backpressure PRIVATE

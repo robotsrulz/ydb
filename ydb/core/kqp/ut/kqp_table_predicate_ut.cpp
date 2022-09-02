@@ -17,7 +17,7 @@ using namespace NYdb::NTable;
 
 static void CreateSampleTables(TSession session) {
     UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-        CREATE TABLE [/Root/TestNulls] (
+        CREATE TABLE `/Root/TestNulls` (
             Key1 Uint32,
             Key2 Uint32,
             Value String,
@@ -26,7 +26,7 @@ static void CreateSampleTables(TSession session) {
     )").GetValueSync().IsSuccess());
 
     UNIT_ASSERT(session.ExecuteDataQuery(R"(
-        REPLACE INTO [/Root/TestNulls] (Key1, Key2, Value) VALUES
+        REPLACE INTO `/Root/TestNulls` (Key1, Key2, Value) VALUES
             (NULL, NULL, "One"),
             (NULL, 100u, "Two"),
             (NULL, 200u, "Three"),
@@ -44,7 +44,7 @@ static void CreateSampleTables(TSession session) {
     )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).GetValueSync().IsSuccess());
 
     UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-        CREATE TABLE [/Root/TestDate] (
+        CREATE TABLE `/Root/TestDate` (
             Key Date,
             Value String,
             PRIMARY KEY (Key)
@@ -52,7 +52,7 @@ static void CreateSampleTables(TSession session) {
     )").GetValueSync().IsSuccess());
 
     UNIT_ASSERT(session.ExecuteDataQuery(R"(
-        REPLACE INTO [/Root/TestDate] (Key, Value) VALUES
+        REPLACE INTO `/Root/TestDate` (Key, Value) VALUES
             (NULL, "One"),
             (Date("2019-05-08"), "Two"),
             (Date("2019-07-01"), "Three");
@@ -75,7 +75,7 @@ static void CreateSampleTables(TSession session) {
             ).GetValueSync().IsSuccess());
 
         UNIT_ASSERT(session.ExecuteDataQuery(R"(
-            REPLACE INTO [/Root/MultiShardTable] (Key, Value) VALUES
+            REPLACE INTO `/Root/MultiShardTable` (Key, Value) VALUES
                 (1, "One"),
                 (2, "Two"),
                 (3, "Three"),
@@ -84,7 +84,7 @@ static void CreateSampleTables(TSession session) {
         )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).GetValueSync().IsSuccess());
 
         UNIT_ASSERT(session.ExecuteDataQuery(R"(
-            REPLACE INTO [/Root/MultiShardTable] (Key, ValueInt) VALUES
+            REPLACE INTO `/Root/MultiShardTable` (Key, ValueInt) VALUES
                 (10, 10);
         )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).GetValueSync().IsSuccess());
     }
@@ -106,7 +106,7 @@ static void CreateSampleTables(TSession session) {
             ).GetValueSync().IsSuccess());
 
         UNIT_ASSERT(session.ExecuteDataQuery(R"(
-            REPLACE INTO [/Root/MultiShardTableCk] (Key1, Key2, ValueInt) VALUES
+            REPLACE INTO `/Root/MultiShardTableCk` (Key1, Key2, ValueInt) VALUES
                 (1, "One", NULL),
                 (2, "Two", NULL),
                 (3, "Three", NULL),
@@ -149,7 +149,7 @@ void CreateTableWithIntKey(TSession session, ui64 partitions, ui32 rangesPerPart
 
     TStringBuilder query;
 
-    query << "REPLACE INTO [/Root/TableWithIntKey] (Key1, Key2) VALUES" << Endl;
+    query << "REPLACE INTO `/Root/TableWithIntKey` (Key1, Key2) VALUES" << Endl;
 
     for (ui32 i = 0; i < partitions; i++) {
         ui32 partitionStart = splitPoint(i);
@@ -181,32 +181,29 @@ void CreateTableWithIntKey(TSession session, ui64 partitions, ui32 rangesPerPart
     UNIT_ASSERT(success);
 }
 
-void ExecuteStreamQueryAndCheck(NExperimental::TStreamQueryClient& db, const TString& query,
+void ExecuteStreamQueryAndCheck(NYdb::NTable::TTableClient& db, const TString& query,
     const TString& expectedYson)
 {
-    auto settings = NExperimental::TExecuteStreamQuerySettings()
-        .ProfileMode(NExperimental::EStreamQueryProfileMode::Basic);
+    TStreamExecScanQuerySettings settings;
+    settings.CollectQueryStats(ECollectQueryStatsMode::Basic);
 
-    auto it = db.ExecuteStreamQuery(query, settings).GetValueSync();
+    auto it = db.StreamExecuteScanQuery(query, settings).GetValueSync();
     UNIT_ASSERT(it.IsSuccess());
 
-    TVector<TString> profiles;
-    auto resultYson = StreamResultToYson(it, &profiles);
+    auto res = CollectStreamResult(it);
 
     Cerr << "---------QUERY----------" << Endl;
     Cerr << query << Endl;
     Cerr << "---------RESULT---------" << Endl;
-    Cerr << resultYson << Endl;
+    Cerr << res.ResultSetYson << Endl;
     Cerr << "------------------------" << Endl;
 
-    CompareYson(expectedYson, resultYson);
+    CompareYson(expectedYson, res.ResultSetYson);
 
-    NYql::NDqProto::TDqExecutionStats stats;
-    // First stage is computation, second scan read.
-    google::protobuf::TextFormat::ParseFromString(profiles.back(), &stats);
+    UNIT_ASSERT(res.QueryStats);
+    ui64 readRows = res.QueryStats->query_phases().rbegin()->table_access(0).reads().rows();
+    ui64 resultRows = res.RowsCount;
 
-    ui64 resultRows = stats.GetResultRows();
-    ui64 readRows = stats.GetTables(0).GetReadRows();
     UNIT_ASSERT_EQUAL_C(resultRows, readRows, "There are " << resultRows << " in result, but read " << readRows << " !");
 }
 
@@ -214,10 +211,8 @@ void RunTestOverIntTable(const TString& query, const TString& expectedYson, ui64
     TKikimrSettings kikimrSettings;
     TKikimrRunner kikimr(kikimrSettings);
 
-    NExperimental::TStreamQueryClient db(kikimr.GetDriver());
-
-    auto client = kikimr.GetTableClient();
-    auto session = client.CreateSession().GetValueSync().GetSession();
+    auto db = kikimr.GetTableClient();
+    auto session = db.CreateSession().GetValueSync().GetSession();
     CreateTableWithIntKey(session, partitions, rangesPerPartition);
 
     ExecuteStreamQueryAndCheck(db, query, expectedYson);
@@ -250,7 +245,7 @@ void RunPredicateTest(const std::vector<TString>& predicates, bool withNulls) {
 
     if (withNulls) {
         query = TString(R"(
-            REPLACE INTO [/Root/TestPredicates] (Key1, Key2, Key3, Key4, Value) VALUES
+            REPLACE INTO `/Root/TestPredicates` (Key1, Key2, Key3, Key4, Value) VALUES
                 (NULL, NULL, NULL, NULL, 1),
                 (NULL, NULL, NULL, "uid:10", 2),
                 (NULL, NULL, "resource_1", "uid:10", 3),
@@ -274,7 +269,7 @@ void RunPredicateTest(const std::vector<TString>& predicates, bool withNulls) {
         )");
     } else {
         query = TString(R"(
-            REPLACE INTO [/Root/TestPredicates] (Key1, Key2, Key3, Key4, Value) VALUES
+            REPLACE INTO `/Root/TestPredicates` (Key1, Key2, Key3, Key4, Value) VALUES
                 (1, 0, "resource_0", "uid_0", 1),
                 (2, 0, "resource_0", "uid:10", 2),
                 (3, 0, "resource_1", "uid:10", 3),
@@ -335,7 +330,7 @@ void RunPredicateTest(const std::vector<TString>& predicates, bool withNulls) {
     }
 
     UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-        DROP TABLE [/Root/TestPredicates];
+        DROP TABLE `/Root/TestPredicates`;
     )").GetValueSync().IsSuccess());
 
 }
@@ -350,7 +345,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
 
         CreateSampleTables(session);
         auto result = session.ExecuteDataQuery(Q_(R"(
-                SELECT Value FROM [/Root/TestNulls] WHERE
+                SELECT Value FROM `/Root/TestNulls` WHERE
                     Key1 IS NULL AND Key2 IS NULL
             )"),
             TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
@@ -367,7 +362,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         CreateSampleTables(session);
 
         auto result = session.ExecuteDataQuery(Q_(R"(
-                SELECT * FROM [/Root/Test]
+                SELECT * FROM `/Root/Test`
                 WHERE Group == 1 AND Name IS NULL
             )"),
             TTxControl::BeginTx().CommitTx()).ExtractValueSync();
@@ -384,7 +379,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         CreateSampleTables(session);
 
         auto result = session.ExecuteDataQuery(Q_(R"(
-            SELECT Value FROM [/Root/TestNulls] WHERE
+            SELECT Value FROM `/Root/TestNulls` WHERE
                 Key1 <= 1
             ORDER BY Value
         )"), TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
@@ -401,7 +396,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         CreateSampleTables(session);
 
         auto result = session.ExecuteDataQuery(Q_(R"(
-                SELECT Value FROM [/Root/TestNulls] WHERE Key1 > 1
+                SELECT Value FROM `/Root/TestNulls` WHERE Key1 > 1
             )"),
             TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT(result.IsSuccess());
@@ -425,9 +420,9 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             .Build();
 
         auto result = session.ExecuteDataQuery(Q_(R"(
-                DECLARE $key1 AS 'Uint32?';
-                DECLARE $key2 AS 'Uint32?';
-                SELECT Value FROM [/Root/TestNulls] WHERE
+                DECLARE $key1 AS Uint32?;
+                DECLARE $key2 AS Uint32?;
+                SELECT Value FROM `/Root/TestNulls` WHERE
                     Key1 = $key1 AND Key2 >= $key2
             )"),
             TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), std::move(params)).ExtractValueSync();
@@ -450,9 +445,9 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             .Build();
 
         auto result = session.ExecuteDataQuery(Q_(R"(
-                DECLARE $key1 AS 'Uint32?';
-                DECLARE $key2 AS 'Uint32?';
-                SELECT Value FROM [/Root/TestNulls] WHERE
+                DECLARE $key1 AS Uint32?;
+                DECLARE $key2 AS Uint32?;
+                SELECT Value FROM `/Root/TestNulls` WHERE
                     Key1 = $key1 AND Key2 == $key2
             )"),
             TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), std::move(params)).ExtractValueSync();
@@ -478,9 +473,9 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
                 PRAGMA Kikimr.UseNewEngine = 'false';
                 PRAGMA kikimr.AllowNullCompareInIndex = "true";
 
-                DECLARE $key1 AS 'Uint32?';
-                DECLARE $key2 AS 'Uint32?';
-                SELECT Value FROM [/Root/TestNulls] WHERE
+                DECLARE $key1 AS Uint32?;
+                DECLARE $key2 AS Uint32?;
+                SELECT Value FROM `/Root/TestNulls` WHERE
                     Key1 = $key1 AND Key2 <= $key2
             )",
             TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), std::move(params)).ExtractValueSync();
@@ -542,7 +537,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
 
         CreateSampleTables(session);
 
-        const TString query = Q_("UPDATE [/Root/MultiShardTable] SET Value = 'aaaaa' WHERE Key IN (1, 500)");
+        const TString query = Q_("UPDATE `/Root/MultiShardTable` SET Value = 'aaaaa' WHERE Key IN (1, 500)");
 
         if (!UseNewEngine) {
             auto result = session.ExplainDataQuery(query).GetValueSync();
@@ -594,7 +589,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         CreateSampleTables(session);
 
         const TString query = Q_(R"(
-            UPDATE [/Root/MultiShardTable] SET ValueInt = ValueInt + 1
+            UPDATE `/Root/MultiShardTable` SET ValueInt = ValueInt + 1
             WHERE Key IN (1,2,3,4,NULL))");
         {
             auto result = session.ExecuteDataQuery(query, TTxControl::BeginTx().CommitTx()).GetValueSync();
@@ -604,7 +599,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
 
         {
             auto result = session.ExecuteDataQuery(Q_(R"(
-                SELECT Key, ValueInt FROM [/Root/MultiShardTable] ORDER BY Key;
+                SELECT Key, ValueInt FROM `/Root/MultiShardTable` ORDER BY Key;
 
             )"), TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
             UNIT_ASSERT(result.IsSuccess());
@@ -731,8 +726,8 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         CreateSampleTables(session);
 
         const TString query = "PRAGMA Kikimr.UseNewEngine = 'false'; "
-                              "SELECT Key, ValueInt FROM [/Root/MultiShardTable] WHERE ValueInt = 1 "
-                              "UNION ALL SELECT Key, ValueInt FROM [/Root/MultiShardTable] WHERE ValueInt = 1;";
+                              "SELECT Key, ValueInt FROM `/Root/MultiShardTable` WHERE ValueInt = 1 "
+                              "UNION ALL SELECT Key, ValueInt FROM `/Root/MultiShardTable` WHERE ValueInt = 1;";
 
         auto result = session.ExplainDataQuery(query).ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SUCCESS);
@@ -819,7 +814,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         NYdb::NTable::TExecDataQuerySettings execSettings;
         execSettings.CollectQueryStats(ECollectQueryStatsMode::Basic);
         auto result = session.ExecuteDataQuery(Q_(R"(
-            SELECT Value FROM [/Root/TestDate]
+            SELECT Value FROM `/Root/TestDate`
             WHERE Key = Date("2019-07-01")
         )"), TTxControl::BeginTx().CommitTx(), execSettings).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
@@ -841,7 +836,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         auto result = session.ExecuteDataQuery(Q_(R"(
-            SELECT Key FROM [/Root/EightShard] WHERE
+            SELECT Key FROM `/Root/EightShard` WHERE
                 Key > 200 AND Key >= 301 AND
                 Key < 600 AND Key <= 501
             ORDER BY Key;
@@ -870,7 +865,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             DECLARE $key_to_1 AS Uint64;
             DECLARE $key_to_2 AS Uint64;
 
-            SELECT Key FROM [/Root/EightShard] WHERE
+            SELECT Key FROM `/Root/EightShard` WHERE
                 Key > $key_from_1 AND Key >= $key_from_2 AND
                 Key < $key_to_1 AND Key <= $key_to_2
             ORDER BY Key;
@@ -896,7 +891,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             DECLARE $key_from_1 AS Uint64;
             DECLARE $key_to_1 AS Uint64;
 
-            SELECT Key FROM [/Root/EightShard] WHERE
+            SELECT Key FROM `/Root/EightShard` WHERE
                 Key > $key_from_1 AND Key >= 301 AND
                 Key < $key_to_1 AND Key <= 501
             ORDER BY Key;
@@ -915,7 +910,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         CreateSampleTables(session);
 
         auto result = session.ExecuteDataQuery(Q_(R"(
-            SELECT Key2 FROM [/Root/TestNulls] WHERE Key1 = 3 AND
+            SELECT Key2 FROM `/Root/TestNulls` WHERE Key1 = 3 AND
                 Key2 >= 100 AND Key2 > 200 AND
                 Key2 <= 600 AND Key2 < 500
             ORDER BY Key2;
@@ -933,12 +928,12 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             .Build();
 
         result = session.ExecuteDataQuery(Q_(R"(
-            DECLARE $key_from_1 AS 'Uint32?';
-            DECLARE $key_from_2 AS 'Uint32?';
-            DECLARE $key_to_1 AS 'Uint32?';
-            DECLARE $key_to_2 AS 'Uint32?';
+            DECLARE $key_from_1 AS Uint32?;
+            DECLARE $key_from_2 AS Uint32?;
+            DECLARE $key_to_1 AS Uint32?;
+            DECLARE $key_to_2 AS Uint32?;
 
-            SELECT Key2 FROM [/Root/TestNulls] WHERE Key1 = 3 AND
+            SELECT Key2 FROM `/Root/TestNulls` WHERE Key1 = 3 AND
                 Key2 >= $key_from_1 AND Key2 > $key_from_2 AND
                 Key2 <= $key_to_1 AND Key2 < $key_to_2
             ORDER BY Key2;
@@ -954,10 +949,10 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             .Build();
 
         result = session.ExecuteDataQuery(Q_(R"(
-            DECLARE $key_from_2 AS 'Uint32?';
-            DECLARE $key_to_2 AS 'Uint32?';
+            DECLARE $key_from_2 AS Uint32?;
+            DECLARE $key_to_2 AS Uint32?;
 
-            SELECT Key2 FROM [/Root/TestNulls] WHERE Key1 = 3 AND
+            SELECT Key2 FROM `/Root/TestNulls` WHERE Key1 = 3 AND
                 Key2 >= 100 AND Key2 > $key_from_2 AND
                 Key2 <= 600 AND Key2 < $key_to_2
             ORDER BY Key2;
@@ -977,7 +972,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             PRAGMA Kikimr.UseNewEngine = 'false';
             DECLARE $key1_from AS Uint32;
             DECLARE $name AS String;
-            SELECT * FROM [/Root/Join2] WHERE Key1 > $key1_from AND Name = $name;
+            SELECT * FROM `/Root/Join2` WHERE Key1 > $key1_from AND Name = $name;
         )";
 
         auto result = session.ExplainDataQuery(query).GetValueSync();
@@ -1220,12 +1215,11 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
 
     Y_UNIT_TEST(NoFullScanAtDNFPredicate) {
         TKikimrRunner kikimr;
-        NExperimental::TStreamQueryClient streamDb(kikimr.GetDriver());
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-            CREATE TABLE [/Root/TestDNF] (
+            CREATE TABLE `/Root/TestDNF` (
                 Key1 Uint32,
                 Key2 Uint32,
                 Value Uint32,
@@ -1234,7 +1228,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         )").GetValueSync().IsSuccess());
 
         UNIT_ASSERT(session.ExecuteDataQuery(R"(
-            REPLACE INTO [/Root/TestDNF] (Key1, Key2, Value) VALUES
+            REPLACE INTO `/Root/TestDNF` (Key1, Key2, Value) VALUES
                 (NULL, NULL, 1),
                 (NULL, 100u, 2),
                 (NULL, 200u, 3),
@@ -1271,7 +1265,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
                 ORDER BY Value;
             )");
             SubstGlobal(query, "<PREDICATE>", data.first);
-            ExecuteStreamQueryAndCheck(streamDb, query, data.second);
+            ExecuteStreamQueryAndCheck(db, query, data.second);
         }
     }
 
@@ -1333,7 +1327,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         scanSettings.Explain(true);
 
         UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-            CREATE TABLE [/Root/TestTable] (
+            CREATE TABLE `/Root/TestTable` (
                 Key1 Uint32,
                 Key2 Uint32,
                 Value Uint32,
@@ -1342,7 +1336,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         )").GetValueSync().IsSuccess());
 
         auto replaceResult = session.ExecuteDataQuery(R"(
-            REPLACE INTO [/Root/TestTable] (Key1, Key2, Value) VALUES
+            REPLACE INTO `/Root/TestTable` (Key1, Key2, Value) VALUES
                 (1u, 10u, 1),
                 (2u, 20u, 2),
                 (3u, 30u, 3),
@@ -1380,7 +1374,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
 
         {
             UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-                CREATE TABLE [/Root/TestTable] (
+                CREATE TABLE `/Root/TestTable` (
                     Key1 Uint32,
                     Key2 Uint32,
                     Key3 String,
@@ -1390,7 +1384,7 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
             )").GetValueSync().IsSuccess());
 
             auto result = session.ExecuteDataQuery(R"(
-                REPLACE INTO [/Root/TestTable] (Key1, Key2, Key3, Value) VALUES
+                REPLACE INTO `/Root/TestTable` (Key1, Key2, Key3, Value) VALUES
                     (1u, 10u, 'SomeString1', 100),
                     (2u, 20u, 'SomeString2', 200),
                     (3u, 30u, 'SomeString3', 300),
@@ -1406,52 +1400,71 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         }
 
         std::vector<TString> predicates = {
-            "Key1 < 2",
-            "Key1 > 1",
-            "Key1 = 1",
-            "Key1 = 1 AND Key2 > 0",
-            "Key1 >= 1 AND Key2 > 8",
-            "Key1 >= 1 AND Key2 = 20",
-            "Key1 >= 8 AND Key2 >= 20",
-            "Key1 < 2 AND Key2 < 80",
-            "Key1 <= 8 AND Key2 < 80",
-            "Key1 <= 9 AND Key2 <= 200",
-            "Key1 > 4 AND Key2 > 40 AND Key3 > \"SomeString\"",
-            "Key1 >= 4000 AND Key2 >= 4 AND Key3 >= \"SomeString3\"",
-            "Key2 > 80",
-            "Key2 < 90",
-            "Key2 <= 20 AND Key3 <= \"SomeString3\"",
+            "Key1 < $key_upper_bound",
+            "Key1 > $key_lower_bound",
+            "Key1 = $key",
+            "Key1 = $key AND Key2 > $key_lower_bound",
+            "Key1 >= $key_lower_bound AND Key2 > $key_lower_bound",
+            "Key1 >= $key_lower_bound AND Key2 = $key",
+            "Key1 >= $key_lower_bound AND Key2 >= $key_lower_bound",
+            "Key1 < $key_upper_bound AND Key2 < $key_upper_bound",
+            "Key1 <= $key_upper_bound AND Key2 < $key_upper_bound",
+            "Key1 <= $key_upper_bound AND Key2 <= $key_upper_bound",
+            "Key1 > $key_lower_bound AND Key2 > $key_lower_bound AND Key3 > $string_key_lower_bound",
+            "Key1 >= $key_lower_bound AND Key2 >= $key_lower_bound AND Key3 >= $string_key_lower_bound",
+            "Key2 > $key_lower_bound",
+            "Key2 < $key_upper_bound",
+            "Key2 <= $key_upper_bound AND Key3 <= $string_key_upper_bound",
             "Key1 IS NULL",
             "Key2 IS NULL",
             "Key1 IS NOT NULL",
-            "Key1 > 1 AND Key2 IS NULL",
-            "Key1 > 1 OR Key2 IS NULL",
-            "Key1 >= 1 OR Key2 IS NOT NULL",
-            "Key1 < 9 OR Key3 IS NOT NULL",
-            "Key1 < 9 OR Key3 IS NULL",
-            "Value = 200",
-            "(Key1 <= 10) OR (Key1 > 2 AND Key1 < 5) OR (Key1 >= 8)",
+            "Key1 > $key_upper_bound AND Key2 IS NULL",
+            "Key1 > $key_upper_bound OR Key2 IS NULL",
+            "Key1 >= $key_lower_bound OR Key2 IS NOT NULL",
+            "Key1 < $key_upper_bound OR Key3 IS NOT NULL",
+            "Key1 < $key_upper_bound OR Key3 IS NULL",
+            "Value = $key",
+            "(Key1 <= $key_upper_bound) OR (Key1 > $key_lower_bound AND Key1 < $key) OR (Key1 >= $key_lower_bound)",
             "Key1 < NULL"
         };
+
+        auto params = TParamsBuilder()
+            .AddParam("$key_upper_bound").OptionalUint32(1).Build()
+            .AddParam("$key_lower_bound").OptionalUint32(2).Build()
+            .AddParam("$key").OptionalUint32(3).Build()
+            .AddParam("$string_key_upper_bound").OptionalString("SomeString1").Build()
+            .AddParam("$string_key_lower_bound").OptionalString("SomeString2").Build()
+            .Build();
+
+        TString useSyntaxV1 = R"(
+            --!syntax_v1
+        )";
 
         TString enablePredicateExtractor = R"(
             PRAGMA Kikimr.OptEnablePredicateExtract = "true";
         )";
 
-        TString query = R"(
-            PRAGMA kikimr.UseNewEngine = "true";
-            SELECT * FROM [/Root/TestTable] WHERE <PREDICATE> ORDER BY `Value`;
-        )";
-
         for (const auto& predicate : predicates) {
+            TString query = R"(
+                PRAGMA kikimr.UseNewEngine = "true";
+
+                DECLARE $key_upper_bound AS Uint32?;
+                DECLARE $key_lower_bound AS Uint32?;
+                DECLARE $key AS Uint32?;
+                DECLARE $string_key_upper_bound AS String?;
+                DECLARE $string_key_lower_bound AS String?;
+
+                SELECT * FROM `/Root/TestTable` WHERE <PREDICATE> ORDER BY `Value`;
+            )";
+
             SubstGlobal(query, "<PREDICATE>", predicate);
-            auto expectedResult = session.ExecuteDataQuery(query, TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx())
+            auto expectedResult = session.ExecuteDataQuery(useSyntaxV1 + query, TTxControl::BeginTx().CommitTx(), params)
                 .ExtractValueSync();
             UNIT_ASSERT_C(expectedResult.IsSuccess(), expectedResult.GetIssues().ToString());
             const auto expectedYson = FormatResultSetYson(expectedResult.GetResultSet(0));
 
-            auto result = session.ExecuteDataQuery(enablePredicateExtractor + query,
-                TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
+            auto result = session.ExecuteDataQuery(useSyntaxV1 + enablePredicateExtractor + query,
+                TTxControl::BeginTx().CommitTx(), params).ExtractValueSync();
             UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
 
             CompareYson(expectedYson, FormatResultSetYson(result.GetResultSet(0)));
@@ -1485,6 +1498,66 @@ Y_UNIT_TEST_SUITE(KqpTablePredicate) {
         AssertTableStats(result, "/Root/TwoShard", {
             .ExpectedReads = 1,
         });
+    }
+
+    Y_UNIT_TEST(Like) {
+        TKikimrSettings kikimrSettings;
+        TKikimrRunner kikimr(kikimrSettings);
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto res = session.ExecuteSchemeQuery(R"(
+                --!syntax_v1
+                CREATE TABLE `/Root/TestTable` (
+                    Key Utf8,
+                    Value Utf8,
+                    PRIMARY KEY (Key)
+                );
+            )").GetValueSync();
+            UNIT_ASSERT_C(res.IsSuccess(), res.GetIssues().ToString());
+
+            auto result = session.ExecuteDataQuery(R"(
+                REPLACE INTO `/Root/TestTable` (Key, Value) VALUES
+                    ('SomeString1', '100'),
+                    ('SomeString2', '200'),
+                    ('SomeString3', '300'),
+                    ('SomeString4', '400'),
+                    ('SomeString5', '500'),
+                    ('SomeString6', '600'),
+                    ('SomeString7', '700'),
+                    ('SomeString8', '800');
+            )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).GetValueSync();
+            UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
+        }
+
+        auto explainAndCheckRange = [&session](const auto& query) {
+            auto result = session.ExplainDataQuery(query).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            NJson::TJsonValue plan;
+            UNIT_ASSERT(NJson::ReadJsonTree(result.GetPlan(), &plan));
+
+            UNIT_ASSERT_VALUES_EQUAL(plan["tables"].GetArray().size(), 1);
+            UNIT_ASSERT_VALUES_EQUAL(plan["tables"][0]["name"], "/Root/TestTable");
+            UNIT_ASSERT_VALUES_EQUAL(plan["tables"][0]["reads"].GetArray().size(), 1);
+            auto& read = plan["tables"][0]["reads"][0];
+            UNIT_ASSERT_VALUES_EQUAL(read["type"], "Scan");
+            UNIT_ASSERT_VALUES_EQUAL(read["scan_by"].GetArray().size(), 1);
+            UNIT_ASSERT_VALUES_EQUAL(read["scan_by"][0], "Key [\"SomeString\", \"SomeStrinh\")");
+        };
+
+        const TString useSyntaxV1 = R"(
+            --!syntax_v1
+        )";
+
+        const TString query = R"(
+            PRAGMA Kikimr.UseNewEngine = 'false';
+            SELECT * FROM `/Root/TestTable` WHERE Key like "SomeString%";
+        )";
+
+        explainAndCheckRange(query);
+        explainAndCheckRange(useSyntaxV1 + query);
     }
 }
 

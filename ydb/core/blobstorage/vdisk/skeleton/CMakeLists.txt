@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(blobstorage-vdisk-skeleton)
 target_link_libraries(blobstorage-vdisk-skeleton PUBLIC
@@ -13,6 +14,7 @@ target_link_libraries(blobstorage-vdisk-skeleton PUBLIC
   yutil
   ydb-core-base
   vdisk-hulldb-base
+  blobstorage-vdisk-synclog
   ydb-core-protos
 )
 target_sources(blobstorage-vdisk-skeleton PRIVATE

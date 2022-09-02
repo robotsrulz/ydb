@@ -230,10 +230,10 @@ public:
             return result;
         }
 
-        auto domainId = parentPath.DomainId();
-        Y_VERIFY(context.SS->PathsById.contains(domainId));
-        Y_VERIFY(context.SS->SubDomains.contains(domainId));
-        if (domainId != context.SS->RootPathId()) {
+        auto domainPathId = parentPath.GetPathIdForDomain();
+        Y_VERIFY(context.SS->PathsById.contains(domainPathId));
+        Y_VERIFY(context.SS->SubDomains.contains(domainPathId));
+        if (domainPathId != context.SS->RootPathId()) {
             result->SetError(NKikimrScheme::StatusNameConflict, "Nested subdomains is forbidden");
             return result;
         }
@@ -270,6 +270,10 @@ public:
 
         if (!context.SS->CheckApplyIf(Transaction, errStr)) {
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
+            return result;
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxCreateSubDomain, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
             return result;
         }
 
@@ -313,8 +317,8 @@ public:
             alter->AddStoragePool(pool);
         }
 
-        DeclareShards(txState, OperationId.GetTxId(), newNode->PathId, settings.GetCoordinators(), TTabletTypes::FLAT_TX_COORDINATOR, channelBindings, context.SS);
-        DeclareShards(txState, OperationId.GetTxId(), newNode->PathId, settings.GetMediators(), TTabletTypes::TX_MEDIATOR, channelBindings, context.SS);
+        DeclareShards(txState, OperationId.GetTxId(), newNode->PathId, settings.GetCoordinators(), TTabletTypes::Coordinator, channelBindings, context.SS);
+        DeclareShards(txState, OperationId.GetTxId(), newNode->PathId, settings.GetMediators(), TTabletTypes::Mediator, channelBindings, context.SS);
 
         for (auto& shard: txState.Shards) {
             alter->AddPrivateShard(shard.Idx);

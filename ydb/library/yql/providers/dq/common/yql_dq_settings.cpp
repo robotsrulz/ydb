@@ -23,6 +23,7 @@ TDqConfiguration::TDqConfiguration() {
     REGISTER_SETTING(*this, OptLLVM);
     REGISTER_SETTING(*this, ChannelBufferSize);
     REGISTER_SETTING(*this, OutputChunkMaxSize);
+    REGISTER_SETTING(*this, ChunkSizeLimit);
     REGISTER_SETTING(*this, MemoryLimit);
     REGISTER_SETTING(*this, EnableInsert);
 
@@ -38,13 +39,15 @@ TDqConfiguration::TDqConfiguration() {
 
     REGISTER_SETTING(*this, EnableComputeActor);
     REGISTER_SETTING(*this, ComputeActorType);
-    REGISTER_SETTING(*this, EnablePorto);
+    REGISTER_SETTING(*this, _EnablePorto);
     REGISTER_SETTING(*this, _PortoMemoryLimit);
 
     REGISTER_SETTING(*this, EnableFullResultWrite);
 
     REGISTER_SETTING(*this, _FallbackOnRuntimeErrors);
     REGISTER_SETTING(*this, WorkerFilter);
+    REGISTER_SETTING(*this, _EnablePrecompute);
+    REGISTER_SETTING(*this, EnableDqReplicate);
 }
 
 } // namespace NYql

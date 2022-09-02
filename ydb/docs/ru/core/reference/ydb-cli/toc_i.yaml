@@ -25,7 +25,7 @@ items:
     items:
     - name: Выполнение запроса к данным
       href: commands/query.md
-    - name: План исполнения запроса
+    - name: Получение плана исполнения запроса и AST
       href: commands/explain-plan.md
     - name: Потоковое чтение таблицы
       href: commands/readtable.md
@@ -33,6 +33,8 @@ items:
       href: commands/scan-query.md
   - name: Загрузка и выгрузка данных
     include: { mode: link, path: export_import/toc_p.yaml }
+  - name: Работа с топиками
+    href: topic.md
 #  - name: Утилиты
 #    items:
     # - name: Копирование таблиц
@@ -49,6 +51,8 @@ items:
       href: commands/discovery-list.md
     - name: Проверка аутентификации
       href: commands/discovery-whoami.md
+    - name: Вывод версии YDB CLI
+      href: version.md
   - name: Нагрузочное тестирование
     items:
     - name: Обзор

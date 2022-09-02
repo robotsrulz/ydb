@@ -1,161 +1,234 @@
 #pragma once
 
+#include <library/cpp/actors/core/monotonic.h>
+#include <library/cpp/actors/protos/actors.pb.h>
+
 #include <library/cpp/string_utils/base64/base64.h>
 
 #include <util/stream/output.h>
 #include <util/random/random.h>
+#include <util/random/fast.h>
 
 #include <util/string/printf.h>
 
+#include <array>
+
 namespace NWilson {
     class TTraceId {
-        ui64 TraceId; // Random id of topmost client request
-        ui64 SpanId;  // Span id of part of request currently being executed
+        using TTrace = std::array<ui64, 2>;
+
+        TTrace TraceId; // Random id of topmost client request
+        ui64 SpanId;
+        union {
+            struct {
+                ui32 Verbosity : 4;
+                ui32 TimeToLive : 12;
+            };
+            ui32 Raw;
+        };
 
     private:
-        TTraceId(ui64 traceId, ui64 spanId)
+        TTraceId(TTrace traceId, ui64 spanId, ui8 verbosity, ui32 timeToLive)
             : TraceId(traceId)
-            , SpanId(spanId)
         {
+            if (timeToLive == Max<ui32>()) {
+                timeToLive = 4095;
+            }
+            Y_VERIFY(verbosity <= 15);
+            Y_VERIFY(timeToLive <= 4095);
+            SpanId = spanId;
+            Verbosity = verbosity;
+            TimeToLive = timeToLive;
         }
 
-        static ui64 GenerateTraceId() {
-            ui64 traceId = 0;
-            while (!traceId) {
-                traceId = RandomNumber<ui64>();
+        static TTrace GenerateTraceId() {
+            for (;;) {
+                TTrace res;
+                ui32 *p = reinterpret_cast<ui32*>(res.data());
+
+                TReallyFastRng32 rng(RandomNumber<ui64>());
+                p[0] = rng();
+                p[1] = rng();
+                p[2] = rng();
+                p[3] = rng();
+
+                if (res[0] || res[1]) {
+                    return res;
+                }
             }
-            return traceId;
         }
 
         static ui64 GenerateSpanId() {
-            return RandomNumber<ui64>();
+            for (;;) {
+                if (const ui64 res = RandomNumber<ui64>(); res) { // SpanId can't be zero
+                    return res;
+                }
+            }
         }
 
     public:
-        using TSerializedTraceId = char[2 * sizeof(ui64)];
+        using TSerializedTraceId = char[sizeof(TTrace) + sizeof(ui64) + sizeof(ui32)];
 
     public:
-        TTraceId()
-            : TraceId(0)
-            , SpanId(0)
-        {
+        TTraceId(ui64) // NBS stub
+            : TTraceId()
+        {}
+
+        TTraceId() {
+            TraceId.fill(0);
+            SpanId = 0;
+            Raw = 0;
         }
 
-        explicit TTraceId(ui64 traceId)
+        explicit TTraceId(TTrace traceId)
             : TraceId(traceId)
-            , SpanId(0)
         {
-        }
-
-        TTraceId(const TSerializedTraceId& in)
-            : TraceId(reinterpret_cast<const ui64*>(in)[0])
-            , SpanId(reinterpret_cast<const ui64*>(in)[1])
-        {
+            SpanId = 0;
+            Raw = 0;
         }
 
         // allow move semantic
         TTraceId(TTraceId&& other)
             : TraceId(other.TraceId)
             , SpanId(other.SpanId)
+            , Raw(other.Raw)
         {
-            other.TraceId = 0;
-            other.SpanId = 1; // explicitly mark invalid
+            other.TraceId.fill(0);
+            other.SpanId = 1; // make it explicitly invalid
+            other.Raw = 0;
+        }
+
+        // explicit copy
+        explicit TTraceId(const TTraceId& other)
+            : TraceId(other.TraceId)
+            , SpanId(other.SpanId)
+            , Raw(other.Raw)
+        {
+            // validate trace id only when we are making a copy
+            other.Validate();
+        }
+
+        TTraceId(const TSerializedTraceId& in) {
+            const char *p = in;
+            memcpy(TraceId.data(), p, sizeof(TraceId));
+            p += sizeof(TraceId);
+            memcpy(&SpanId, p, sizeof(SpanId));
+            p += sizeof(SpanId);
+            memcpy(&Raw, p, sizeof(Raw));
+            p += sizeof(Raw);
+            Y_VERIFY_DEBUG(p - in == sizeof(TSerializedTraceId));
+        }
+
+        TTraceId(const NActorsProto::TTraceId& pb)
+            : TTraceId()
+        {
+            if (pb.HasData()) {
+                const auto& data = pb.GetData();
+                if (data.size() == sizeof(TSerializedTraceId)) {
+                    *this = *reinterpret_cast<const TSerializedTraceId*>(data.data());
+                }
+            }
+        }
+
+        void Serialize(TSerializedTraceId *out) const {
+            char *p = *out;
+            memcpy(p, TraceId.data(), sizeof(TraceId));
+            p += sizeof(TraceId);
+            memcpy(p, &SpanId, sizeof(SpanId));
+            p += sizeof(SpanId);
+            memcpy(p, &Raw, sizeof(Raw));
+            p += sizeof(Raw);
+            Y_VERIFY_DEBUG(p - *out == sizeof(TSerializedTraceId));
+        }
+
+        void Serialize(NActorsProto::TTraceId *pb) const {
+            if (*this) {
+                TSerializedTraceId data;
+                Serialize(&data);
+                pb->SetData(reinterpret_cast<const char*>(&data), sizeof(data));
+            }
         }
 
         TTraceId& operator=(TTraceId&& other) {
-            TraceId = other.TraceId;
-            SpanId = other.SpanId;
-            other.TraceId = 0;
-            other.SpanId = 1; // explicitly mark invalid
+            if (this != &other) {
+                TraceId = other.TraceId;
+                SpanId = other.SpanId;
+                Raw = other.Raw;
+                other.TraceId.fill(0);
+                other.SpanId = 1; // make it explicitly invalid
+                other.Raw = 0;
+            }
             return *this;
         }
 
         // do not allow implicit copy of trace id
-        TTraceId(const TTraceId& other) = delete;
         TTraceId& operator=(const TTraceId& other) = delete;
 
-        static TTraceId NewTraceId() {
-            return TTraceId(GenerateTraceId(), 0);
+        static TTraceId NewTraceId(ui8 verbosity, ui32 timeToLive) {
+            return TTraceId(GenerateTraceId(), 0, verbosity, timeToLive);
         }
 
-        // create separate branch from this point
-        TTraceId SeparateBranch() const {
-            return Clone();
+        static TTraceId NewTraceIdThrottled(ui8 verbosity, ui32 timeToLive, std::atomic<NActors::TMonotonic>& counter,
+                NActors::TMonotonic now, TDuration periodBetweenSamples) {
+            static_assert(std::atomic<NActors::TMonotonic>::is_always_lock_free);
+            for (;;) {
+                NActors::TMonotonic ts = counter.load();
+                if (now < ts) {
+                    return {};
+                } else if (counter.compare_exchange_strong(ts, now + periodBetweenSamples)) {
+                    return NewTraceId(verbosity, timeToLive);
+                }
+            }
         }
 
-        TTraceId Clone() const {
-            return TTraceId(TraceId, SpanId);
+        static TTraceId NewTraceId() { // NBS stub
+            return TTraceId();
         }
 
-        TTraceId Span() const {
-            return *this ? TTraceId(TraceId, GenerateSpanId()) : TTraceId();
+        TTraceId Span(ui8 verbosity) const {
+            Validate();
+            if (!*this || !TimeToLive) {
+                return TTraceId();
+            } else if (verbosity <= Verbosity) {
+                return TTraceId(TraceId, GenerateSpanId(), Verbosity, TimeToLive - 1);
+            } else {
+                return TTraceId(TraceId, SpanId, Verbosity, TimeToLive - 1);
+            }
         }
 
-        ui64 GetTraceId() const {
-            return TraceId;
+        TTraceId Span() const { // compatibility stub
+            return {};
         }
 
         // Check if request tracing is enabled
         explicit operator bool() const {
-            return TraceId != 0;
+            return TraceId[0] || TraceId[1];
         }
 
-        // Output trace id into a string stream
-        void Output(IOutputStream& s, const TTraceId& parentTraceId) const {
-            union {
-                ui8 buffer[3 * sizeof(ui64)];
-                struct {
-                    ui64 traceId;
-                    ui64 spanId;
-                    ui64 parentSpanId;
-                } x;
-            };
-
-            x.traceId = TraceId;
-            x.spanId = SpanId;
-            x.parentSpanId = parentTraceId.SpanId;
-
-            const size_t base64size = Base64EncodeBufSize(sizeof(x));
-            char base64[base64size];
-            char* end = Base64Encode(base64, buffer, sizeof(x));
-            s << TStringBuf(base64, end);
-        }
-
-        // output just span id into stream
-        void OutputSpanId(IOutputStream& s) const {
-            const size_t base64size = Base64EncodeBufSize(sizeof(SpanId));
-            char base64[base64size];
-            char* end = Base64Encode(base64, reinterpret_cast<const ui8*>(&SpanId), sizeof(SpanId));
-
-            // cut trailing padding character
-            Y_VERIFY(end > base64 && end[-1] == '=');
-            --end;
-
-            s << TStringBuf(base64, end);
-        }
-
-        void CheckConsistency() {
-            // if TraceId is zero, then SpanId must be zero too
-            Y_VERIFY_DEBUG(*this || !SpanId);
+        bool IsRoot() const {
+            return !SpanId;
         }
 
         friend bool operator==(const TTraceId& x, const TTraceId& y) {
-            return x.TraceId == y.TraceId && x.SpanId == y.SpanId;
+            return x.TraceId == y.TraceId && x.SpanId == y.SpanId && x.Raw == y.Raw;
         }
 
-        TString ToString() const {
-            return Sprintf("%" PRIu64 ":%" PRIu64, TraceId, SpanId);
+        ui8 GetVerbosity() const {
+            return Verbosity;
         }
 
-        bool IsFromSameTree(const TTraceId& other) const {
-            return TraceId == other.TraceId;
+        const void *GetTraceIdPtr() const { return TraceId.data(); }
+        static constexpr size_t GetTraceIdSize() { return sizeof(TTrace); }
+        const void *GetSpanIdPtr() const { return &SpanId; }
+        static constexpr size_t GetSpanIdSize() { return sizeof(ui64); }
+
+        void Validate() const {
+            Y_VERIFY_DEBUG(*this || !SpanId);
         }
 
-        void Serialize(TSerializedTraceId* out) const {
-            ui64* p = reinterpret_cast<ui64*>(*out);
-            p[0] = TraceId;
-            p[1] = SpanId;
-        }
+        // for compatibility with NBS
+        TTraceId Clone() const { return NWilson::TTraceId(*this); }
+        ui64 GetTraceId() const { return 0; }
+        void OutputSpanId(IOutputStream&) const {}
     };
-
 }

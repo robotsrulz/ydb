@@ -11,18 +11,35 @@ add_library(providers-s3-actors)
 target_compile_options(providers-s3-actors PRIVATE
   -DUSE_CURRENT_UDF_ABI_VERSION
 )
+target_include_directories(providers-s3-actors PRIVATE
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/base
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/base/pcg-random
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src
+)
 target_link_libraries(providers-s3-actors PUBLIC
   contrib-libs-cxxsupp
   yutil
-  yql-minikql-computation
-  common-token_accessor-client
-  common-schema-mkql
-  yql-public-types
+  contrib-libs-fmt
+  libs-poco-Util
+  cpp-string_utils-base64
+  cpp-string_utils-quote
+  cpp-xml-document
   dq-actors-compute
+  yql-minikql-computation
   providers-common-http_gateway
+  common-schema-mkql
+  common-token_accessor-client
+  providers-s3-compressors
   providers-s3-proto
+  providers-s3-range_helpers
+  providers-s3-serializations
+  yql-public-types
+  clickhouse_client_udf
 )
 target_sources(providers-s3-actors PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/actors/yql_s3_read_actor.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/actors/yql_s3_retry_policy.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/actors/yql_s3_sink_factory.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/actors/yql_s3_source_factory.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/actors/yql_s3_write_actor.cpp
 )

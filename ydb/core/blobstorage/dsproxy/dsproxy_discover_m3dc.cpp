@@ -427,6 +427,7 @@ class TBlobStorageGroupMirror3dcDiscoverRequest : public TBlobStorageGroupReques
     const bool ReadBody;
     const bool DiscoverBlockedGeneration;
     const ui32 ForceBlockedGeneration;
+    const bool FromLeader;
 
     std::unique_ptr<TDiscoverWorker> Worker;
     TVector<std::unique_ptr<TEvBlobStorage::TEvVGet>> Msgs;
@@ -461,7 +462,7 @@ public:
             TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters)
         : TBlobStorageGroupRequestActor(std::move(info), std::move(state), std::move(mon), source, cookie,
                 std::move(traceId), NKikimrServices::BS_PROXY_DISCOVER, false, {}, now, storagePoolCounters,
-                ev->RestartCounter)
+                ev->RestartCounter, "DSProxy.Discover(mirror-3-dc)")
         , TabletId(ev->TabletId)
         , MinGeneration(ev->MinGeneration)
         , StartTime(now)
@@ -469,13 +470,14 @@ public:
         , ReadBody(ev->ReadBody)
         , DiscoverBlockedGeneration(ev->DiscoverBlockedGeneration)
         , ForceBlockedGeneration(ev->ForceBlockedGeneration)
+        , FromLeader(ev->FromLeader)
         , GetBlockTracker(Info.Get())
     {}
 
     std::unique_ptr<IEventBase> RestartQuery(ui32 counter) {
         ++*Mon->NodeMon->RestartDiscover;
         auto ev = std::make_unique<TEvBlobStorage::TEvDiscover>(TabletId, MinGeneration, ReadBody, DiscoverBlockedGeneration,
-            Deadline, ForceBlockedGeneration);
+            Deadline, ForceBlockedGeneration, FromLeader);
         ev->RestartCounter = counter;
         return ev;
     }
@@ -490,6 +492,7 @@ public:
             << " ReadBody# " << (ReadBody ? "true" : "false")
             << " DiscoverBlockedGeneration# " << (DiscoverBlockedGeneration ? "true" : "false")
             << " ForceBlockedGeneration# " << ForceBlockedGeneration
+            << " FromLeader# " << (FromLeader ? "true" : "false")
             << " RestartCounter# " << RestartCounter);
 
         Worker = std::make_unique<TDiscoverWorker>(Info, TabletId, MinGeneration, ForceBlockedGeneration);
@@ -502,7 +505,7 @@ public:
 
                 A_LOG_DEBUG_S("DSPDM06", "sending TEvVGetBlock# " << query->ToString());
 
-                SendToQueue(std::move(query), 0, NWilson::TTraceId());
+                SendToQueue(std::move(query), 0);
                 ++RequestsInFlight;
             }
         }
@@ -520,7 +523,7 @@ public:
             A_LOG_DEBUG_S("DSPDM07", "sending TEvVGet# " << msg->ToString());
 
             CountEvent(*msg);
-            SendToQueue(std::move(msg), 0, NWilson::TTraceId());
+            SendToQueue(std::move(msg), 0);
             ++RequestsInFlight;
         }
         Msgs.clear();
@@ -567,7 +570,7 @@ public:
 
                 A_LOG_DEBUG_S("DSPDM17", "sending TEvGet# " << query->ToString());
 
-                SendToBSProxy(SelfId(), Info->GroupID, query.release());
+                SendToProxy(std::move(query));
                 ++RequestsInFlight;
             } else {
                 GetFinished = true;

@@ -3,6 +3,7 @@
 #include <ydb/core/tx/scheme_cache/scheme_cache.h>
 #include <ydb/core/tx/datashard/datashard.h>
 #include <ydb/core/tx/balance_coverage/balance_coverage_builder.h>
+#include <ydb/core/tx/long_tx_service/public/events.h>
 #include <ydb/core/tx/tx_processing.h>
 
 #include <ydb/core/actorlib_impl/long_timer.h>
@@ -308,6 +309,7 @@ private:
     bool CanUseFollower;
     bool StreamResponse;
 
+    TString DatabaseName;
     TIntrusivePtr<TFlatMKQLRequest> FlatMKQLRequest;
     TIntrusivePtr<TReadTableRequest> ReadTableRequest;
     TString DatashardErrors;
@@ -335,6 +337,7 @@ private:
     TInstant WallClockAccepted;
     TInstant WallClockResolveStarted;
     TInstant WallClockResolved;
+    TInstant WallClockAfterBuild;
     TInstant WallClockPrepared;
     TInstant WallClockPlanned;
 
@@ -358,6 +361,7 @@ private:
 
     TAutoPtr<TEvTxProxySchemeCache::TEvResolveKeySet> PrepareFlatMKQLRequest(TStringBuf miniKQLProgram, TStringBuf miniKQLParams, const TActorContext &ctx);
     void ProcessFlatMKQLResolve(NSchemeCache::TSchemeCacheRequest *cacheRequest, const TActorContext &ctx);
+    void ContinueFlatMKQLResolve(const TActorContext &ctx);
     void ProcessReadTableResolve(NSchemeCache::TSchemeCacheRequest *cacheRequest, const TActorContext &ctx);
 
     TIntrusivePtr<TTxProxyMon> TxProxyMon;
@@ -406,6 +410,7 @@ private:
     void Handle(TEvTxProxyReq::TEvMakeRequest::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvTxProxySchemeCache::TEvResolveKeySetResult::TPtr &ev, const TActorContext &ctx);
+    void Handle(NLongTxService::TEvLongTxService::TEvAcquireReadSnapshotResult::TPtr &ev, const TActorContext &ctx);
     void Handle(TEvDataShard::TEvProposeTransactionRestart::TPtr &ev, const TActorContext &ctx);
     void HandlePrepare(TEvDataShard::TEvProposeTransactionAttachResult::TPtr &ev, const TActorContext &ctx);
     void HandlePrepare(TEvDataShard::TEvProposeTransactionResult::TPtr &ev, const TActorContext &ctx);
@@ -494,6 +499,17 @@ public:
             HFuncTraced(TEvTxProxySchemeCache::TEvResolveKeySetResult, Handle);
             HFuncTraced(TEvents::TEvUndelivered, HandleUndeliveredResolve); // we must wait for resolve completion
             CFunc(TEvents::TSystem::Wakeup, HandleExecTimeoutResolve); // we must wait for resolve completion to keep key description
+            CFunc(TEvPrivate::EvProxyDataReqOngoingTransactionsWatchdog, HandleWatchdog);
+        }
+    }
+
+    STFUNC(StateWaitSnapshot) {
+        TRACE_EVENT(NKikimrServices::TX_PROXY);
+        switch (ev->GetTypeRewrite()) {
+            HFuncTraced(NLongTxService::TEvLongTxService::TEvAcquireReadSnapshotResult, Handle);
+            HFuncTraced(TEvTxProcessing::TEvStreamIsDead, Handle);
+            HFuncTraced(TEvents::TEvUndelivered, Handle);
+            CFunc(TEvents::TSystem::Wakeup, HandleExecTimeout);
             CFunc(TEvPrivate::EvProxyDataReqOngoingTransactionsWatchdog, HandleWatchdog);
         }
     }
@@ -947,8 +963,10 @@ void TDataReq::ProcessFlatMKQLResolve(NSchemeCache::TSchemeCacheRequest *cacheRe
     if (FlatMKQLRequest->Limits.GetReadsetCountLimit()) {
         shardLimits.RSCount = std::min(shardLimits.RSCount, FlatMKQLRequest->Limits.GetReadsetCountLimit());
     }
-    FlatMKQLRequest->EngineResultStatusCode = engine.PrepareShardPrograms(shardLimits);
+    ui32 rsCount = 0;
+    FlatMKQLRequest->EngineResultStatusCode = engine.PrepareShardPrograms(shardLimits, &rsCount);
     auto afterBuild = Now();
+    WallClockAfterBuild = afterBuild;
 
     if (FlatMKQLRequest->EngineResultStatusCode != NMiniKQL::IEngineFlat::EResult::Ok) {
         IssueManager.RaiseIssue(MakeIssue(NKikimrIssues::TIssuesIds::ENGINE_ERROR));
@@ -965,6 +983,53 @@ void TDataReq::ProcessFlatMKQLResolve(NSchemeCache::TSchemeCacheRequest *cacheRe
 
     if (engine.GetAffectedShardCount() > 1 || FlatMKQLRequest->Snapshot) // TODO KIKIMR-11912
         CanUseFollower = false;
+
+    // Check if we want to use snapshot even when caller didn't provide one
+    const bool forceSnapshot = (
+            FlatMKQLRequest->ReadOnlyProgram &&
+            !FlatMKQLRequest->Snapshot &&
+            rsCount == 0 &&
+            engine.GetAffectedShardCount() > 1 &&
+            ((TxFlags & NTxDataShard::TTxFlags::ForceOnline) == 0) &&
+            AppData(ctx)->FeatureFlags.GetEnableMvccSnapshotReads() &&
+            !DatabaseName.empty());
+
+    if (forceSnapshot) {
+        Send(NLongTxService::MakeLongTxServiceID(ctx.SelfID.NodeId()),
+            new NLongTxService::TEvLongTxService::TEvAcquireReadSnapshot(DatabaseName));
+        Become(&TThis::StateWaitSnapshot);
+        return;
+    }
+
+    ContinueFlatMKQLResolve(ctx);
+}
+
+void TDataReq::Handle(NLongTxService::TEvLongTxService::TEvAcquireReadSnapshotResult::TPtr &ev, const TActorContext &ctx) {
+    const auto& record = ev->Get()->Record;
+
+    if (record.GetStatus() != Ydb::StatusIds::SUCCESS) {
+        NYql::TIssues issues;
+        NYql::IssuesFromMessage(record.GetIssues(), issues);
+        IssueManager.RaiseIssues(issues);
+        ReportStatus(
+            TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ResolveError,
+            NKikimrIssues::TStatusIds::ERROR,
+            true, ctx);
+        Die(ctx);
+        return;
+    }
+
+    // Update timestamp: snapshot creation should not be included in send time histogram
+    WallClockAfterBuild = Now();
+
+    Y_VERIFY(FlatMKQLRequest);
+    FlatMKQLRequest->Snapshot = TRowVersion(record.GetSnapshotStep(), record.GetSnapshotTxId());
+    ContinueFlatMKQLResolve(ctx);
+}
+
+void TDataReq::ContinueFlatMKQLResolve(const TActorContext &ctx) {
+    NMiniKQL::IEngineFlat &engine = *FlatMKQLRequest->Engine;
+    auto &keyDescriptions = engine.GetDbKeys();
 
     TDuration shardCancelAfter = ExecTimeoutPeriod;
     if (CancelAfter) {
@@ -1030,7 +1095,7 @@ void TDataReq::ProcessFlatMKQLResolve(NSchemeCache::TSchemeCacheRequest *cacheRe
 
         // we would need shard -> table mapping for scheme cache invalidation on errors
         for (const auto& keyDescription : keyDescriptions) {
-            for (auto& partition : keyDescription->Partitions) {
+            for (auto& partition : keyDescription->GetPartitions()) {
                 if (auto *x = PerTablet.FindPtr(partition.ShardId)) {
                     x->TableId = keyDescription->TableId;
                 }
@@ -1062,7 +1127,7 @@ void TDataReq::ProcessFlatMKQLResolve(NSchemeCache::TSchemeCacheRequest *cacheRe
     }
 
     engine.AfterShardProgramsExtracted();
-    TxProxyMon->TxPrepareSendShardProgramsHgram->Collect((Now() - afterBuild).MicroSeconds());
+    TxProxyMon->TxPrepareSendShardProgramsHgram->Collect((Now() - WallClockAfterBuild).MicroSeconds());
 
     Become(&TThis::StateWaitPrepare);
 }
@@ -1072,7 +1137,7 @@ void TDataReq::ProcessReadTableResolve(NSchemeCache::TSchemeCacheRequest *cacheR
     auto &entry = cacheRequest->ResultSet[0];
     ReadTableRequest->KeyDesc = std::move(entry.KeyDescription);
 
-    bool singleShard = ReadTableRequest->KeyDesc->Partitions.size() == 1;
+    bool singleShard = ReadTableRequest->KeyDesc->GetPartitions().size() == 1;
     CanUseFollower = false;
 
     bool immediate = singleShard;
@@ -1082,7 +1147,7 @@ void TDataReq::ProcessReadTableResolve(NSchemeCache::TSchemeCacheRequest *cacheR
         immediate = true;
     }
 
-    for (auto& partition : ReadTableRequest->KeyDesc->Partitions) {
+    for (auto& partition : ReadTableRequest->KeyDesc->GetPartitions()) {
         NKikimrTxDataShard::TDataTransaction dataTransaction;
         dataTransaction.SetStreamResponse(StreamResponse);
         dataTransaction.SetImmediate(immediate);
@@ -1120,7 +1185,7 @@ void TDataReq::ProcessReadTableResolve(NSchemeCache::TSchemeCacheRequest *cacheR
             "Actor# " << ctx.SelfID.ToString() << " txid# " << TxId
             << " SEND TEvProposeTransaction to datashard " << partition.ShardId
             << " with read table request"
-            << " affected shards " << ReadTableRequest->KeyDesc->Partitions.size()
+            << " affected shards " << ReadTableRequest->KeyDesc->GetPartitions().size()
             << " followers " << (CanUseFollower ? "allowed" : "disallowed") << " marker# P4b");
 
         const TActorId pipeCache = CanUseFollower ? Services.FollowerPipeCache : Services.LeaderPipeCache;
@@ -1257,7 +1322,7 @@ void TDataReq::Handle(TEvTxProxyReq::TEvMakeRequest::TPtr &ev, const TActorConte
     if (txbody.HasReadTableTransaction()) {
         ReadTableRequest = new TReadTableRequest(txbody.GetReadTableTransaction());
         TAutoPtr<NSchemeCache::TSchemeCacheNavigate> request(new NSchemeCache::TSchemeCacheNavigate());
-        request->DatabaseName = record.GetDatabaseName();
+        request->DatabaseName = DatabaseName = record.GetDatabaseName();
 
         NSchemeCache::TSchemeCacheNavigate::TEntry entry;
         entry.Path = SplitPath(ReadTableRequest->TablePath);
@@ -1365,7 +1430,7 @@ void TDataReq::Handle(TEvTxProxyReq::TEvMakeRequest::TPtr &ev, const TActorConte
                 NKikimrIssues::TStatusIds::TRANSIENT, false, ctx);
     }
 
-    resolveReq->Request->DatabaseName = record.GetDatabaseName();
+    resolveReq->Request->DatabaseName = DatabaseName = record.GetDatabaseName();
     TxProxyMon->MakeRequestProxyAccepted->Inc();
     LOG_DEBUG_S_SAMPLED_BY(ctx, NKikimrServices::TX_PROXY, TxId,
         "Actor# " << ctx.SelfID.ToString() << " txid# " << TxId
@@ -2712,8 +2777,8 @@ ui64 GetFirstTablet(NSchemeCache::TSchemeCacheRequest &cacheRequest) {
 
     NSchemeCache::TSchemeCacheRequest::TEntry& firstEntry= *cacheRequest.ResultSet.begin();
     NKikimr::TKeyDesc& firstKey = *firstEntry.KeyDescription;
-    Y_VERIFY(!firstKey.Partitions.empty());
-    return firstKey.Partitions.begin()->ShardId;
+    Y_VERIFY(!firstKey.GetPartitions().empty());
+    return firstKey.GetPartitions().begin()->ShardId;
 }
 
 const TDomainsInfo::TDomain& TDataReq::SelectDomain(NSchemeCache::TSchemeCacheRequest &cacheRequest, const TActorContext &ctx) {

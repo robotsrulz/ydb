@@ -43,7 +43,7 @@ class TBlobStorageQueue {
     {
         EItemQueue Queue;
         TCostModel::TMessageCostEssence CostEssence;
-        NWilson::TTraceId TraceId;
+        NWilson::TSpan Span;
         TEventHolder Event;
         ui64 MsgId;
         ui64 SequenceId;
@@ -54,15 +54,15 @@ class TBlobStorageQueue {
         THPTimer ProcessingTimer;
         TTrackableList<TItem>::iterator Iterator;
 
-        template<typename TPtr>
-        TItem(TPtr& event, TInstant deadline,
-                const NMonitoring::TDynamicCounters::TCounterPtr& serItems,
-                const NMonitoring::TDynamicCounters::TCounterPtr& serBytes,
+        template<typename TEvent>
+        TItem(TAutoPtr<TEventHandle<TEvent>>& event, TInstant deadline,
+                const ::NMonitoring::TDynamicCounters::TCounterPtr& serItems,
+                const ::NMonitoring::TDynamicCounters::TCounterPtr& serBytes,
                 const TBSProxyContextPtr& bspctx, ui32 interconnectChannel,
                 bool local)
             : Queue(EItemQueue::NotSet)
             , CostEssence(*event->Get())
-            , TraceId(std::move(event->TraceId))
+            , Span(TWilson::VDiskTopLevel, std::move(event->TraceId), "Backpressure.InFlight")
             , Event(event, serItems, serBytes, bspctx, interconnectChannel, local)
             , MsgId(Max<ui64>())
             , SequenceId(0)
@@ -70,7 +70,11 @@ class TBlobStorageQueue {
             , QueueCookie(RandomNumber<ui64>())
             , Cost(0)
             , DirtyCost(true)
-        {}
+        {
+            Span
+                .Attribute("event", TypeName<TEvent>())
+                .Attribute("local", local);
+        }
 
         ~TItem() {
             Y_VERIFY(Queue == EItemQueue::NotSet, "Queue# %" PRIu32, ui32(Queue));
@@ -124,30 +128,30 @@ class TBlobStorageQueue {
     const ui32 InterconnectChannel;
 
 public:
-    NMonitoring::TDynamicCounters::TCounterPtr QueueWaitingItems;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueWaitingBytes;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueInFlightItems;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueInFlightBytes;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueInFlightCost;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueWindowSize;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsPut;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsPutBytes;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsProcessed;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsRejected;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsPruned;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsSent;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsUndelivered;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsIncorrectMsgId;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueItemsWatermarkOverflow;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueOverflow;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueSerializedItems;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueSerializedBytes;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueDeserializedItems;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueDeserializedBytes;
-    NMonitoring::TDynamicCounters::TCounterPtr QueueSize;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueWaitingItems;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueWaitingBytes;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueInFlightItems;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueInFlightBytes;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueInFlightCost;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueWindowSize;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsPut;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsPutBytes;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsProcessed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsRejected;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsPruned;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsSent;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsUndelivered;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsIncorrectMsgId;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueItemsWatermarkOverflow;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueOverflow;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueSerializedItems;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueSerializedBytes;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueDeserializedItems;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueDeserializedBytes;
+    ::NMonitoring::TDynamicCounters::TCounterPtr QueueSize;
 
 public:
-    TBlobStorageQueue(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters, TString& logPrefix,
+    TBlobStorageQueue(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, TString& logPrefix,
             const TBSProxyContextPtr& bspctx, const NBackpressure::TQueueClientId& clientId, ui32 interconnectChannel,
             const TBlobStorageGroupType &gType,
             NMonitoring::TCountableBase::EVisibility visibility = NMonitoring::TCountableBase::EVisibility::Public);
@@ -183,7 +187,7 @@ public:
 
     void SetItemQueue(TItem& item, EItemQueue newQueue);
 
-    void SendToVDisk(const TActorContext& ctx, const TActorId& remoteVDisk, IActor *actor);
+    void SendToVDisk(const TActorContext& ctx, const TActorId& remoteVDisk, ui32 vdiskOrderNumber);
 
     void ReplyWithError(TItem& item, NKikimrProto::EReplyStatus status, const TString& errorReason, const TActorContext& ctx);
     bool Expecting(ui64 msgId, ui64 sequenceId) const;

@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(core-client-server)
 target_compile_options(core-client-server PRIVATE
@@ -45,6 +46,7 @@ target_link_libraries(core-client-server PUBLIC
   lib-deprecated-client
   lib-deprecated-kicli
   ydb-services-persqueue_v1
+  cpp-deprecated-atomic
 )
 target_sources(core-client-server PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/client/server/http_ping.cpp
@@ -68,6 +70,7 @@ target_sources(core-client-server PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/client/server/msgbus_server_resolve_node.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/client/server/msgbus_server_ic_debug.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/client/server/msgbus_server_load.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/client/server/msgbus_server_datashard_load.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/client/server/msgbus_server_local_enumerate_tablets.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/client/server/msgbus_server_local_minikql.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/client/server/msgbus_server_local_scheme_tx.cpp

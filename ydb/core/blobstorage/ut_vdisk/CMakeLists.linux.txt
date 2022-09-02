@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(lib)
 
 add_executable(ydb-core-blobstorage-ut_vdisk)
 target_compile_options(ydb-core-blobstorage-ut_vdisk PRIVATE
@@ -17,7 +18,8 @@ target_include_directories(ydb-core-blobstorage-ut_vdisk PRIVATE
 target_link_libraries(ydb-core-blobstorage-ut_vdisk PUBLIC
   contrib-libs-cxxsupp
   yutil
-  library-cpp-lfalloc
+  cpp-malloc-tcmalloc
+  libs-tcmalloc-no_percpu_cache
   library-cpp-cpuid_check
   cpp-testing-unittest_main
   ydb-core-blobstorage

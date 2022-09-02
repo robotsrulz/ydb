@@ -8,8 +8,7 @@
 #include <util/generic/vector.h>
 #include <util/generic/map.h>
 #include <util/stream/walk.h>
-#include <library/cpp/actors/wilson/wilson_event.h>
-#include <library/cpp/actors/helpers/mon_histogram_helper.h>
+#include <library/cpp/actors/wilson/wilson_span.h>
 
 #include "interconnect_common.h"
 #include "interconnect_counters.h"
@@ -58,8 +57,13 @@ namespace NActors {
 
         std::pair<ui32, TEventHolder*> Push(IEventHandle& ev) {
             TEventHolder& event = Pool.Allocate(Queue);
-            const ui32 bytes = event.Fill(ev) + sizeof(TEventDescr);
+            const ui32 bytes = event.Fill(ev) + (Params.UseExtendedTraceFmt ? sizeof(TEventDescr2) : sizeof(TEventDescr1));
             OutputQueueSize += bytes;
+            if (event.Span = NWilson::TSpan(15 /*max verbosity*/, NWilson::TTraceId(ev.TraceId), "Interconnect.Queue")) {
+                event.Span
+                    .Attribute("OutputQueueItems", static_cast<i64>(Queue.size()))
+                    .Attribute("OutputQueueSize", static_cast<i64>(OutputQueueSize));
+            }
             return std::make_pair(bytes, &event);
         }
 
@@ -102,8 +106,6 @@ namespace NActors {
             DESCRIPTOR,
         };
         EState State = EState::INITIAL;
-
-        static constexpr ui16 MinimumFreeSpace = sizeof(TChannelPart) + sizeof(TEventDescr);
 
     protected:
         ui64 OutputQueueSize = 0;

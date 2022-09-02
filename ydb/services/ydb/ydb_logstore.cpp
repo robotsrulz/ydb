@@ -5,33 +5,7 @@
 
 #include <ydb/core/grpc_services/grpc_helper.h>
 
-namespace NKikimr {
-namespace NGRpcService {
-
-TGRpcYdbLogStoreService::TGRpcYdbLogStoreService(NActors::TActorSystem *system,
-    TIntrusivePtr<NMonitoring::TDynamicCounters> counters,
-    NActors::TActorId id)
-    : ActorSystem_(system)
-    , Counters_(counters)
-    , GRpcRequestProxyId_(id) {}
-
-void TGRpcYdbLogStoreService::InitService(grpc::ServerCompletionQueue *cq, NGrpc::TLoggerPtr logger) {
-    CQ_ = cq;
-    SetupIncomingRequests(std::move(logger));
-}
-
-void TGRpcYdbLogStoreService::SetGlobalLimiterHandle(NGrpc::TGlobalLimiter* limiter) {
-    Limiter_ = limiter;
-}
-
-bool TGRpcYdbLogStoreService::IncRequest() {
-    return Limiter_->Inc();
-}
-
-void TGRpcYdbLogStoreService::DecRequest() {
-    Limiter_->Dec();
-    Y_ASSERT(Limiter_->GetCurrentInFlight() >= 0);
-}
+namespace NKikimr::NGRpcService {
 
 void TGRpcYdbLogStoreService::SetupIncomingRequests(NGrpc::TLoggerPtr logger) {
     using namespace Ydb;
@@ -53,6 +27,7 @@ void TGRpcYdbLogStoreService::SetupIncomingRequests(NGrpc::TLoggerPtr logger) {
     ADD_REQUEST(CreateLogStore, DoCreateLogStoreRequest)
     ADD_REQUEST(DescribeLogStore, DoDescribeLogStoreRequest)
     ADD_REQUEST(DropLogStore, DoDropLogStoreRequest)
+    ADD_REQUEST(AlterLogStore, DoAlterLogStoreRequest)
 
     ADD_REQUEST(CreateLogTable, DoCreateLogTableRequest)
     ADD_REQUEST(DescribeLogTable, DoDescribeLogTableRequest)
@@ -62,5 +37,4 @@ void TGRpcYdbLogStoreService::SetupIncomingRequests(NGrpc::TLoggerPtr logger) {
 #undef ADD_REQUEST
 }
 
-} // namespace NGRpcService
-} // namespace NKikimr
+}

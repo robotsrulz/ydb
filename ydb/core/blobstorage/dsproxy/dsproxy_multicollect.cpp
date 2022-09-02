@@ -28,6 +28,7 @@ class TBlobStorageGroupMultiCollectRequest
     const ui32 CollectStep;
     const bool Hard;
     const bool Collect;
+    const bool Decommission;
 
     ui64 FlagRequestsInFlight;
     ui64 CollectRequestsInFlight;
@@ -38,7 +39,7 @@ class TBlobStorageGroupMultiCollectRequest
 
     void Handle(TEvBlobStorage::TEvCollectGarbageResult::TPtr &ev) {
         const TEvBlobStorage::TEvCollectGarbageResult &res = *ev->Get();
-        R_LOG_ERROR_S("BPMC1", "Handle TEvCollectGarbageResult"
+        A_LOG_LOG_S(true, PriorityForStatusResult(res.Status), "BPMC1", "Handle TEvCollectGarbageResult"
             << " status# " << NKikimrProto::EReplyStatus_Name(res.Status)
             << " FlagRequestsInFlight# " << FlagRequestsInFlight
             << " CollectRequestsInFlight " << CollectRequestsInFlight);
@@ -93,9 +94,10 @@ public:
     TBlobStorageGroupMultiCollectRequest(const TIntrusivePtr<TBlobStorageGroupInfo> &info,
             const TIntrusivePtr<TGroupQueues> &state, const TActorId &source,
             const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TEvBlobStorage::TEvCollectGarbage *ev, ui64 cookie,
-            TInstant now, TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters)
-        : TBlobStorageGroupRequestActor(info, state, mon, source, cookie, NWilson::TTraceId(),
-                NKikimrServices::BS_PROXY_MULTICOLLECT, false, {}, now, storagePoolCounters, 0)
+            NWilson::TTraceId traceId, TInstant now, TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters)
+        : TBlobStorageGroupRequestActor(info, state, mon, source, cookie, std::move(traceId),
+                NKikimrServices::BS_PROXY_MULTICOLLECT, false, {}, now, storagePoolCounters, 0,
+                "DSProxy.MultiCollect")
         , TabletId(ev->TabletId)
         , RecordGeneration(ev->RecordGeneration)
         , PerGenerationCounter(ev->PerGenerationCounter)
@@ -107,6 +109,7 @@ public:
         , CollectStep(ev->CollectStep)
         , Hard(ev->Hard)
         , Collect(ev->Collect)
+        , Decommission(ev->Decommission)
         , FlagRequestsInFlight(0)
         , CollectRequestsInFlight(0)
         , StartTime(now)
@@ -151,10 +154,11 @@ public:
             TabletId, RecordGeneration, PerGenerationCounter + idx, Channel,
             isCollect, CollectGeneration, CollectStep, keepPart.release(), doNotKeepPart.release(), Deadline, false,
             Hard));
+        ev->Decommission = Decommission; // retain decommission flag
         R_LOG_DEBUG_S("BPMC3", "SendRequest idx# " << idx
             << " isLast# " << isLast
             << " ev# " << ev->ToString());
-        SendToBSProxy(SelfId(), Info->GroupID, ev.release(), cookie);
+        SendToProxy(std::move(ev), cookie, Span.GetTraceId());
 
         if (isLast) {
             CollectRequestsInFlight++;
@@ -205,8 +209,8 @@ public:
 IActor* CreateBlobStorageGroupMultiCollectRequest(const TIntrusivePtr<TBlobStorageGroupInfo> &info,
         const TIntrusivePtr<TGroupQueues> &state, const TActorId &source,
         const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TEvBlobStorage::TEvCollectGarbage *ev,
-        ui64 cookie, TInstant now, TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters) {
-    return new TBlobStorageGroupMultiCollectRequest(info, state, source, mon, ev, cookie, now,
+        ui64 cookie, NWilson::TTraceId traceId, TInstant now, TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters) {
+    return new TBlobStorageGroupMultiCollectRequest(info, state, source, mon, ev, cookie, std::move(traceId), now,
             storagePoolCounters);
 }
 

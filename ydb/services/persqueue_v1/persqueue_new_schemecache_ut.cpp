@@ -14,7 +14,7 @@
 #include <ydb/library/persqueue/topic_parser/topic_parser.h>
 
 #include <library/cpp/testing/unittest/tests_data.h>
-#include <library/cpp/testing/unittest/registar.h>  
+#include <library/cpp/testing/unittest/registar.h>
 #include <library/cpp/json/json_reader.h>
 
 #include <util/string/join.h>
@@ -331,7 +331,13 @@ namespace NKikimr::NPersQueueTests {
 
                 const auto monPort = TPortManager().GetPort();
                 auto Counters = server.CleverServer->GetGRpcServerRootCounters();
-                NActors::TSyncHttpMon Monitoring({monPort, "localhost", 3, "root", "localhost", {}, {}, {}});
+                NActors::TSyncHttpMon Monitoring({
+                    .Port = monPort,
+                    .Address = "localhost",
+                    .Threads = 3,
+                    .Title = "root",
+                    .Host = "localhost",
+                });
                 Monitoring.RegisterCountersPage("counters", "Counters", Counters);
                 Monitoring.Start();
 
@@ -614,9 +620,9 @@ namespace NKikimr::NPersQueueTests {
                 auto* rr = addRuleRequest.mutable_read_rule();
                 rr->set_consumer_name("goodUser");
                 rr->set_version(0);
-                rr->set_important(true);
+                rr->set_important(false);
                 rr->set_supported_format(TopicSettings::FORMAT_BASE);
-                rr->add_supported_codecs(CODEC_ZSTD);
+                rr->add_supported_codecs(CODEC_GZIP);
                 auto status = stub->AddReadRule(&grpcContext, addRuleRequest, &addRuleResponse);
                 Cerr << "ADD RR RESPONSE " << addRuleResponse << "\n";
                 UNIT_ASSERT(status.ok() && addRuleResponse.operation().status() == Ydb::StatusIds::SUCCESS);
@@ -688,9 +694,9 @@ namespace NKikimr::NPersQueueTests {
                 auto* rr = addRuleRequest.mutable_read_rule();
                 rr->set_consumer_name("goodUser");
                 rr->set_version(0);
-                rr->set_important(true);
+                rr->set_important(false);
                 rr->set_supported_format(TopicSettings::FORMAT_BASE);
-                rr->add_supported_codecs(CODEC_ZSTD);
+                rr->add_supported_codecs(CODEC_GZIP);
                 auto status = stub->AddReadRule(&grpcContext, addRuleRequest, &addRuleResponse);
                 Cerr << addRuleResponse << "\n";
                 UNIT_ASSERT(status.ok() && addRuleResponse.operation().status() == Ydb::StatusIds::SUCCESS);

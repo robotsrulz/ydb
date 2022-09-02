@@ -314,7 +314,7 @@ public:
             }
             return context.SS->ResolveChannelsByPoolKinds(
                 poolKinds,
-                dstPath.DomainId(),
+                dstPath.GetPathIdForDomain(),
                 binding);
         };
 
@@ -358,19 +358,23 @@ public:
             context.SS->SetNbsChannelsParams(ecps, volumeChannelsBinding);
         } else {
             const ui32 volumeProfileId = 0;
-            if (!context.SS->ResolveTabletChannels(volumeProfileId, dstPath.DomainId(), volumeChannelsBinding)) {
+            if (!context.SS->ResolveTabletChannels(volumeProfileId, dstPath.GetPathIdForDomain(), volumeChannelsBinding)) {
                 result->SetError(NKikimrScheme::StatusInvalidParameter,
                                 "Unable to construct channel binding for volume with the profile");
                 return result;
             }
         }
 
-        auto domainDir = context.SS->PathsById.at(dstPath.DomainId());
+        auto domainDir = context.SS->PathsById.at(dstPath.GetPathIdForDomain());
         Y_VERIFY(domainDir);
 
         auto volumeSpace = volume->GetVolumeSpace();
         if (!domainDir->CheckVolumeSpaceChange(volumeSpace, { }, errStr)) {
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
+            return result;
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxCreateBlockStoreVolume, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
             return result;
         }
 

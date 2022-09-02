@@ -6,6 +6,26 @@
 # original buildsystem will not be accepted.
 
 
-if (UNIX)
-  include(CMakeLists.linux.txt)
-endif()
+add_subdirectory(absl)
+
+add_library(contrib-restricted-abseil-cpp INTERFACE)
+target_link_libraries(contrib-restricted-abseil-cpp INTERFACE
+  abseil-cpp-absl-algorithm
+  abseil-cpp-absl-base
+  abseil-cpp-absl-container
+  abseil-cpp-absl-debugging
+  abseil-cpp-absl-flags
+  abseil-cpp-absl-functional
+  abseil-cpp-absl-hash
+  abseil-cpp-absl-memory
+  abseil-cpp-absl-meta
+  abseil-cpp-absl-numeric
+  abseil-cpp-absl-profiling
+  abseil-cpp-absl-random
+  abseil-cpp-absl-status
+  abseil-cpp-absl-strings
+  abseil-cpp-absl-synchronization
+  abseil-cpp-absl-time
+  abseil-cpp-absl-types
+  abseil-cpp-absl-utility
+)

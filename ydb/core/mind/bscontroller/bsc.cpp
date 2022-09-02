@@ -7,20 +7,13 @@ namespace NKikimr {
 
 TString TGroupID::ToString() const {
     TStringStream str;
-    str << "{TGroupID ConfigurationType# "
-        << (ConfigurationType() == GroupConfigurationTypeStatic ? "Static" : "Dynamic");
-    str << " AvailabilityDomainID# " << AvailabilityDomainID();
+    str << "{TGroupID ConfigurationType# ";
+    switch (ConfigurationType()) {
+        case EGroupConfigurationType::Static: str << "Static"; break;
+        case EGroupConfigurationType::Dynamic: str << "Dynamic"; break;
+        case EGroupConfigurationType::Virtual: str << "Virtual"; break;
+    }
     str << " GroupLocalID# " << GroupLocalID();
-    str << "}";
-    return str.Str();
-}
-
-TString TPDiskID::ToString() const {
-    TStringStream str;
-    str << "{TPDiskID ConfigurationType# "
-    << (ConfigurationType() == GroupConfigurationTypeStatic ? "Static" : "Dynamic");
-    str << " AvailabilityDomainID# " << AvailabilityDomainID();
-    str << " PDiskLocalID# " << PDiskLocalID();
     str << "}";
     return str.Str();
 }
@@ -64,33 +57,42 @@ TBlobStorageController::TVSlotInfo::TVSlotInfo(TVSlotId vSlotId, TPDiskInfo *pdi
 }
 
 void TBlobStorageController::TGroupInfo::CalculateGroupStatus() {
-    TBlobStorageGroupInfo::TGroupVDisks failed(Topology.get());
-    TBlobStorageGroupInfo::TGroupVDisks failedByPDisk(Topology.get());
-    for (const TVSlotInfo *slot : VDisksInGroup) {
-        if (!slot->IsReady) {
-            failed |= {Topology.get(), slot->GetShortVDiskId()};
-        } else if (!slot->PDisk->HasGoodExpectedStatus()) {
-            failedByPDisk |= {Topology.get(), slot->GetShortVDiskId()};
+    Status = {};
+
+    if (VirtualGroupState) {
+        if (VirtualGroupState == NKikimrBlobStorage::EVirtualGroupState::WORKING) {
+            Status.MakeWorst(NKikimrBlobStorage::TGroupStatus::FULL, NKikimrBlobStorage::TGroupStatus::FULL);
+        } else {
+            Status.MakeWorst(NKikimrBlobStorage::TGroupStatus::DISINTEGRATED, NKikimrBlobStorage::TGroupStatus::DISINTEGRATED);
         }
     }
-    auto deriveStatus = [&](const auto& failed) {
-        auto& checker = *Topology->QuorumChecker;
-        if (!failed.GetNumSetItems()) { // all disks of group are operational
-            return NKikimrBlobStorage::TGroupStatus::FULL;
-        } else if (!checker.CheckFailModelForGroup(failed)) { // fail model exceeded
-            return NKikimrBlobStorage::TGroupStatus::DISINTEGRATED;
-        } else if (checker.IsDegraded(failed)) { // group degraded
-            return NKikimrBlobStorage::TGroupStatus::DEGRADED;
-        } else if (failed.GetNumSetItems()) { // group partially available, but not degraded
-            return NKikimrBlobStorage::TGroupStatus::PARTIAL;
-        } else {
-            Y_FAIL("unexpected case");
+
+    if (VDisksInGroup) {
+        TBlobStorageGroupInfo::TGroupVDisks failed(Topology.get());
+        TBlobStorageGroupInfo::TGroupVDisks failedByPDisk(Topology.get());
+        for (const TVSlotInfo *slot : VDisksInGroup) {
+            if (!slot->IsReady) {
+                failed |= {Topology.get(), slot->GetShortVDiskId()};
+            } else if (!slot->PDisk->HasGoodExpectedStatus()) {
+                failedByPDisk |= {Topology.get(), slot->GetShortVDiskId()};
+            }
         }
-    };
-    Status = {
-        deriveStatus(failed),
-        deriveStatus(failed | failedByPDisk),
-    };
+        auto deriveStatus = [&](const auto& failed) {
+            auto& checker = *Topology->QuorumChecker;
+            if (!failed.GetNumSetItems()) { // all disks of group are operational
+                return NKikimrBlobStorage::TGroupStatus::FULL;
+            } else if (!checker.CheckFailModelForGroup(failed)) { // fail model exceeded
+                return NKikimrBlobStorage::TGroupStatus::DISINTEGRATED;
+            } else if (checker.IsDegraded(failed)) { // group degraded
+                return NKikimrBlobStorage::TGroupStatus::DEGRADED;
+            } else if (failed.GetNumSetItems()) { // group partially available, but not degraded
+                return NKikimrBlobStorage::TGroupStatus::PARTIAL;
+            } else {
+                Y_FAIL("unexpected case");
+            }
+        };
+        Status.MakeWorst(deriveStatus(failed), deriveStatus(failed | failedByPDisk));
+    }
 }
 
 void TBlobStorageController::OnActivateExecutor(const TActorContext&) {
@@ -177,6 +179,12 @@ void TBlobStorageController::Handle(TEvents::TEvPoisonPill::TPtr&) {
             TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
         }
     }
+    for (const auto& [id, info] : GroupMap) {
+        if (auto& actorId = info->VirtualGroupSetupMachineId) {
+            TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
+            actorId = {};
+        }
+    }
     TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, Tablet(), SelfId(), nullptr, 0));
 }
 
@@ -227,6 +235,15 @@ void TBlobStorageController::ValidateInternalState() {
             Y_VERIFY(donor->Mood == TMood::Donor);
             Y_VERIFY(donor->AcceptorVSlotId == vslotId);
         }
+        if (vslot->Group) {
+            if (vslot->Status == NKikimrBlobStorage::EVDiskStatus::READY) {
+                Y_VERIFY_DEBUG(vslot->IsReady || vslot->IsInVSlotReadyTimestampQ());
+            } else {
+                Y_VERIFY_DEBUG(!vslot->IsReady && !vslot->IsInVSlotReadyTimestampQ());
+            }
+        } else {
+            Y_VERIFY_DEBUG(!vslot->IsInVSlotReadyTimestampQ());
+        }
     }
     for (const auto& [groupId, group] : GroupMap) {
         Y_VERIFY(groupId == group->ID);
@@ -254,6 +271,7 @@ ui32 TBlobStorageController::GetEventPriority(IEventHandle *ev) {
         case TEvBlobStorage::EvControllerNodeReport:                   return 1;
         case TEvBlobStorage::EvControllerProposeGroupKey:              return 1;
         case TEvBlobStorage::EvControllerGetGroup:                     return 1;
+        case TEvBlobStorage::EvControllerGroupDecommittedNotify:       return 1;
 
         // auxiliary messages that are not usually urgent (also includes RW transactions in TConfigRequest and UpdateDiskStatus)
         case TEvBlobStorage::EvControllerGroupReconfigureWipe:         return 2;
@@ -282,7 +300,7 @@ ui32 TBlobStorageController::GetEventPriority(IEventHandle *ev) {
             const auto& record = msg->Record;
             for (const auto& item : record.GetVDiskStatus()) {
                 const TVSlotId vslotId(item.GetNodeId(), item.GetPDiskId(), item.GetVSlotId());
-                if (TVSlotInfo *slot = FindVSlot(vslotId); slot && slot->GetStatus() > item.GetStatus()) {
+                if (TVSlotInfo *slot = FindVSlot(vslotId); slot && slot->Status > item.GetStatus()) {
                     return 1;
                 } else if (const auto it = StaticVSlots.find(vslotId); it != StaticVSlots.end() && it->second.VDiskStatus > item.GetStatus()) {
                     return 1;
@@ -327,6 +345,9 @@ ui32 TBlobStorageController::GetEventPriority(IEventHandle *ev) {
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kSetPDiskSpaceMarginPromille:
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kUpdateSettings:
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kReassignGroupDisk:
+                    case NKikimrBlobStorage::TConfigRequest::TCommand::kAllocateVirtualGroup:
+                    case NKikimrBlobStorage::TConfigRequest::TCommand::kDecommitGroups:
+                    case NKikimrBlobStorage::TConfigRequest::TCommand::kWipeVDisk:
                         return 2; // read-write commands go with higher priority as they are needed to keep cluster intact
 
                     case NKikimrBlobStorage::TConfigRequest::TCommand::kReadHostConfig:

@@ -24,6 +24,12 @@ if PDISK_SIZE_STR.endswith("GB"):
 else:
     PDISK_SIZE = int(PDISK_SIZE_STR)
 
+KNOWN_STATIC_YQL_UDFS = set([
+    "yql/udfs/common/unicode",
+    "yql/udfs/common/url",
+    "yql/udfs/common/compress",
+])
+
 
 def get_fqdn():
     hostname = socket.gethostname()
@@ -68,6 +74,10 @@ def load_default_yaml(default_tablet_node_ids, ydb_domain_name, static_erasure, 
         ydb_state_storage_n_to_select=n_to_select,
         ydb_state_storage_nodes=state_storage_nodes,
         ydb_grpc_host=get_grpc_host(),
+        ydb_pq_topics_are_first_class_citizen=bool(os.getenv("YDB_PQ_TOPICS_ARE_FIRST_CLASS_CITIZEN", "true")),
+        ydb_pq_cluster_table_path=str(os.getenv("YDB_PQ_CLUSTER_TABLE_PATH", "")),
+        ydb_pq_version_table_path=str(os.getenv("YDB_PQ_VERSION_TABLE_PATH", "")),
+        ydb_pq_root=str(os.getenv("YDB_PQ_ROOT", "")),
     )
     yaml_dict = yaml.safe_load(data)
     yaml_dict["log_config"]["entry"] = []
@@ -97,7 +107,7 @@ class KikimrConfigGenerator(object):
             load_udfs=False,
             udfs_path=None,
             output_path=None,
-            enable_pq=False,
+            enable_pq=True,
             pq_client_service_types=None,
             slot_count=0,
             pdisk_store_path=None,
@@ -114,7 +124,7 @@ class KikimrConfigGenerator(object):
             use_log_files=True,
             grpc_ssl_enable=False,
             use_in_memory_pdisks=False,
-            enable_pqcd=False,
+            enable_pqcd=True,
             enable_metering=False,
             grpc_tls_data_path=None,
             yq_config_path=None,
@@ -125,6 +135,8 @@ class KikimrConfigGenerator(object):
             node_kind=None,
             bs_cache_file_path=None,
             yq_tenant=None,
+            use_legacy_pq=False,
+            dc_mapping={},
     ):
         self._version = version
         self.use_log_files = use_log_files
@@ -186,6 +198,7 @@ class KikimrConfigGenerator(object):
         self.__output_path = output_path or yatest_common.output_path()
         self.node_kind = node_kind
         self.yq_tenant = yq_tenant
+        self.dc_mapping = dc_mapping
 
         self.__bs_cache_file_path = bs_cache_file_path
 
@@ -194,12 +207,23 @@ class KikimrConfigGenerator(object):
         self.yaml_config["feature_flags"]["enable_public_api_external_blobs"] = enable_public_api_external_blobs
         self.yaml_config["feature_flags"]["enable_mvcc"] = "VALUE_FALSE" if disable_mvcc else "VALUE_TRUE"
         self.yaml_config['pqconfig']['enabled'] = enable_pq
+        self.yaml_config['pqconfig']['enable_proto_source_id_info'] = True
+        # NOTE(shmel1k@): KIKIMR-14221
+        if use_legacy_pq:
+            self.yaml_config['pqconfig']['topics_are_first_class_citizen'] = False
+            self.yaml_config['pqconfig']['cluster_table_path'] = '/Root/PQ/Config/V2/Cluster'
+            self.yaml_config['pqconfig']['version_table_path'] ='/Root/PQ/Config/V2/Versions'
+            self.yaml_config['pqconfig']['check_acl'] = False
+            self.yaml_config['pqconfig']['require_credentials_in_new_protocol'] = False
+            self.yaml_config['pqconfig']['root'] = '/Root/PQ'
+            self.yaml_config['pqconfig']['quoting_config']['enable_quoting'] = False
+
         if pq_client_service_types:
             self.yaml_config['pqconfig']['client_service_type'] = []
             for service_type in pq_client_service_types:
                 self.yaml_config['pqconfig']['client_service_type'].append({'name': service_type})
 
-        self.yaml_config['pqconfig']['topics_are_first_class_citizen'] = enable_pq and enable_datastreams
+        # NOTE(shmel1k@): change to 'true' after migration to YDS scheme
         self.yaml_config['sqs_config']['enable_sqs'] = enable_sqs
         self.yaml_config['pqcluster_discovery_config']['enabled'] = enable_pqcd
         self.yaml_config["net_classifier_config"]["net_data_file_path"] = os.path.join(self.__output_path,
@@ -366,6 +390,16 @@ class KikimrConfigGenerator(object):
         udfs_path = self.__udfs_path or yatest_common.build_path("yql/udfs")
         result = []
         for dirpath, dnames, fnames in os.walk(udfs_path):
+            is_loaded = False
+            for already_loaded_static_udf in KNOWN_STATIC_YQL_UDFS:
+                dirpath = dirpath.rstrip("/")
+
+                if dirpath.endswith(already_loaded_static_udf):
+                    is_loaded = True
+
+            if is_loaded:
+                continue
+
             for f in fnames:
                 if f.endswith(".so"):
                     full = os.path.join(dirpath, f)

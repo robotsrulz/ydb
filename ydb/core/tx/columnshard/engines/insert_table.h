@@ -15,7 +15,7 @@ struct TInsertedData {
     TString Metadata;
     TInstant DirtyTime;
 
-    TInsertedData() = default;
+    TInsertedData() = delete; // avoid invalid TInsertedData anywhere
 
     TInsertedData(ui64 shardOrPlan, ui64 writeTxId, ui64 pathId, TString dedupId, const TUnifiedBlobId& blobId,
                   const TString& meta, const TInstant& writeTime)
@@ -85,6 +85,17 @@ struct TInsertedData {
     ui32 BlobSize() const { return BlobId.BlobSize(); }
 };
 
+struct TCommittedBlob {
+    TUnifiedBlobId BlobId;
+    ui64 PlanStep{0};
+    ui64 TxId{0};
+
+    /// It uses trick then we place key wtih planStep:txId in container and find them later by BlobId only.
+    /// So hash() and equality should depend on BlobId only.
+    bool operator == (const TCommittedBlob& key) const { return BlobId == key.BlobId; }
+    ui64 Hash() const noexcept { return BlobId.Hash(); }
+};
+
 class IDbWrapper;
 
 /// Use one table for inserted and commited blobs:
@@ -101,30 +112,40 @@ public:
         ui64 RawBytes{};
     };
 
-    bool Insert(IDbWrapper& dbTable, const TInsertedData& data);
+    bool Insert(IDbWrapper& dbTable, TInsertedData&& data);
     TCounters Commit(IDbWrapper& dbTable, ui64 planStep, ui64 txId, ui64 metaShard, const THashSet<TWriteId>& writeIds);
     void Abort(IDbWrapper& dbTable, ui64 metaShard, const THashSet<TWriteId>& writeIds);
-    THashSet<TWriteId> AbortOld(IDbWrapper& dbTable, const TInstant& now);
+    THashSet<TWriteId> OldWritesToAbort(const TInstant& now) const;
     THashSet<TWriteId> DropPath(IDbWrapper& dbTable, ui64 pathId);
-    void EraseInserted(IDbWrapper& dbTable, const TInsertedData& key);
     void EraseCommitted(IDbWrapper& dbTable, const TInsertedData& key);
     void EraseAborted(IDbWrapper& dbTable, const TInsertedData& key);
-    TVector<TUnifiedBlobId> Read(ui64 pathId, ui64 plan, ui64 txId) const;
+    std::vector<TCommittedBlob> Read(ui64 pathId, ui64 plan, ui64 txId) const;
     bool Load(IDbWrapper& dbTable, const TInstant& loadTime);
-    void GetCounters(TCounters& prepared, TCounters& committed) const;
+    const TCounters& GetCountersPrepared() const { return StatsPrepared; }
+    const TCounters& GetCountersCommitted() const { return StatsCommitted; }
 
     size_t InsertedSize() const { return Inserted.size(); }
     const THashMap<ui64, TSet<TInsertedData>>& GetCommitted() const { return CommittedByPathId; }
     const THashMap<TWriteId, TInsertedData>& GetAborted() const { return Aborted; }
     void SetOverloaded(ui64 pathId, bool overload);
     bool IsOverloaded(ui64 pathId) const { return PathsOverloaded.count(pathId); }
+    bool HasOverloaded() const { return !PathsOverloaded.empty(); }
 
 private:
     THashMap<TWriteId, TInsertedData> Inserted;
     THashMap<ui64, TSet<TInsertedData>> CommittedByPathId;
     THashMap<TWriteId, TInsertedData> Aborted;
     THashSet<ui64> PathsOverloaded;
-    TInstant LastCleanup;
+    mutable TInstant LastCleanup;
+    TCounters StatsPrepared;
+    TCounters StatsCommitted;
 };
 
 }
+
+template <>
+struct THash<NKikimr::NOlap::TCommittedBlob> {
+    inline size_t operator() (const NKikimr::NOlap::TCommittedBlob& key) const {
+        return key.Hash();
+    }
+};

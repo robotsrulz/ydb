@@ -18,6 +18,8 @@
  * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
  * KIND, either express or implied.
  *
+ * SPDX-License-Identifier: curl
+ *
  ***************************************************************************/
 
 #include "curl_setup.h"
@@ -95,7 +97,9 @@ static const MSH3_REQUEST_IF msh3_request_if = {
 
 void Curl_quic_ver(char *p, size_t len)
 {
-  (void)msnprintf(p, len, "msh3/%s", "0.0.1");
+  uint32_t v[4];
+  MsH3Version(v);
+  (void)msnprintf(p, len, "msh3/%d.%d.%d.%d", v[0], v[1], v[2], v[3]);
 }
 
 CURLcode Curl_quic_connect(struct Curl_easy *data,
@@ -121,7 +125,10 @@ CURLcode Curl_quic_connect(struct Curl_easy *data,
     return CURLE_FAILED_INIT;
   }
 
-  qs->conn = MsH3ConnectionOpen(qs->api, conn->host.name, unsecure);
+  qs->conn = MsH3ConnectionOpen(qs->api,
+                                conn->host.name,
+                                (uint16_t)conn->remote_port,
+                                unsecure);
   if(!qs->conn) {
     failf(data, "can't create msh3 connection");
     if(qs->api) {
@@ -357,7 +364,7 @@ static void MSH3_CALL msh3_complete(MSH3_REQUEST *Request, void *IfContext,
   struct HTTP *stream = IfContext;
   (void)Request;
   (void)AbortError;
-  H3BUGF(printf("* msh3_complete, aborted=%hhu\n", Aborted));
+  H3BUGF(printf("* msh3_complete, aborted=%s\n", Aborted ? "true" : "false"));
   msh3_lock_acquire(&stream->recv_lock);
   if(Aborted) {
     stream->recv_error = CURLE_HTTP3; /* TODO - how do we pass AbortError? */
@@ -493,6 +500,18 @@ bool Curl_quic_data_pending(const struct Curl_easy *data)
   struct HTTP *stream = data->req.p.http;
   H3BUGF(infof((struct Curl_easy *)data, "Curl_quic_data_pending"));
   return stream->recv_header_len || stream->recv_data_len;
+}
+
+/*
+ * Called from transfer.c:Curl_readwrite when neither HTTP level read
+ * nor write is performed. It is a good place to handle timer expiry
+ * for QUIC transport.
+ */
+CURLcode Curl_quic_idle(struct Curl_easy *data)
+{
+  (void)data;
+  H3BUGF(infof(data, "Curl_quic_idle"));
+  return CURLE_OK;
 }
 
 #endif /* USE_MSH3 */

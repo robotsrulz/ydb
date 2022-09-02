@@ -3,6 +3,7 @@ option java_package = "ru.yandex.yql.proto";
 
 import "ydb/library/yql/protos/clickhouse.proto";
 
+
 /////////////////////////////// common ///////////////////////////////
 
 message TActivationByHour {
@@ -55,6 +56,10 @@ enum ETokenType {
 message THttpGatewayConfig {
     optional uint32 MaxInFlightCount = 1;
     optional uint64 MaxSimulatenousDownloadsSize = 2;
+    optional uint32 BuffersSizePerStream = 3;
+    optional uint64 ConnectionTimeoutSeconds = 4;
+    optional uint64 BytesPerSecondLimit = 5;
+    optional uint64 DownloadBufferBytesLimit = 6;
 }
 
 /////////////////////////////// YT ///////////////////////////////
@@ -65,6 +70,7 @@ message TYtClusterConfig {
     optional bool Default = 3 [default = false]; // Default cluster
     optional string YTToken = 4; // token to use at YT servers
     optional string YTName = 5; // YT cluster name
+    optional bool EnabledYtQlQueries = 6 [default = true]; // Allow to handle YtQl queries
 
     repeated TAttr Settings = 100;
 }
@@ -87,6 +93,18 @@ message TYtGatewayConfig {
     repeated TRemoteFilePattern RemoteFilePatterns = 100;
     repeated TYtClusterConfig ClusterMapping = 101; // Accepted cluster shortcuts. All names not from this list will be rejected
     repeated TAttr DefaultSettings = 102;
+}
+
+/////////////////////////////// Grut ///////////////////////////////
+
+message TYtOrmClusterConfig {
+    optional string Name = 1;
+    optional string Cluster = 2; // Real cluster server name with port
+    optional bool Enabled = 3 [default = true]; // Allow to handle YTORM queries
+}
+
+message TYtOrmGatewayConfig {
+    repeated TYtOrmClusterConfig ClusterMapping = 1;
 }
 
 /////////////////////////////// Kikimr ///////////////////////////////
@@ -180,6 +198,7 @@ message TClickHouseClusterConfig {
     optional uint32 NativeHostPort = 11 [default = 9000];
     optional bool NativeSecure = 12 [default = false];
     optional string Id = 13;
+    repeated string GroupAllowed = 14;
 }
 
 message TClickHouseGatewayConfig {
@@ -322,12 +341,19 @@ message TS3ClusterConfig {
     repeated TAttr Settings = 100;
 }
 
+message TS3FormatSizeLimit {
+    optional string Name = 1;          // Format name i.e. csv_with_names
+    optional uint64 FileSizeLimit = 2; // Max allowed size for this format
+}
+
 message TS3GatewayConfig {
     repeated TS3ClusterConfig ClusterMapping = 1;
 
-    optional uint64 FileSizeLimit = 2;
-    optional uint32 MaxFilesPerQuery = 3;
+    optional uint64 FileSizeLimit = 2;               // Global limit
+    repeated TS3FormatSizeLimit FormatSizeLimit = 6; // Format limits
+    optional uint64 MaxFilesPerQuery = 3;
     optional uint64 MaxReadSizePerQuery = 4;
+    optional uint64 MaxDiscoveryFilesPerQuery = 5;
 
     repeated TAttr DefaultSettings = 100;
 }
@@ -406,6 +432,11 @@ message TDqGatewayConfig {
     repeated string DefaultAnalyzeQueryForUsers = 4;
 
     repeated TAttr DefaultSettings = 102;
+
+    optional uint32 WithHiddenPercentage = 5 [default = 0];
+    repeated TDefaultAutoByHourPercentage WithHiddenByHour = 6;
+    repeated string NoWithHiddenForUsers = 7;
+    repeated string WithHiddenForUsers = 8;
 }
 
 /////////////////////////////// Yql Core ///////////////////////////////
@@ -413,6 +444,7 @@ message TDqGatewayConfig {
 message TCoreAttr {
     required string Name = 1;
     repeated string Args = 2;
+    optional TActivationPercentage Activation = 3;
 }
 
 message TYqlCoreConfig {
@@ -455,4 +487,5 @@ message TGatewaysConfig {
     optional TPqGatewayConfig Pq = 16;
     optional TS3GatewayConfig S3 = 17;
     optional THttpGatewayConfig HttpGateway = 18;
+    optional TYtOrmGatewayConfig YtOrm = 19;
 }

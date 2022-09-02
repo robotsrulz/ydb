@@ -42,7 +42,9 @@ target_link_libraries(providers-s3-provider PUBLIC
   providers-dq-interface
   providers-result-expr_nodes
   providers-s3-expr_nodes
+  providers-s3-path_generator
   providers-s3-proto
+  providers-s3-range_helpers
   library-yql-utils
 )
 target_sources(providers-s3-provider PRIVATE
@@ -54,8 +56,11 @@ target_sources(providers-s3-provider PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_dq_integration.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_exec.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_io_discovery.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_list.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_logical_opt.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_mkql_compiler.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_path.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_phy_opt.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_provider.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_provider_impl.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/s3/provider/yql_s3_settings.cpp

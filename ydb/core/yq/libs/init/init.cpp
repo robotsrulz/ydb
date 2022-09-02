@@ -9,6 +9,13 @@
 #include <ydb/core/yq/libs/health/health.h>
 #include <ydb/core/yq/libs/checkpoint_storage/storage_service.h>
 #include <ydb/core/yq/libs/private_client/internal_service.h>
+#include <ydb/core/yq/libs/private_client/loopback_service.h>
+#include <ydb/core/yq/libs/quota_manager/quota_manager.h>
+#include <ydb/core/yq/libs/quota_manager/quota_proxy.h>
+#include <ydb/core/yq/libs/rate_limiter/control_plane_service/rate_limiter_control_plane_service.h>
+#include <ydb/core/yq/libs/rate_limiter/events/control_plane_events.h>
+#include <ydb/core/yq/libs/rate_limiter/events/data_plane.h>
+#include <ydb/core/yq/libs/rate_limiter/quoter_service/quoter_service.h>
 #include <ydb/core/yq/libs/shared_resources/shared_resources.h>
 #include <ydb/library/folder_service/folder_service.h>
 #include <ydb/library/yql/providers/common/metrics/service_counters.h>
@@ -26,6 +33,7 @@
 #include <ydb/library/yql/providers/common/comp_nodes/yql_factory.h>
 #include <ydb/library/yql/providers/dq/task_runner/tasks_runner_local.h>
 #include <ydb/library/yql/providers/dq/worker_manager/local_worker_manager.h>
+#include <ydb/library/yql/providers/s3/actors/yql_s3_sink_factory.h>
 #include <ydb/library/yql/providers/s3/actors/yql_s3_source_factory.h>
 #include <ydb/library/yql/providers/s3/proto/retry_config.pb.h>
 #include <ydb/library/yql/providers/clickhouse/actors/yql_ch_source_factory.h>
@@ -53,9 +61,10 @@ void Init(
     ::NPq::NConfigurationManager::IConnections::TPtr pqCmConnections,
     const IYqSharedResources::TPtr& iyqSharedResources,
     const std::function<IActor*(const NKikimrProto::NFolderService::TFolderServiceConfig& authConfig)>& folderServiceFactory,
-    const std::function<IActor*(const NYq::NConfig::TAuditConfig& auditConfig)>& auditServiceFactory,
+    const std::function<IActor*(const NYq::NConfig::TAuditConfig& auditConfig, const ::NMonitoring::TDynamicCounterPtr& counters)>& auditServiceFactory,
     const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-    const ui32& icPort
+    ui32 icPort,
+    const std::vector<NKikimr::NMiniKQL::TComputationNodeFactory>& additionalCompNodeFactories
     )
 {
     Y_VERIFY(iyqSharedResources, "No YQ shared resources created");
@@ -77,12 +86,24 @@ void Init(
 
     if (protoConfig.GetControlPlaneProxy().GetEnabled()) {
         auto controlPlaneProxy = NYq::CreateControlPlaneProxyActor(protoConfig.GetControlPlaneProxy(),
-            appData->Counters->GetSubgroup("counters", "yq")->GetSubgroup("subsystem", "ControlPlaneProxy"));
+            appData->Counters->GetSubgroup("counters", "yq")->GetSubgroup("subsystem", "ControlPlaneProxy"), protoConfig.GetQuotasManager().GetEnabled());
         actorRegistrator(NYq::ControlPlaneProxyActorId(), controlPlaneProxy);
     }
 
+    if (protoConfig.GetRateLimiter().GetControlPlaneEnabled()) {
+        Y_VERIFY(protoConfig.GetQuotasManager().GetEnabled()); // Rate limiter resources want to know CPU quota on creation
+        NActors::IActor* rateLimiterService = NYq::CreateRateLimiterControlPlaneService(protoConfig.GetRateLimiter(), yqSharedResources, credentialsProviderFactory);
+        actorRegistrator(NYq::RateLimiterControlPlaneServiceId(), rateLimiterService);
+    }
+
+    if (protoConfig.GetRateLimiter().GetDataPlaneEnabled()) {
+        actorRegistrator(NYq::YqQuoterServiceActorId(), NYq::CreateQuoterService(protoConfig.GetRateLimiter(), yqSharedResources, credentialsProviderFactory));
+    }
+
     if (protoConfig.GetAudit().GetEnabled()) {
-        auto* auditSerive = auditServiceFactory(protoConfig.GetAudit());
+        auto* auditSerive = auditServiceFactory(
+            protoConfig.GetAudit(),
+            appData->Counters->GetSubgroup("counters", "yq")->GetSubgroup("subsystem", "audit"));
         actorRegistrator(NYq::YqAuditServiceActorId(), auditSerive);
     }
 
@@ -100,19 +121,21 @@ void Init(
     auto yqCounters = appData->Counters->GetSubgroup("counters", "yq");
     auto workerManagerCounters = NYql::NDqs::TWorkerManagerCounters(yqCounters->GetSubgroup("subsystem", "worker_manager"));
 
-    NKikimr::NMiniKQL::TComputationNodeFactory dqCompFactory = NKikimr::NMiniKQL::GetCompositeWithBuiltinFactory({
+    TVector<NKikimr::NMiniKQL::TComputationNodeFactory> compNodeFactories = {
         NYql::GetCommonDqFactory(),
         NYql::GetDqYdbFactory(yqSharedResources->UserSpaceYdbDriver),
         NKikimr::NMiniKQL::GetYqlFactory()
-    });
+    };
+
+    compNodeFactories.insert(compNodeFactories.end(), additionalCompNodeFactories.begin(), additionalCompNodeFactories.end());
+    NKikimr::NMiniKQL::TComputationNodeFactory dqCompFactory = NKikimr::NMiniKQL::GetCompositeWithBuiltinFactory(std::move(compNodeFactories));
 
     NYql::TTaskTransformFactory dqTaskTransformFactory = NYql::CreateCompositeTaskTransformFactory({
         NYql::CreateCommonDqTaskTransformFactory(),
         NYql::CreateYdbDqTaskTransformFactory()
     });
 
-    auto sourceActorFactory = MakeIntrusive<NYql::NDq::TDqSourceFactory>();
-    auto sinkFactory = MakeIntrusive<NYql::NDq::TDqSinkFactory>();
+    auto asyncIoFactory = MakeIntrusive<NYql::NDq::TDqAsyncIoFactory>();
 
     NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory;
     const auto httpGateway = NYql::IHTTPGateway::Make(
@@ -127,18 +150,20 @@ void Init(
             caContent = TUnbufferedFileInput(path).ReadAll();
         }
 
-        credentialsFactory = NYql::CreateSecuredServiceAccountCredentialsOverTokenAccessorFactory(tokenAccessorConfig.GetEndpoint(), tokenAccessorConfig.GetUseSsl(), caContent);
+        credentialsFactory = NYql::CreateSecuredServiceAccountCredentialsOverTokenAccessorFactory(tokenAccessorConfig.GetEndpoint(), tokenAccessorConfig.GetUseSsl(), caContent, tokenAccessorConfig.GetConnectionPoolSize());
     }
 
     if (protoConfig.GetPrivateApi().GetEnabled()) {
-        RegisterDqPqReadActorFactory(*sourceActorFactory, yqSharedResources->UserSpaceYdbDriver, credentialsFactory, !protoConfig.GetReadActorsFactoryConfig().GetPqReadActorFactoryConfig().GetCookieCommitMode());
-        RegisterYdbReadActorFactory(*sourceActorFactory, yqSharedResources->UserSpaceYdbDriver, credentialsFactory);
-        RegisterS3ReadActorFactory(*sourceActorFactory, credentialsFactory,
+        RegisterDqPqReadActorFactory(*asyncIoFactory, yqSharedResources->UserSpaceYdbDriver, credentialsFactory, !protoConfig.GetReadActorsFactoryConfig().GetPqReadActorFactoryConfig().GetCookieCommitMode());
+        RegisterYdbReadActorFactory(*asyncIoFactory, yqSharedResources->UserSpaceYdbDriver, credentialsFactory);
+        RegisterS3ReadActorFactory(*asyncIoFactory, credentialsFactory,
             httpGateway, std::make_shared<NYql::NS3::TRetryConfig>(protoConfig.GetReadActorsFactoryConfig().GetS3ReadActorFactoryConfig().GetRetryConfig()));
-        RegisterClickHouseReadActorFactory(*sourceActorFactory, credentialsFactory, httpGateway);
+        RegisterS3WriteActorFactory(*asyncIoFactory, credentialsFactory,
+            httpGateway, std::make_shared<NYql::NS3::TRetryConfig>(protoConfig.GetReadActorsFactoryConfig().GetS3ReadActorFactoryConfig().GetRetryConfig()));
+        RegisterClickHouseReadActorFactory(*asyncIoFactory, credentialsFactory, httpGateway);
 
-        RegisterDqPqWriteActorFactory(*sinkFactory, yqSharedResources->UserSpaceYdbDriver, credentialsFactory);
-        RegisterDQSolomonWriteActorFactory(*sinkFactory, credentialsFactory);
+        RegisterDqPqWriteActorFactory(*asyncIoFactory, yqSharedResources->UserSpaceYdbDriver, credentialsFactory);
+        RegisterDQSolomonWriteActorFactory(*asyncIoFactory, credentialsFactory);
     }
 
     ui64 mkqlInitialMemoryLimit = 8_GB;
@@ -155,9 +180,10 @@ void Init(
         }
         NYql::NDqs::TLocalWorkerManagerOptions lwmOptions;
         lwmOptions.Counters = workerManagerCounters;
+        lwmOptions.DqTaskCounters = appData->Counters->GetSubgroup("counters", "dq_tasks");
         lwmOptions.Factory = NYql::NTaskRunnerProxy::CreateFactory(appData->FunctionRegistry, dqCompFactory, dqTaskTransformFactory, false);
-        lwmOptions.SourceActorFactory = sourceActorFactory;
-        lwmOptions.SinkFactory = sinkFactory;
+        lwmOptions.AsyncIoFactory = asyncIoFactory;
+        lwmOptions.FunctionRegistry = appData->FunctionRegistry;
         lwmOptions.TaskRunnerInvokerFactory = new NYql::NDqs::TTaskRunnerInvokerFactory();
         lwmOptions.MkqlInitialMemoryLimit = mkqlInitialMemoryLimit;
         lwmOptions.MkqlTotalMemoryLimit = mkqlTotalMemoryLimit;
@@ -166,6 +192,9 @@ void Init(
             [=](const NYql::NDqProto::TDqTask& task, const NYql::NDq::TLogFunc&) {
                 return lwmOptions.Factory->Get(task);
             });
+        if (protoConfig.GetRateLimiter().GetDataPlaneEnabled()) {
+            lwmOptions.QuoterServiceActorId = NYq::YqQuoterServiceActorId();
+        }
         auto resman = NYql::NDqs::CreateLocalWorkerManager(lwmOptions);
 
         actorRegistrator(NYql::NDqs::MakeWorkerManagerActorID(nodeId), resman);
@@ -174,13 +203,15 @@ void Init(
     ::NYql::NCommon::TServiceCounters serviceCounters(appData->Counters);
 
     if (protoConfig.GetNodesManager().GetEnabled() || protoConfig.GetPendingFetcher().GetEnabled()) {
-        auto internal = CreateInternalServiceActor(
-            yqSharedResources,
-            credentialsProviderFactory,
-            protoConfig.GetPrivateApi(),
-            clientCounters
+        auto internal = protoConfig.GetPrivateApi().GetLoopback()
+            ? NFq::CreateLoopbackServiceActor(clientCounters)
+            : NFq::CreateInternalServiceActor(
+                yqSharedResources,
+                credentialsProviderFactory,
+                protoConfig.GetPrivateApi(),
+                clientCounters
             );
-        actorRegistrator(MakeInternalServiceActorId(), internal);
+        actorRegistrator(NFq::MakeInternalServiceActorId(), internal);
     }
 
     if (protoConfig.GetNodesManager().GetEnabled()) {
@@ -192,6 +223,8 @@ void Init(
             protoConfig.GetPrivateApi(),
             yqSharedResources,
             icPort,
+            protoConfig.GetNodesManager().GetDataCenter(),
+            protoConfig.GetNodesManager().GetUseDataCenter(),
             tenant,
             mkqlInitialMemoryLimit);
 
@@ -225,6 +258,7 @@ void Init(
             protoConfig.GetPrivateApi(),
             protoConfig.GetGateways(),
             protoConfig.GetPinger(),
+            protoConfig.GetRateLimiter(),
             appData->FunctionRegistry,
             TAppData::TimeProvider,
             TAppData::RandomProvider,
@@ -234,7 +268,8 @@ void Init(
             httpGateway,
             std::move(pqCmConnections),
             clientCounters,
-            tenant
+            tenant,
+            appData->Mon
             );
 
         actorRegistrator(MakePendingFetcherId(nodeId), fetcher);
@@ -258,12 +293,37 @@ void Init(
             serviceCounters.Counters);
         actorRegistrator(NYq::HealthActorId(), health);
     }
+
+    if (protoConfig.GetQuotasManager().GetEnabled()) {
+        auto quotaService = NYq::CreateQuotaServiceActor(
+            protoConfig.GetQuotasManager(),
+            protoConfig.GetControlPlaneStorage().GetStorage(),
+            yqSharedResources,
+            credentialsProviderFactory,
+            serviceCounters.Counters,
+            {
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_ANALYTICS_COUNT_LIMIT, 100, 1000, NYq::ControlPlaneStorageServiceActorId()),
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_STREAMING_COUNT_LIMIT, 100, 1000, NYq::ControlPlaneStorageServiceActorId()),
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_CPU_PERCENT_LIMIT, 200, 3200),
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_MEMORY_LIMIT, 0),
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_RESULT_LIMIT, 0),
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_ANALYTICS_DURATION_LIMIT, 1440),
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_STREAMING_DURATION_LIMIT, 0),
+                TQuotaDescription(SUBJECT_TYPE_CLOUD, QUOTA_QUERY_RESULT_LIMIT, 20_MB, 2_GB)
+            });
+        actorRegistrator(NYq::MakeQuotaServiceActorId(nodeId), quotaService);
+
+        auto quotaProxy = NYq::CreateQuotaProxyActor(
+            protoConfig.GetQuotasManager(),
+            serviceCounters.Counters);
+        actorRegistrator(NYq::MakeQuotaProxyActorId(), quotaProxy);
+    }
 }
 
 IYqSharedResources::TPtr CreateYqSharedResources(
     const NYq::NConfig::TConfig& config,
     const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-    const NMonitoring::TDynamicCounterPtr& counters)
+    const ::NMonitoring::TDynamicCounterPtr& counters)
 {
     return CreateYqSharedResourcesImpl(config, credentialsProviderFactory, counters);
 }

@@ -3,7 +3,6 @@
 #include "dsproxy_quorum_tracker.h"
 #include "dsproxy_blob_tracker.h"
 #include <ydb/core/blobstorage/vdisk/common/vdisk_events.h>
-#include <ydb/core/blobstorage/base/wilson_events.h>
 #include <util/generic/set.h>
 
 namespace NKikimr {
@@ -31,6 +30,8 @@ class TBlobStorageGroupIndexRestoreGetRequest
     ui64 RestoreQueriesFinished;
 
     std::unique_ptr<TEvBlobStorage::TEvGetResult> PendingResult;
+
+    THashMap<TLogoBlobID, std::pair<bool, bool>> KeepFlags;
 
     void ReplyAndDie(NKikimrProto::EReplyStatus status) {
         A_LOG_DEBUG_S("DSPI14", "ReplyAndDie"
@@ -118,6 +119,9 @@ class TBlobStorageGroupIndexRestoreGetRequest
             const ui32 queryIdx = result.GetCookie();
             Y_VERIFY(queryIdx < QuerySize && blobId == Queries[queryIdx].Id);
             BlobStatus[queryIdx].UpdateFromResponseData(result, vdisk, Info.Get());
+            auto& [keep, doNotKeep] = KeepFlags[blobId];
+            keep |= result.GetKeep();
+            doNotKeep |= result.GetDoNotKeep();
         }
 
         if (!VGetsInFlight) {
@@ -135,6 +139,10 @@ class TBlobStorageGroupIndexRestoreGetRequest
             auto &q = Queries[idx];
             auto &a = PendingResult->Responses[idx];
             a.Id = q.Id;
+
+            const auto it = KeepFlags.find(q.Id);
+            Y_VERIFY(it != KeepFlags.end());
+            std::tie(a.Keep, a.DoNotKeep) = it->second;
 
             A_LOG_DEBUG_S("DSPI11", "OnEnoughVGetResults Id# " << q.Id << " BlobStatus# " << DumpBlobStatus(idx));
 
@@ -169,7 +177,7 @@ class TBlobStorageGroupIndexRestoreGetRequest
                         << " recoverable blob, id# " << Queries[idx].Id.ToString()
                         << " BlobStatus# " << DumpBlobStatus(idx)
                         << " sending EvGet");
-                SendToBSProxy(SelfId(), Info->GroupID, get.release(), 0);
+                SendToProxy(std::move(get));
                 RestoreQueriesStarted++;
             } else if (blobState == TBlobStorageGroupInfo::EBS_FULL) {
                 a.Status = NKikimrProto::OK;
@@ -261,7 +269,7 @@ public:
             TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters)
         : TBlobStorageGroupRequestActor(info, state, mon, source, cookie, std::move(traceId),
                 NKikimrServices::BS_PROXY_INDEXRESTOREGET, false, latencyQueueKind, now, storagePoolCounters,
-                ev->RestartCounter)
+                ev->RestartCounter, "DSProxy.IndexRestoreGet")
         , QuerySize(ev->QuerySize)
         , Queries(ev->Queries.Release())
         , Deadline(ev->Deadline)
@@ -285,8 +293,6 @@ public:
     }
 
     void Bootstrap() {
-        WILSON_TRACE_FROM_ACTOR(*TlsActivationContext, *this, &TraceId, EvGetReceived);
-
         auto makeQueriesList = [this] {
             TStringStream str;
             str << "{";
@@ -314,7 +320,7 @@ public:
                 if (vget) {
                     const ui64 cookie = TVDiskIdShort(vd).GetRaw();
                     CountEvent(*vget);
-                    SendToQueue(std::move(vget), cookie, NWilson::TTraceId()); // FIXME: wilson
+                    SendToQueue(std::move(vget), cookie);
                     vget.reset();
                     ++VGetsInFlight;
                 }

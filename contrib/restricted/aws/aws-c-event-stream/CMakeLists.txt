@@ -8,10 +8,10 @@
 
 
 add_library(restricted-aws-aws-c-event-stream)
-target_include_directories(restricted-aws-aws-c-event-stream PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/restricted/aws/aws-c-event-stream/include
+target_compile_options(restricted-aws-aws-c-event-stream PRIVATE
+  -Wno-everything
 )
-target_include_directories(restricted-aws-aws-c-event-stream PRIVATE
+target_include_directories(restricted-aws-aws-c-event-stream PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/restricted/aws/aws-c-event-stream/include
 )
 target_link_libraries(restricted-aws-aws-c-event-stream PUBLIC

@@ -1,0 +1,27 @@
+package NKikimrBlobDepot;
+
+message TChannelKind {
+    enum E {
+        System = 0;
+        Data = 1;
+        Log = 2;
+    }
+}
+
+message TChannelProfile {
+    optional string StoragePoolName = 1; // used when creating tablet through BSC -> Hive
+    optional string StoragePoolKind = 2; // used when creating tablet through Schemeshard
+    optional uint32 Count = 3;
+    optional TChannelKind.E ChannelKind = 4;
+}
+
+enum EOperationMode {
+    VirtualGroup = 0;
+    KeyValueStorage = 1;
+}
+
+message TBlobDepotConfig {
+    optional EOperationMode OperationMode = 1; // can't be changed after tablet is created
+    repeated TChannelProfile ChannelProfiles = 2;
+    optional uint32 DecommitGroupId = 3; // group that is being decommitted by this BlobDepot
+}

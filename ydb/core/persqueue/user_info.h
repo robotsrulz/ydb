@@ -4,6 +4,7 @@
 #include "subscriber.h"
 #include "percentile_counter.h"
 #include "read_speed_limiter.h"
+#include "metering_sink.h"
 
 #include <ydb/core/base/counters.h>
 #include <ydb/core/protos/counters_pq.pb.h>
@@ -27,7 +28,7 @@ namespace NDeprecatedUserData {
 
 static const ui32 MAX_USER_TS_CACHE_SIZE = 10'000;
 static const ui64 MIN_TIMESTAMP_MS = 1'000'000'000'000ll; // around 2002 year
-static const TString CLIENTID_TO_READ_INTERNALLY = "$without_consumer";
+static const TString CLIENTID_WITHOUT_CONSUMER = "$without_consumer";
 
 typedef TProtobufTabletLabeledCounters<EClientLabeledCounters_descriptor> TUserLabeledCounters;
 
@@ -200,37 +201,12 @@ struct TUserInfo {
     NSlidingWindow::TSlidingWindow<NSlidingWindow::TMaxOperation<ui64>> WriteLagMs;
 
     std::shared_ptr<TPercentileCounter> ReadTimeLag;
-    bool DoExternalRead = false;
+    bool DoInternalRead = false;
+    bool MeterRead = true;
 
     bool WriteInProgress = false;
 
     bool Parsed = false;
-
-    TUserInfo(THolder<TReadSpeedLimiterHolder> readSpeedLimiter, const TString& user,
-              const ui64 readRuleGeneration, bool important, const NPersQueue::TTopicConverterPtr& topicConverter,
-              const ui32 partition, bool doExternalRead,
-              ui64 burst = 1'000'000'000, ui64 speed = 1'000'000'000)
-        : ReadSpeedLimiter(std::move(readSpeedLimiter))
-        , Important(important)
-        , LabeledCounters(
-                topicConverter->IsFirstClass() ? nullptr : new TUserLabeledCounters(
-                        user + "/" + (important ? "1" : "0") + "/" +  topicConverter->GetClientsideName(), partition
-                )
-        )
-        , User(user)
-        , ReadRuleGeneration(readRuleGeneration)
-        , TopicConverter(topicConverter)
-        , ReadQuota(burst, speed, TAppData::TimeProvider->Now())
-        , Counter(nullptr)
-        , BytesRead()
-        , MsgsRead()
-        , ActiveReads(0)
-        , Subscriptions(0)
-        , EndOffset(0)
-        , WriteLagMs(TDuration::Minutes(1), 100)
-        , DoExternalRead(doExternalRead)
-    {
-    }
 
     void ForgetSubscription(const TInstant& now) {
         if (Subscriptions > 0)
@@ -255,7 +231,8 @@ struct TUserInfo {
     }
 
     void ReadDone(const TActorContext& ctx, const TInstant& now, ui64 readSize, ui32 readCount,
-                  const TString& clientDC) {
+                  const TString& clientDC, const TActorId& tablet) {
+        Y_UNUSED(tablet);
         if (BytesRead && !clientDC.empty()) {
             if (BytesRead)
                 BytesRead.Inc(readSize);
@@ -293,9 +270,9 @@ struct TUserInfo {
     TUserInfo(
         const TActorContext& ctx, THolder<TReadSpeedLimiterHolder> readSpeedLimiter, const TString& user,
         const ui64 readRuleGeneration, const bool important, const NPersQueue::TTopicConverterPtr& topicConverter,
-        const ui32 partition, const TString &session, ui32 gen, ui32 step, i64 offset, const ui64 readOffsetRewindSum,
-        const TString& dcId, TInstant readFromTimestamp,
-        const TString& cloudId, const TString& dbId, const TString& folderId,
+        const ui32 partition, const TString &session, ui32 gen, ui32 step, i64 offset,
+        const ui64 readOffsetRewindSum, const TString& dcId, TInstant readFromTimestamp,
+        const TString& cloudId, const TString& dbId, const TMaybe<TString>& dbPath, const TString& folderId, bool meterRead,
         ui64 burst = 1'000'000'000, ui64 speed = 1'000'000'000
     )
         : ReadSpeedLimiter(std::move(readSpeedLimiter))
@@ -315,13 +292,6 @@ struct TUserInfo {
         , Important(important)
         , ReadFromTimestamp(readFromTimestamp)
         , HasReadRule(false)
-        //ToDo ToReview - what to use here?
-        , LabeledCounters(
-                topicConverter->IsFirstClass() ? nullptr :
-                new TUserLabeledCounters(
-                        user + "/" +(important ? "1" : "0") + "/" + topicConverter->GetClientsideName(), partition
-                )
-        )
         , User(user)
         , ReadRuleGeneration(readRuleGeneration)
         , TopicConverter(topicConverter)
@@ -333,53 +303,53 @@ struct TUserInfo {
         , AvgReadBytes{{TDuration::Seconds(1), 1000}, {TDuration::Minutes(1), 1000},
                        {TDuration::Hours(1), 2000}, {TDuration::Days(1), 2000}}
         , WriteLagMs(TDuration::Minutes(1), 100)
+        , DoInternalRead(user != CLIENTID_WITHOUT_CONSUMER)
+        , MeterRead(meterRead)
     {
         if (AppData(ctx)->Counters) {
             if (AppData()->PQConfig.GetTopicsAreFirstClassCitizen()) {
-                SetupStreamCounters(ctx, dcId, ToString<ui32>(partition), cloudId, dbId, folderId);
+                LabeledCounters.Reset(new TUserLabeledCounters(
+                    user + "|x|" + topicConverter->GetClientsideName(), partition, dbPath));
+
+                if (DoInternalRead) {
+                    SetupStreamCounters(ctx, dcId, ToString<ui32>(partition), cloudId, dbId, folderId);
+                }
             } else {
+                LabeledCounters.Reset(new TUserLabeledCounters(
+                    user + "/" + (important ? "1" : "0") + "/" + topicConverter->GetClientsideName(),
+                    partition));
+
                 SetupTopicCounters(ctx, dcId, ToString<ui32>(partition));
             }
         }
     }
 
     void SetupStreamCounters(
-            const TActorContext& ctx, const TString& dcId, const TString& partition,
-            const TString& cloudId, const TString& dbId, const TString& folderId
+        const TActorContext& ctx, const TString& dcId, const TString& partition,
+        const TString& cloudId, const TString& dbId, const TString& folderId
     ) {
         auto subgroup = NPersQueue::GetCountersForStream(AppData(ctx)->Counters);
-        auto additionalLabels = [&](const TVector<std::pair<TString, TString>>& subgroups = {}) {
-            TVector<std::pair<TString, TString>> result;
-            std::copy_if(subgroups.begin(), subgroups.end(), std::back_inserter(result),
-                         [] (const auto& sb) {
-                             return sb.first != "consumer" ||
-                                 sb.second != CLIENTID_TO_READ_INTERNALLY;
-                         });
-            return result;
-        };
         auto aggregates =
             NPersQueue::GetLabelsForStream(TopicConverter, cloudId, dbId, folderId);
 
         BytesRead = TMultiCounter(subgroup,
-                                  aggregates, additionalLabels({{"consumer", User}}),
+                                  aggregates, {{"consumer", User}},
                                   {"stream.internal_read.bytes_per_second",
                                    "stream.outgoing_bytes_per_second"}, true, "name");
         MsgsRead = TMultiCounter(subgroup,
-                                 aggregates, additionalLabels({{"consumer", User}}),
+                                 aggregates, {{"consumer", User}},
                                  {"stream.internal_read.records_per_second",
                                   "stream.outgoing_records_per_second"}, true, "name");
 
         Counter.SetCounter(subgroup,
-                           additionalLabels({{"database", dbId}, {"cloud", cloudId}, {"folder", folderId},
-                                             {"stream", TopicConverter->GetFederationPath()},
-                                             {"consumer", User}, {"host", dcId},
-                                             {"shard", partition}}),
+                           {{"cloud", cloudId}, {"folder", folderId}, {"database", dbId},
+                            {"stream", TopicConverter->GetFederationPath()},
+                            {"consumer", User}, {"host", dcId}, {"shard", partition}},
                            {"name", "stream.await_operating_milliseconds", true});
 
         ReadTimeLag.reset(new TPercentileCounter(
                      NPersQueue::GetCountersForStream(AppData(ctx)->Counters), aggregates,
-                     additionalLabels({{"consumer", User},
-                                       {"name", "stream.internal_read.time_lags_milliseconds"}}), "bin",
+                     {{"consumer", User}, {"name", "stream.internal_read.time_lags_milliseconds"}}, "bin",
                      TVector<std::pair<ui64, TString>>{{100, "100"}, {200, "200"}, {500, "500"},
                                                         {1000, "1000"}, {2000, "2000"},
                                                         {5000, "5000"}, {10'000, "10000"},
@@ -523,7 +493,7 @@ class TUsersInfoStorage {
 public:
     TUsersInfoStorage(TString dcId, ui64 tabletId, const NPersQueue::TTopicConverterPtr& topicConverter, ui32 partition,
                       const TTabletCountersBase& counters, const NKikimrPQ::TPQTabletConfig& config,
-                      const TString& CloudId, const TString& DbId, const TString& FolderId);
+                      const TString& CloudId, const TString& DbId, const TString& DbPath, const TString& FolderId);
 
     void Init(TActorId tabletActor, TActorId partitionActor);
 
@@ -566,6 +536,7 @@ private:
 
     TString CloudId;
     TString DbId;
+    TString DbPath;
     TString FolderId;
     ui64 CurReadRuleGeneration;
 };

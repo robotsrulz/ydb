@@ -12,8 +12,6 @@
 namespace NActors {
     LWTRACE_USING(ACTORLIB_PROVIDER);
 
-    DECLARE_WILSON_EVENT(OutputQueuePush, (ui32, QueueSizeInEvents), (ui64, QueueSizeInBytes));
-
     template<typename T>
     T Coalesce(T&& x) {
         return x;
@@ -142,9 +140,6 @@ namespace NActors {
         ++NumEventsInReadyChannels;
 
         LWTRACK(EnqueueEvent, event->Orbit, Proxy->PeerNodeId, NumEventsInReadyChannels, GetWriteBlockedTotal(), evChannel, oChannel.GetQueueSize(), oChannel.GetBufferedAmountOfData());
-        WILSON_TRACE(*TlsActivationContext, &ev->TraceId, OutputQueuePush,
-                     QueueSizeInEvents = oChannel.GetQueueSize(),
-                     QueueSizeInBytes = oChannel.GetBufferedAmountOfData());
 
         // check for overloaded queues
         ui64 sendBufferDieLimit = Proxy->Common->Settings.SendBufferDieLimitInMB * ui64(1 << 20);
@@ -586,12 +581,14 @@ namespace NActors {
                 TString err;
                 ssize_t r = 0;
                 do {
+                    const ui64 begin = GetCycleCountFast();
 #ifndef _win_
                     r = iovcnt == 1 ? Socket->Send(iovec[0].iov_base, iovec[0].iov_len, &err) : Socket->WriteV(iovec, iovcnt);
 #else
                     r = Socket->Send(iovec[0].iov_base, iovec[0].iov_len, &err);
 #endif
-                    Proxy->Metrics->IncSendSyscalls();
+                    const ui64 end = GetCycleCountFast();
+                    Proxy->Metrics->IncSendSyscalls((end - begin) * 1'000'000 / GetCyclesPerMillisecond());
                 } while (r == -EINTR);
 
                 LOG_DEBUG_IC_SESSION("ICS16", "written# %zd iovcnt# %d err# %s", r, iovcnt, err.data());

@@ -12,8 +12,8 @@ namespace NKikimr {
             : ChunkSize(chunkSize)
             , CompWorthReadSize(compWorthReadSize)
             , GroupInfo(TBlobStorageGroupType::ErasureMirror3, 2, 4)
-            , VCtx(new TVDiskContext(TActorId(), GroupInfo.PickTopology(), new NMonitoring::TDynamicCounters(),
-                        TVDiskID(), nullptr, TPDiskCategory::DEVICE_TYPE_UNKNOWN))
+            , VCtx(new TVDiskContext(TActorId(), GroupInfo.PickTopology(), new ::NMonitoring::TDynamicCounters(),
+                        TVDiskID(), nullptr, NPDisk::DEVICE_TYPE_UNKNOWN))
             , HullCtx(
                     new THullCtx(
                         VCtx,

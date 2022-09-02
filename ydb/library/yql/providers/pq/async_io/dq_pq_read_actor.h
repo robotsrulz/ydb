@@ -1,7 +1,7 @@
 #pragma once
 
 #include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io_factory.h>
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_sources.h>
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io.h>
 
 #include <ydb/library/yql/providers/common/token_accessor/client/factory.h>
 #include <ydb/library/yql/minikql/computation/mkql_computation_node_holders.h>
@@ -18,11 +18,11 @@
 
 
 namespace NYql::NDq {
-class TDqSourceFactory;
+class TDqAsyncIoFactory;
 
 const i64 PQReadDefaultFreeSpace = 16_MB;
 
-std::pair<IDqSourceActor*, NActors::IActor*> CreateDqPqReadActor(
+std::pair<IDqComputeActorAsyncInput*, NActors::IActor*> CreateDqPqReadActor(
     NPq::NProto::TDqPqTopicSource&& settings,
     ui64 inputIndex,
     TTxId txId,
@@ -36,6 +36,6 @@ std::pair<IDqSourceActor*, NActors::IActor*> CreateDqPqReadActor(
     bool rangesMode = true
     );
 
-void RegisterDqPqReadActorFactory(TDqSourceFactory& factory, NYdb::TDriver driver, ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory, bool rangesMode = true);
+void RegisterDqPqReadActorFactory(TDqAsyncIoFactory& factory, NYdb::TDriver driver, ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory, bool rangesMode = true);
 
 } // namespace NYql::NDq

@@ -29,9 +29,9 @@ public:
         return NKikimrServices::TActivity::VIEWER_HANDLER;
     }
 
-    TJsonTopicInfo(IViewer* viewer, NMon::TEvHttpInfo::TPtr &ev)
+    TJsonTopicInfo(IViewer* viewer, const TRequest& request)
         : Viewer(viewer)
-        , Event(ev)
+        , Event(request.Event)
     {}
 
     void Bootstrap(const TActorContext& ctx) {
@@ -47,7 +47,7 @@ public:
         if (pos != TString::npos)
             Topic = Topic.substr(pos + 1);
         //proxy is not used
-        CreateClusterLabeledCountersAggregator(ctx.SelfID, TTabletTypes::PERSQUEUE, ctx);
+        CreateClusterLabeledCountersAggregator(ctx.SelfID, TTabletTypes::PersQueue, ctx);
 
         Become(&TThis::StateRequestedTopicInfo, ctx, TDuration::MilliSeconds(Timeout), new TEvents::TEvWakeup());
     }
@@ -109,7 +109,7 @@ struct TJsonRequestParameters<TJsonTopicInfo> {
                       {"name":"enums","in":"query","description":"convert enums to strings","required":false,"type":"boolean"},
                       {"name":"all","in":"query","description":"return all topics and all clients","required":false,"type":"boolean","default":false},
                       {"name":"ui64","in":"query","description":"return ui64 as number","required":false,"type":"boolean"},
-                      {"name":"timeout","in":"query","description":"timeout in ms","required":false,"type":"integer",default:10000}])___";
+                      {"name":"timeout","in":"query","description":"timeout in ms","required":false,"type":"integer","default":10000}])___";
     }
 };
 

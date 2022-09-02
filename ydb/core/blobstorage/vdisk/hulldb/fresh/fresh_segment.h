@@ -2,6 +2,7 @@
 
 #include "defs.h"
 #include "fresh_appendix.h"
+#include <ydb/core/blobstorage/vdisk/protos/events.pb.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/hullds_glue.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/hullds_arena.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/blobstorage_hullsatisfactionrank.h>
@@ -36,9 +37,9 @@ namespace NKikimr {
         {}
         // for non-existen fresh segment
         TFreshIndexAndDataSnapshot() = default;
-        TFreshIndexAndDataSnapshot(const TFreshIndexAndDataSnapshot &) = delete;
+        TFreshIndexAndDataSnapshot(const TFreshIndexAndDataSnapshot &) = default;
         TFreshIndexAndDataSnapshot(TFreshIndexAndDataSnapshot &&) = default;
-        TFreshIndexAndDataSnapshot &operator=(const TFreshIndexAndDataSnapshot &) = delete;
+        TFreshIndexAndDataSnapshot &operator=(const TFreshIndexAndDataSnapshot &) = default;
         TFreshIndexAndDataSnapshot &operator=(TFreshIndexAndDataSnapshot &&) = default;
         ~TFreshIndexAndDataSnapshot() = default;
 
@@ -149,9 +150,9 @@ namespace NKikimr {
 
         // empty snapshot for non-existing fresh segment
         TFreshSegmentSnapshot() = default;
-        TFreshSegmentSnapshot(const TFreshSegmentSnapshot &) = delete;
+        TFreshSegmentSnapshot(const TFreshSegmentSnapshot &) = default;
         TFreshSegmentSnapshot(TFreshSegmentSnapshot &&) = default;
-        TFreshSegmentSnapshot &operator=(const TFreshSegmentSnapshot &) = delete;
+        TFreshSegmentSnapshot &operator=(const TFreshSegmentSnapshot &) = default;
         TFreshSegmentSnapshot &operator=(TFreshSegmentSnapshot &&) = default;
         ~TFreshSegmentSnapshot() = default;
 
@@ -250,6 +251,7 @@ namespace NKikimr {
             AppendixTree.AddAppendix(std::move(a), firstLsn, lastLsn);
         }
         void OutputHtml(const TString &which, IOutputStream &str) const;
+        void OutputProto(NKikimrVDisk::FreshSegmentStat *stat) const;
         void GetOwnedChunks(TSet<TChunkIdx>& chunks) const { return IndexAndData->GetOwnedChunks(chunks); }
         void GetHugeBlobs(TSet<TDiskPart> &hugeBlobs) const { return IndexAndData->GetHugeBlobs(hugeBlobs); }
         // Appendix Compact/ApplyCompactionResult

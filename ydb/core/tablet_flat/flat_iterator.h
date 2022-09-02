@@ -22,11 +22,6 @@ enum class ENext {
     Uncommitted,
 };
 
-struct TIteratorStats {
-    ui64 DeletedRowSkips = 0;
-    ui64 InvisibleRowSkips = 0;
-};
-
 template<class TIteratorOps>
 class TTableItBase : TNonCopyable {
     enum class EType : ui8 {
@@ -238,7 +233,8 @@ public:
     TTableItBase(
         const TRowScheme* scheme, TTagsRef tags, ui64 lim = Max<ui64>(),
         TRowVersion snapshot = TRowVersion::Max(),
-        const NTable::TTransactionMap<TRowVersion>& committedTransactions = {});
+        NTable::ITransactionMapPtr committedTransactions = nullptr,
+        NTable::ITransactionObserverPtr transactionObserver = nullptr);
 
     ~TTableItBase();
 
@@ -262,7 +258,6 @@ public:
     {
         TEraseCachingState eraseCache(this);
 
-        bool isHead = true;
         for (Ready = EReady::Data; Ready == EReady::Data; ) {
             if (Stage == EStage::Seek) {
                 Ready = Start();
@@ -273,32 +268,31 @@ public:
                 Ready = Turn();
             } else if (Stage == EStage::Snap) {
                 if (mode != ENext::Uncommitted) {
-                    ui64 skipsBefore = Stats.InvisibleRowSkips;
                     Ready = Snap();
-                    isHead = skipsBefore == Stats.InvisibleRowSkips;
+                    if (ErasedKeysCache && mode == ENext::Data &&
+                        (Stats.InvisibleRowSkips != SnapInvisibleRowSkips || Stage != EStage::Fill))
+                    {
+                        // Interrupt range when key is not at a head version, or skipped entirely
+                        eraseCache.Flush();
+                    }
                 } else {
                     Y_VERIFY_DEBUG(Active != Inactive);
                     Stage = EStage::Fill;
-                    isHead = false;
                 }
             } else if ((Ready = Apply()) != EReady::Data) {
 
-            } else if (mode == ENext::All || mode == ENext::Uncommitted || State.GetRowState() != ERowOp::Erase) {
+            } else if (mode != ENext::Data || State.GetRowState() != ERowOp::Erase) {
                 break;
             } else {
                 ++Stats.DeletedRowSkips; /* skip internal technical row states w/o data */
-                if (ErasedKeysCache) {
-                    if (isHead) {
-                        eraseCache.OnEraseKey(GetKey().Cells(), GetRowVersion());
-                    } else {
-                        eraseCache.Flush();
-                        isHead = true;
-                    }
+                if (ErasedKeysCache && Stats.InvisibleRowSkips == SnapInvisibleRowSkips) {
+                    // Try to cache erases that are at a head version
+                    eraseCache.OnEraseKey(GetKey().Cells(), GetRowVersion());
                 }
             }
         }
 
-        if (ErasedKeysCache && mode != ENext::All) {
+        if (ErasedKeysCache && mode == ENext::Data) {
             eraseCache.Flush();
         }
 
@@ -340,7 +334,10 @@ private:
     const TRowVersion SnapshotVersion;
 
     // A map of currently committed transactions to corresponding row versions
-    const NTable::TTransactionMap<TRowVersion> CommittedTransactions;
+    const NTable::ITransactionMapPtr CommittedTransactions;
+
+    // A transaction observer for detecting skips
+    const NTable::ITransactionObserverPtr TransactionObserver;
 
     EStage Stage = EStage::Seek;
     EReady Ready = EReady::Gone;
@@ -349,9 +346,11 @@ private:
     TOwnedCellVec StopKey;
     bool StopKeyInclusive = true;
 
+    using TIteratorIndex = ui32;
+
     struct TIteratorId {
         EType Type;
-        ui16 Index;
+        TIteratorIndex Index;
         TEpoch Epoch;
     };
 
@@ -383,19 +382,10 @@ private:
         const TArrayRef<const NScheme::TTypeIdOrder> Types;
     };
 
-    /**
-     * Adjust epoch into a modified range
-     *
-     * This frees epoch=-inf and epoch=+inf for special stop keys. Note that this
-     * would convert +inf into +inf, which should be safe, since epoch=+inf is
-     * normally used as an invalid epoch marker.
-     */
-    static TEpoch AdjustEpoch(TEpoch epoch) {
-        if (epoch == TEpoch::Max()) {
-            return TEpoch::Max(); // invalid epoch
-        } else {
-            return ++epoch;
-        }
+    static TIteratorIndex IteratorIndexFromSize(size_t size) {
+        TIteratorIndex index = size;
+        Y_VERIFY(index == size, "Iterator index overflow");
+        return index;
     }
 
     void Clear() {
@@ -416,6 +406,7 @@ private:
     TIterators Iterators;
     TForwardIter Active;
     TForwardIter Inactive;
+    ui64 SnapInvisibleRowSkips = 0;
     ui64 DeltaTxId = 0;
     TRowVersion DeltaVersion;
     bool Delta = false;
@@ -458,13 +449,15 @@ template<class TIteratorOps>
 inline TTableItBase<TIteratorOps>::TTableItBase(
         const TRowScheme* scheme, TTagsRef tags, ui64 limit,
         TRowVersion snapshot,
-        const NTable::TTransactionMap<TRowVersion>& committedTransactions)
+        NTable::ITransactionMapPtr committedTransactions,
+        NTable::ITransactionObserverPtr transactionObserver)
     : Scheme(scheme)
     , Remap(*Scheme, tags)
     , Limit(limit)
     , State(Remap.Size())
     , SnapshotVersion(snapshot)
-    , CommittedTransactions(committedTransactions)
+    , CommittedTransactions(std::move(committedTransactions))
+    , TransactionObserver(std::move(transactionObserver))
     , Comparator(Scheme->Keys->Types)
     , Active(Iterators.end())
     , Inactive(Iterators.end())
@@ -495,7 +488,7 @@ template<class TIteratorOps>
 inline void TTableItBase<TIteratorOps>::Push(TAutoPtr<TMemIt> it)
 {
     if (it && it->IsValid()) {
-        TIteratorId itId = { EType::Mem, ui16(MemIters.size()), AdjustEpoch(it->MemTable->Epoch) };
+        TIteratorId itId = { EType::Mem, IteratorIndexFromSize(MemIters.size()), it->MemTable->Epoch };
 
         MemIters.PushBack(it);
         TDbTupleRef key = MemIters.back()->GetKey();
@@ -506,7 +499,7 @@ inline void TTableItBase<TIteratorOps>::Push(TAutoPtr<TMemIt> it)
 template<class TIteratorOps>
 inline void TTableItBase<TIteratorOps>::Push(TAutoPtr<TRunIt> it)
 {
-    TIteratorId itId = { EType::Run, ui16(RunIters.size()), AdjustEpoch(it->Epoch()) };
+    TIteratorId itId = { EType::Run, IteratorIndexFromSize(RunIters.size()), it->Epoch() };
 
     bool ready = it->IsValid();
 
@@ -531,7 +524,7 @@ inline void TTableItBase<TIteratorOps>::StopBefore(TArrayRef<const TCell> key)
     StopKey = TOwnedCellVec::Make(key);
     StopKeyInclusive = false;
 
-    TIteratorId itId = { EType::Stop, Max<ui16>(), TEpoch::Max() };
+    TIteratorId itId = { EType::Stop, Max<TIteratorIndex>(), TEpoch::Max() };
 
     AddReadyIterator(StopKey, itId);
 }
@@ -548,7 +541,7 @@ inline void TTableItBase<TIteratorOps>::StopAfter(TArrayRef<const TCell> key)
     StopKey = TOwnedCellVec::Make(key);
     StopKeyInclusive = true;
 
-    TIteratorId itId = { EType::Stop, Max<ui16>(), TEpoch::Min() };
+    TIteratorId itId = { EType::Stop, Max<TIteratorIndex>(), TEpoch::Min() };
 
     AddReadyIterator(StopKey, itId);
 }
@@ -583,6 +576,7 @@ inline EReady TTableItBase<TIteratorOps>::Start() noexcept
     }
 
     Stage = EStage::Snap;
+    SnapInvisibleRowSkips = Stats.InvisibleRowSkips;
     Inactive = Iterators.end();
     return EReady::Data;
 }
@@ -627,7 +621,7 @@ inline EReady TTableItBase<TIteratorOps>::Turn() noexcept
                     case EReady::Data:
                         Active->Key = it.GetKey().Cells();
                         Y_VERIFY_DEBUG(Active->Key.size() == Scheme->Keys->Types.size());
-                        Active->IteratorId.Epoch = AdjustEpoch(it.Epoch());
+                        Active->IteratorId.Epoch = it.Epoch();
                         std::push_heap(Iterators.begin(), ++Active, Comparator);
                         break;
 
@@ -781,16 +775,14 @@ inline EReady TTableItBase<TIteratorOps>::Snap(TRowVersion rowVersion) noexcept
         TIteratorId ai = i->IteratorId;
         switch (ai.Type) {
             case EType::Mem: {
-                auto ready = MemIters[ai.Index]->SkipToRowVersion(rowVersion, CommittedTransactions);
-                Stats.InvisibleRowSkips += std::exchange(MemIters[ai.Index]->InvisibleRowSkips, 0);
+                auto ready = MemIters[ai.Index]->SkipToRowVersion(rowVersion, Stats, CommittedTransactions, TransactionObserver);
                 if (ready) {
                     return EReady::Data;
                 }
                 break;
             }
             case EType::Run: {
-                auto ready = RunIters[ai.Index]->SkipToRowVersion(rowVersion, CommittedTransactions);
-                Stats.InvisibleRowSkips += std::exchange(RunIters[ai.Index]->InvisibleRowSkips, 0);
+                auto ready = RunIters[ai.Index]->SkipToRowVersion(rowVersion, Stats, CommittedTransactions, TransactionObserver);
                 if (ready == EReady::Data) {
                     return EReady::Data;
                 } else if (ready != EReady::Gone) {
@@ -823,6 +815,7 @@ inline EReady TTableItBase<TIteratorOps>::DoSkipUncommitted() noexcept
             case EType::Mem: {
                 auto& it = *MemIters[ai.Index];
                 Y_VERIFY_DEBUG(it.IsDelta() && !CommittedTransactions.Find(it.GetDeltaTxId()));
+                TransactionObserver.OnSkipUncommitted(it.GetDeltaTxId());
                 if (it.SkipDelta()) {
                     return EReady::Data;
                 }
@@ -831,6 +824,7 @@ inline EReady TTableItBase<TIteratorOps>::DoSkipUncommitted() noexcept
             case EType::Run: {
                 auto& it = *RunIters[ai.Index];
                 Y_VERIFY_DEBUG(it.IsDelta() && !CommittedTransactions.Find(it.GetDeltaTxId()));
+                TransactionObserver.OnSkipUncommitted(it.GetDeltaTxId());
                 auto ready = it.SkipDelta();
                 if (ready != EReady::Gone) {
                     return ready;
@@ -887,7 +881,7 @@ inline EReady TTableItBase<TIteratorOps>::Apply() noexcept
                     Uncommitted = false;
                     committed = true;
                 }
-                it.Apply(State, CommittedTransactions);
+                it.Apply(State, CommittedTransactions, TransactionObserver);
                 break;
             }
             case EType::Run: {
@@ -907,7 +901,7 @@ inline EReady TTableItBase<TIteratorOps>::Apply() noexcept
                     Uncommitted = false;
                     committed = true;
                 }
-                it.Apply(State, CommittedTransactions);
+                it.Apply(State, CommittedTransactions, TransactionObserver);
                 break;
             }
             default:
@@ -1011,7 +1005,7 @@ inline bool TTableItBase<TIteratorOps>::SeekInternal(TArrayRef<const TCell> key,
                     case EReady::Data:
                         Active->Key = it.GetKey().Cells();
                         Y_VERIFY_DEBUG(Active->Key.size() == Scheme->Keys->Types.size());
-                        Active->IteratorId.Epoch = AdjustEpoch(it.Epoch());
+                        Active->IteratorId.Epoch = it.Epoch();
                         std::push_heap(Iterators.begin(), ++Active, Comparator);
                         break;
 

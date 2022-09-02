@@ -1,57 +1,109 @@
-# Creating a configuration for deploying a cluster
+# Cluster configuration
 
-To deploy a {{ ydb-short-name }} cluster, you need to create a cluster configuration.
-This section describes how to create a {{ ydb-short-name }} cluster configuration in YAML format.
+The cluster configuration is specified in the YAML file passed in the `--yaml-config` parameter when the cluster nodes are run.
 
-## Description of storage host configurations
+This article describes the main groups of configurable parameters in this file.
 
-Create and describe a host configuration. For each host configuration, specify the sequence number and a list of paths to disks and their types.
-The following disk types are available: `SSD`, `NVME`, and `ROT` (in this case, `ROT` disks are `HDD`).
+## host_configs: Typical host configurations {#host-configs}
 
-For example:
+A YDB cluster consists of multiple nodes, and one or more typical server configurations are usually used for their deployment. To avoid repeating its description for each node, there is a `host_configs` section in the configuration file that lists the used configurations and the assigned IDs.
 
-```bash
+**Syntax**
+
+``` yaml
 host_configs:
-- drive:
+- host_config_id: 1
+  drive:
+  - path: <path_to_device>
+    type: <type>
+  - path: ...
+- host_config_id: 2
+  ...  
+```
+
+The `host_config_id` attribute specifies a numeric configuration ID. The `drive` attribute contains a collection of descriptions of connected drives. Each description consists of two attributes:
+
+- `path`: Path to the mounted block device, for example, `/dev/disk/by-partlabel/ydb_disk_ssd_01`
+- `type`: Type of the device's physical media: `ssd`, `nvme`, or `rot` (rotational - HDD)
+
+**Examples**
+
+One configuration with ID 1, one SSD disk accessible via `/dev/disk/by-partlabel/ydb_disk_ssd_01`:
+
+``` yaml
+host_configs:
+- host_config_id: 1
+  drive:
   - path: /dev/disk/by-partlabel/ydb_disk_ssd_01
     type: SSD
-  host_config_id: 1
 ```
 
-In this example, we can find exactly one type of host whose sequence number is 1. In this host configuration, exactly one disk is specified, its type is `SSD` and path is `/dev/disk/by-partlabel/ydb_disk_ssd_01`.
+Two configurations with IDs 1 (two SSD disks) and 2 (three SSD disks):
 
-Below is another configuration example. Let's assume that we have two types of host configurations, one of them with 2 disks available on the host and the other one with 3 disks.
-This configuration can be specified as follows:
-
-```bash
+``` yaml
 host_configs:
-- drive:
-  - path: /dev/disk/by-partlabel/ydb_ssd_01
+- host_config_id: 1
+  drive:
+  - path: /dev/disk/by-partlabel/ydb_disk_ssd_01
     type: SSD
-  - path: /dev/disk/by-partlabel/ydb_ssd_02
+  - path: /dev/disk/by-partlabel/ydb_disk_ssd_02
     type: SSD
-  host_config_id: 1
-- drive:
-  - path: /dev/disk/by-partlabel/ydb_ssd_01
+- host_config_id: 2
+  drive:
+  - path: /dev/disk/by-partlabel/ydb_disk_ssd_01
     type: SSD
-  - path: /dev/disk/by-partlabel/ydb_ssd_02
+  - path: /dev/disk/by-partlabel/ydb_disk_ssd_02
     type: SSD
-  - path: /dev/disk/by-partlabel/ydb_ssd_03
+  - path: /dev/disk/by-partlabel/ydb_disk_ssd_03
     type: SSD
-  host_config_id: 2
 ```
 
-## Description of cluster hosts
+### Kubernetes features {#host-configs-k8s}
 
-List the hosts to run a cluster on. For each host, specify the sequence number and the port where `Interconnect` will be run on this host.
-You also need to specify the physical location of the host and the unique ID of the host configuration.
+YDB Kubernetes operator mounts NBS disks for Storage nodes on the path `/dev/kikimr_ssd_00`. To use them, the following `host_configs` configuration must be specified:
 
-For example,
+``` yaml
+host_configs:
+- host_config_id: 1
+  drive:
+  - path: /dev/kikimr_ssd_00
+    type: SSD
+```
 
-```bash
+The configuration example files supplied as part of YDB Kubernetes operator contain such a section, and it does not need to be changed.
+
+## hosts: Static cluster nodes {#hosts}
+
+This group lists the static cluster nodes on which the Storage processes run and specifies their main characteristics:
+
+- Numeric node ID
+- DNS host name and port that can be used to connect to a node on the IP network
+- ID of the [typical host configuration](#host-configs)
+- Placement in a specific availability zone, rack
+- Server serial number (optional)
+
+**Syntax**
+
+``` yaml
+hosts:
+- host: <DNS host name>
+  host_config_id: <numeric ID of the typical host configuration>
+  port: <port> # 19001 by default
+  location:
+    unit: <string with the server serial number>
+    data_center: <string with the availability zone ID>
+    rack: <string with the rack ID>
+- host: <DNS host name>
+  ...
+```
+
+**Examples**
+
+``` yaml
 hosts:
 - host: hostname1
   host_config_id: 1
+  node_id: 1
   port: 19001
   location:
     unit: '1'
@@ -67,81 +119,241 @@ hosts:
     rack: '1'
 ```
 
-## Description of a cluster domain configuration
+### Kubernetes features {#hosts-k8s}
 
-Describe a cluster domain configuration. Specify the domain name, storage types, the numbers of the hosts that will be included in `StateStorage`, and the `nto_select` parameter.
-In the storage configuration, specify the type of storage and the type of storage fault tolerance (`erasure`), which will be used to initialize the database storage.
-You should also specify what types of disks this storage type will correspond to. The following models of storage fault tolerance are available:
+When deploying YDB with a Kubernetes operator, the entire `hosts` section is generated automatically, replacing any user-specified content in the configuration passed to the operator. All Storage nodes use `host_config_id` = `1`, for which the [correct configuration](#host-configs-k8s) must be specified.
 
-* The `block-4-2` configuration assumes deployment in 8 fail domains (by default, fail domains are racks) and can withstand a failure of no more than 2 fail domains.
-* The `mirror-3-dc` configuration assumes deployment in 3 data centers, each of which has 3 fault tolerance domains and can withstand a failure of one data center and one more fault tolerance domain (rack).
-* The `none` configuration doesn't provide fault tolerance but is convenient for functional testing.
+## domains_config: Cluster domain {#domains-config}
 
-The `StateStorage` fault tolerance is defined by the `nto_select` parameter. The `StateStorage` configuration is fault-tolerant if any subset of `nto_select` servers that are part of `StateStorage` is fault-tolerant.
-`StateStorage` remains available if most hosts are available for any subset of `nto_select` servers that are part of `StateStorage`.
+This section contains the configuration of the YDB cluster root domain, including the [Blob Storage](#domains-blob) (binary object storage), [State Storage](#domains-state), and [authentication](#auth) configurations.
 
-For example, if a cluster uses the `block-4-2` fault tolerance model for its storage, to make `StateStorage` fault-tolerant, set the `nto_select` parameter to 5 and place the hosts in 5 different availability domains.
-If the cluster uses the `mirror-3-dc` fault tolerance model, to make `StateStorage` fault-tolerant, set the `nto_select` parameter to 9 and place the hosts in 3 data centers with 3 availability domains in each of them.
+**Syntax**
 
-{% note warning %}
-
-Make sure the NToSelect value is odd. For the proper operation of `StateStorage`, make sure that most of the NToSelect replicas are available for an arbitrary set of NToSelect hosts in `StateStorage`.
-
-{% endnote %}
-
-For example, you can use the following configuration for functional testing on a single server:
-
-```bash
+``` yaml
 domains_config:
   domain:
-  - name: Root
-    storage_pool_types:
-    - kind: ssd
-      pool_config:
-        box_id: 1
-        erasure_species: none
-        kind: ssd
-        pdisk_filter:
-        - property:
-          - type: SSD
-        vdisk_kind: Default
-  state_storage:
-  - ring:
-      node:
-      - 1
-      nto_select: 1
-    ssid: 1
+  - name: <root domain name>
+    storage_pool_types: <Blob Storage configuration>
+  state_storage: <State Storage configuration>
+  security_config: <authentication configuration>
 ```
 
-In this case, a domain is named `Root` and storage of the `SSD` type is created in it. This type of storage corresponds to disks with the `type` parameter set to `SSD`.
-The `erasure_species: none` line in the parameter indicates that storage is created without fault tolerance.
+### Blob Storage configuration {#domains-blob}
 
-If a cluster is located in three availability zones with 3 servers available in each of them, it may have the following configuration:
+This section defines one or more types of storage pools available in the cluster for the data in the databases with the following configuration options:
 
-```bash
+- Storage pool name
+- Device properties (for example, disk type)
+- Data encryption (on/off)
+- Fault tolerance mode
+
+The following [fault tolerance modes](../../cluster/topology.md) are available:
+
+| Mode | Description |
+--- | ---
+| `none` | There is no redundancy. Applied for testing. |
+| `block-4-2` | Redundancy with a factor of 1.5, applies to single data center clusters. |
+| `mirror-3-dc` | Redundancy with a factor of 3, applies to multi data center clusters. |
+| `mirror-3dc-3-nodes` | Redundancy with a factor of 3. Applied for testing. |
+
+**Syntax**
+
+``` yaml
+  storage_pool_types:
+  - kind: <storage pool name>
+    pool_config:
+      box_id: 1
+      encryption: <optional, specify 1 to encrypt data on the disc>
+      erasure_species: <fault tolerance mode name - none, block-4-2, or mirror-3-dc>
+      kind: <storage pool name - specify the same value as above>
+      pdisk_filter:
+      - property:
+        - type: <device type to be compared with the one specified in host_configs.drive.type>
+      vdisk_kind: Default
+  - kind: <storage pool name>
+  ...
+```
+
+Each database in the cluster is assigned at least one of the available storage pools selected in the database creation operation. The names of storage pools among those assigned can be used in the `DATA` attribute when defining column groups in YQL operators [`CREATE TABLE`](../../yql/reference/syntax/create_table.md#column-family)/[`ALTER TABLE`](../../yql/reference/syntax/alter_table.md#column-family).
+
+### State Storage configuration {#domains-state}
+
+State Storage is an independent in-memory storage for modifiable data that supports internal YDB processes. It stores data replicas on multiple assigned nodes.
+
+State Storage usually does not need scaling for better performance, so the number of nodes in it must be kept as small as possible taking into account the required level of fault tolerance.
+
+State Storage availability is key for a YDB cluster because it affects all databases, regardless of which storage pools they use. To ensure fault tolerance of State Storage, its nodes must be selected in such a way as to guarantee a working majority in case of expected failures.
+
+The following guidelines can be used to select State Storage nodes:
+
+| Cluster type | Min number of<br>nodes | Selection guidelines |
+|---------|-----------------------|-----------------|
+| Without fault tolerance | 1 | Select one random node. |
+| Within a single availability zone | 5 | Select five nodes in different block-4-2 storage pool failure domains to ensure that a majority of 3 working nodes (out of 5) remain when two domains fail. |
+| Geo-distributed | 9 | Select three nodes in different failure domains within each of the three mirror-3-dc storage pool availability zones to ensure that a majority of 5 working nodes (out of 9) remain when the availability zone + failure domain fail. |
+
+When deploying State Storage on clusters that use multiple storage pools with a possible combination of fault tolerance modes, consider increasing the number of nodes and spreading them across different storage pools because unavailability of State Storage results in unavailability of the entire cluster.
+
+**Syntax**
+``` yaml
+state_storage:
+- ring:
+    node: <StateStorage node array>
+    nto_select: <number of data replicas in StateStorage>
+  ssid: 1
+```
+
+Each State Storage client (for example, DataShard tablet) uses `nto_select` nodes to write copies of its data to State Storage. If State Storage consists of more than `nto_select` nodes, different nodes can be used for different clients, so you must ensure that any subset of `nto_select` nodes within State Storage meets the fault tolerance criteria.
+
+Odd numbers must be used for `nto_select` because using even numbers does not improve fault tolerance in comparison with the nearest smaller odd number.
+
+### Authentication configuration {#auth}
+
+The [authentication mode](../../concepts/auth.md) in the {{ ydb-short-name }} cluster is created in the `domains_config.security_config` section.
+
+Syntax:
+
+``` yaml
 domains_config:
-  domain:
-  - name: global
-    storage_pool_types:
-    - kind: ssd
-      pool_config:
-        box_id: 1
-        erasure_species: mirror-3-dc
-        kind: ssd
-        pdisk_filter:
-        - property:
-          - type: SSD
-        vdisk_kind: Default
-  state_storage:
-  - ring:
-      node: [1, 2, 3, 4, 5, 6, 7, 8, 9]
-      nto_select: 9
-    ssid: 1
+  ...
+  security_config:
+    enforce_user_token_requirement: Bool
+  ...
 ```
 
-In this case, a domain is named `global` and storage of the `SSD` type is also created in it. The `erasure_species: mirror-3-dc` line indicates that storage is created with the `mirror-3-dc` fault tolerance model. `StateStorage` will include 9 servers with the `nto_select` parameter set to 9.
+ Key | Description 
+--- | ---
+ `enforce_user_token_requirement` | Require a user token.</br>Acceptable values:</br><ul><li>`false`: Anonymous authentication mode, no token needed.</li><li>`true`: Username/password authentication mode. A valid user token is needed for authentication.</li></ul> 
 
-## Description of an actor system configuration
+### Examples {#domains-examples}
+
+{% list tabs %}
+
+- Block-4-2
+
+   ``` yaml
+   domains_config:
+     domain:
+     - name: Root
+       storage_pool_types:
+       - kind: ssd
+         pool_config:
+           box_id: 1
+           erasure_species: block-4-2
+           kind: ssd
+           pdisk_filter:
+           - property:
+             - type: SSD
+           vdisk_kind: Default
+     state_storage:
+     - ring:
+         node: [1, 2, 3, 4, 5, 6, 7, 8]
+         nto_select: 5
+       ssid: 1
+
+
+- Mirror-3-dc
+
+   ``` yaml
+   domains_config:
+     domain:
+     - name: global
+       storage_pool_types:
+       - kind: ssd
+         pool_config:
+           box_id: 1
+           erasure_species: mirror-3-dc
+           kind: ssd
+           pdisk_filter:
+           - property:
+             - type: SSD
+           vdisk_kind: Default
+     state_storage:
+     - ring:
+         node: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+         nto_select: 9
+       ssid: 1
+   ```
+
+- None
+
+   ``` yaml
+   domains_config:
+     domain:
+     - name: Root
+       storage_pool_types:
+       - kind: ssd
+         pool_config:
+           box_id: 1
+           erasure_species: none
+           kind: ssd
+           pdisk_filter:
+           - property:
+             - type: SSD
+           vdisk_kind: Default
+     state_storage:
+     - ring:
+         node:
+         - 1
+         nto_select: 1
+       ssid: 1
+   ```
+
+- Multiple pools
+
+   ``` yaml
+   domains_config:
+     domain:
+     - name: Root
+       storage_pool_types:
+       - kind: ssd
+         pool_config:
+           box_id: '1'
+           erasure_species: block-4-2
+           kind: ssd
+           pdisk_filter:
+           - property:
+             - {type: SSD}
+           vdisk_kind: Default
+       - kind: rot
+         pool_config:
+           box_id: '1'
+           erasure_species: block-4-2
+           kind: rot
+           pdisk_filter:
+           - property:
+             - {type: ROT}
+           vdisk_kind: Default
+       - kind: rotencrypted
+         pool_config:
+           box_id: '1'
+           encryption_mode: 1
+           erasure_species: block-4-2
+           kind: rotencrypted
+           pdisk_filter:
+           - property:
+             - {type: ROT}
+           vdisk_kind: Default
+       - kind: ssdencrypted
+         pool_config:
+           box_id: '1'
+           encryption_mode: 1
+           erasure_species: block-4-2
+           kind: ssdencrypted
+           pdisk_filter:
+           - property:
+             - {type: SSD}
+           vdisk_kind: Default
+     state_storage:
+     - ring:
+         node: [1, 16, 31, 46, 61, 76, 91, 106]
+         nto_select: 5
+       ssid: 1
+   ```
+
+{% endlist %}
+
+## actor_system_config: Actor system {#actor-system}
 
 Create an actor system configuration. Specify how processor cores will be distributed across the pools of cores available in the system.
 
@@ -181,7 +393,7 @@ Make sure the total number of cores assigned to the IC, Batch, System, and User 
 
 {% endnote %}
 
-## Description of a static cluster group
+## blob_storage_config: Static cluster group {#blob-storage-config}
 
 Specify a static cluster group's configuration. A static group is necessary for the operation of the basic cluster tablets, including `Hive`, `SchemeShard`, and `BlobstorageContoller`.
 As a rule, these tablets do not store a lot of data, so we don't recommend creating more than one static group.
@@ -197,14 +409,13 @@ blob_storage_config:
       - fail_domains:
         - vdisk_locations:
           - node_id: 1
-            path: /dev/disk/by-partlabel/ydb_ssd_02
+            path: /dev/disk/by-partlabel/ydb_disk_ssd_02
             pdisk_category: SSD
 ....
 ```
 
 For a configuration located in 3 availability zones, specify 3 rings. For a configuration within a single availability zone, specify exactly one ring.
 
-## Sample cluster configurations
+## Sample cluster configurations {#examples}
 
-The [repository](https://github.com/ydb-platform/ydb/tree/main/ydb/deploy/yaml_config_examples/) provides model examples of cluster configurations for self-deployment. Check them out before deploying a cluster.
-
+You can find model cluster configurations for deployment in the [repository](https://github.com/ydb-platform/ydb/tree/main/ydb/deploy/yaml_config_examples/). Check them out before deploying a cluster.

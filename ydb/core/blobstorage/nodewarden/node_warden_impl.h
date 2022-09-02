@@ -112,6 +112,9 @@ namespace NKikimr::NStorage {
         TReplQuoter::TPtr ReplNodeResponseQuoter;
 
     public:
+        struct TGroupRecord;
+
+    public:
         static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
             return NKikimrServices::TActivity::NODE_WARDEN;
         }
@@ -152,6 +155,7 @@ namespace NKikimr::NStorage {
         void StartInvalidGroupProxy();
         void StopInvalidGroupProxy();
         void StartLocalProxy(ui32 groupId);
+        void StartVirtualGroupAgent(ui32 groupId);
         void StartStaticProxies();
 
         TVector<NPDisk::TDriveData> ListLocalDrives();
@@ -344,7 +348,8 @@ namespace NKikimr::NStorage {
             ui32 MaxKnownGeneration = 0; // maximum seen generation
             std::optional<NKikimrBlobStorage::TGroupInfo> Group; // group info as a protobuf
             NKikimrBlobStorage::TGroupInfo EncryptionParams; // latest encryption parameters; set only when encryption enabled; overlay in respect to Group
-            bool ProxyRunning = false;
+            TActorId ProxyId; // actor id of running DS proxy or agent
+            bool AgentProxy = false; // was the group started as an BlobDepot agent proxy?
             bool GetGroupRequestPending = false; // if true, then we are waiting for GetGroup response for this group
             bool ProposeRequestPending = false; // if true, then we have sent ProposeKey request and waiting for the group
             TActorId GroupResolver; // resolver actor id
@@ -454,6 +459,7 @@ namespace NKikimr::NStorage {
                 fFunc(TEvBlobStorage::TEvRange::EventType, HandleForwarded);
                 fFunc(TEvBlobStorage::TEvCollectGarbage::EventType, HandleForwarded);
                 fFunc(TEvBlobStorage::TEvStatus::EventType, HandleForwarded);
+                fFunc(TEvBlobStorage::TEvAssimilate::EventType, HandleForwarded);
                 fFunc(TEvBlobStorage::TEvBunchOfEvents::EventType, HandleForwarded);
                 fFunc(TEvRequestProxySessionsState::EventType, HandleForwarded);
 

@@ -2,16 +2,18 @@
 #include "probes.h"
 
 #include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io_factory.h>
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_sources.h>
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io.h>
 #include <ydb/library/yql/dq/actors/protos/dq_events.pb.h>
 #include <ydb/library/yql/dq/common/dq_common.h>
 #include <ydb/library/yql/dq/proto/dq_checkpoint.pb.h>
 
-#include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/minikql/comp_nodes/mkql_saveload.h>
 #include <ydb/library/yql/minikql/mkql_alloc.h>
 #include <ydb/library/yql/minikql/mkql_string_util.h>
+#include <ydb/library/yql/providers/pq/async_io/dq_pq_meta_extractor.h>
+#include <ydb/library/yql/providers/pq/common/pq_meta_fields.h>
 #include <ydb/library/yql/providers/pq/proto/dq_io_state.pb.h>
+#include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/utils/yql_panic.h>
 
 #include <ydb/public/sdk/cpp/client/ydb_persqueue_core/persqueue.h>
@@ -37,23 +39,21 @@ namespace NKikimrServices {
     constexpr ui32 KQP_COMPUTE = 535;
 };
 
-const TString LogPrefix = "PQ sink. ";
-
-#define SINK_LOG_T(s) \
+#define SRC_LOG_T(s) \
     LOG_TRACE_S(*NActors::TlsActivationContext, NKikimrServices::KQP_COMPUTE, LogPrefix << s)
-#define SINK_LOG_D(s) \
+#define SRC_LOG_D(s) \
     LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::KQP_COMPUTE, LogPrefix << s)
-#define SINK_LOG_I(s) \
+#define SRC_LOG_I(s) \
     LOG_INFO_S(*NActors::TlsActivationContext,  NKikimrServices::KQP_COMPUTE, LogPrefix << s)
-#define SINK_LOG_W(s) \
+#define SRC_LOG_W(s) \
     LOG_WARN_S(*NActors::TlsActivationContext, NKikimrServices::KQP_COMPUTE, LogPrefix << s)
-#define SINK_LOG_N(s) \
+#define SRC_LOG_N(s) \
     LOG_NOTICE_S(*NActors::TlsActivationContext, NKikimrServices::KQP_COMPUTE, LogPrefix << s)
-#define SINK_LOG_E(s) \
+#define SRC_LOG_E(s) \
     LOG_ERROR_S(*NActors::TlsActivationContext, NKikimrServices::KQP_COMPUTE, LogPrefix << s)
-#define SINK_LOG_C(s) \
+#define SRC_LOG_C(s) \
     LOG_CRIT_S(*NActors::TlsActivationContext,  NKikimrServices::KQP_COMPUTE, LogPrefix << s)
-#define SINK_LOG(prio, s) \
+#define SRC_LOG(prio, s) \
     LOG_LOG_S(*NActors::TlsActivationContext, prio, NKikimrServices::KQP_COMPUTE, LogPrefix << s)
 
 namespace NYql::NDq {
@@ -87,13 +87,13 @@ struct TEvPrivate {
 
 } // namespace
 
-class TDqPqReadActor : public NActors::TActor<TDqPqReadActor>, public IDqSourceActor {
+class TDqPqReadActor : public NActors::TActor<TDqPqReadActor>, public IDqComputeActorAsyncInput {
 public:
     using TPartitionKey = std::pair<TString, ui64>; // Cluster, partition id.
 
     TDqPqReadActor(
         ui64 inputIndex,
-        const TString& txId,
+        const TTxId& txId,
         const THolderFactory& holderFactory,
         NPq::NProto::TDqPqTopicSource&& sourceParams,
         NPq::NProto::TDqReadTaskParams&& readParams,
@@ -108,14 +108,19 @@ public:
         , BufferSize(bufferSize)
         , RangesMode(rangesMode)
         , HolderFactory(holderFactory)
+        , LogPrefix(TStringBuilder() << "TxId: " << TxId << ", PQ source. ")
         , Driver(std::move(driver))
         , CredentialsProviderFactory(std::move(credentialsProviderFactory))
         , SourceParams(std::move(sourceParams))
         , ReadParams(std::move(readParams))
-        , StartingMessageTimestamp(TInstant::Now())
+        , StartingMessageTimestamp(TInstant::MilliSeconds(TInstant::Now().MilliSeconds())) // this field is serialized as milliseconds, so drop microseconds part to be consistent with storage
         , ComputeActorId(computeActorId)
     {
-        Y_UNUSED(HolderFactory);
+        MetadataFields.reserve(SourceParams.MetadataFieldsSize());
+        TPqMetaExtractor fieldsExtractor;
+        for (const auto& fieldName : SourceParams.GetMetadataFields()) {
+            MetadataFields.emplace_back(fieldName, fieldsExtractor.FindExtractorLambda(fieldName));
+        }
     }
 
     NYdb::NPersQueue::TPersQueueClientSettings GetPersQueueClientSettings() const {
@@ -224,10 +229,10 @@ private:
 
     void Handle(TEvPrivate::TEvSourceDataReady::TPtr&, const TActorContext& ctx) {
         SubscribedOnEvent = false;
-        ctx.Send(ComputeActorId, new TEvNewSourceDataArrived(InputIndex));
+        ctx.Send(ComputeActorId, new TEvNewAsyncInputDataArrived(InputIndex));
     }
 
-    // IActor & IDqSourceActor
+    // IActor & IDqComputeActorAsyncInput
     void PassAway() override { // Is called from Compute Actor
         if (ReadSession) {
             ReadSession->Close(TDuration::Zero());
@@ -237,7 +242,7 @@ private:
         TActor<TDqPqReadActor>::PassAway();
     }
 
-    i64 GetSourceData(NKikimr::NMiniKQL::TUnboxedValueVector& buffer, bool&, i64 freeSpace) override {
+    i64 GetAsyncInputData(NKikimr::NMiniKQL::TUnboxedValueVector& buffer, bool&, i64 freeSpace) override {
         auto events = GetReadSession().GetEvents(false, TMaybe<size_t>(), static_cast<size_t>(Max<i64>(freeSpace, 0)));
 
         ui32 batchSize = 0;
@@ -251,7 +256,7 @@ private:
 
         i64 usedSpace = 0;
         for (auto& event : events) {
-            std::visit(TPQEventProcessor{*this, buffer, usedSpace}, event);
+            std::visit(TPQEventProcessor{*this, buffer, usedSpace, LogPrefix}, event);
         }
 
         SubscribeOnNextEvent();
@@ -309,10 +314,28 @@ private:
             for (const auto& message : event.GetMessages()) {
                 const TString& data = message.GetData();
 
-                LWPROBE(PqReadDataReceived, Self.TxId, Self.SourceParams.GetTopicPath(), data);
-                SINK_LOG_T("Data received: " << data);
+                LWPROBE(PqReadDataReceived, TString(TStringBuilder() << Self.TxId), Self.SourceParams.GetTopicPath(), data);
+                SRC_LOG_T("Data received: " << message.DebugString(true));
 
-                Batch.emplace_back(NKikimr::NMiniKQL::MakeString(NUdf::TStringRef(data.Data(), data.Size())));
+                if (message.GetWriteTime() < Self.StartingMessageTimestamp) {
+                    SRC_LOG_D("Skip data. StartingMessageTimestamp: " << Self.StartingMessageTimestamp << ". Write time: " << message.GetWriteTime());
+                    continue;
+                }
+
+                NUdf::TUnboxedValuePod item;
+                if (Self.MetadataFields.empty()) {
+                    item = NKikimr::NMiniKQL::MakeString(NUdf::TStringRef(data.Data(), data.Size()));
+                } else {
+                    NUdf::TUnboxedValue* itemPtr;
+                    item = Self.HolderFactory.CreateDirectArrayHolder(Self.MetadataFields.size() + 1, itemPtr);
+                    *(itemPtr++) = NKikimr::NMiniKQL::MakeString(NUdf::TStringRef(data.Data(), data.Size()));
+
+                    for (const auto& [name, extractor] : Self.MetadataFields) {
+                        *(itemPtr++) = extractor(message);
+                    }
+                }
+
+                Batch.emplace_back(item);
                 UsedSpace += data.Size();
             }
             Self.UpdateStateWithNewReadData(event);
@@ -346,14 +369,16 @@ private:
         TDqPqReadActor& Self;
         TUnboxedValueVector& Batch;
         i64& UsedSpace;
+        const TString& LogPrefix;
     };
 
 private:
     const ui64 InputIndex;
-    const TString TxId;
+    const TTxId TxId;
     const i64 BufferSize;
     const bool RangesMode;
     const THolderFactory& HolderFactory;
+    const TString LogPrefix;
     NYdb::TDriver Driver;
     std::shared_ptr<NYdb::ICredentialsProviderFactory> CredentialsProviderFactory;
     const NPq::NProto::TDqPqTopicSource SourceParams;
@@ -367,9 +392,10 @@ private:
     std::queue<std::pair<ui64, NYdb::NPersQueue::TDeferredCommit>> DeferredCommits;
     NYdb::NPersQueue::TDeferredCommit CurrentDeferredCommit;
     bool SubscribedOnEvent = false;
+    std::vector<std::tuple<TString, TPqMetaExtractor::TPqMetaExtractorLambda>> MetadataFields;
 };
 
-std::pair<IDqSourceActor*, NActors::IActor*> CreateDqPqReadActor(
+std::pair<IDqComputeActorAsyncInput*, NActors::IActor*> CreateDqPqReadActor(
     NPq::NProto::TDqPqTopicSource&& settings,
     ui64 inputIndex,
     TTxId txId,
@@ -395,7 +421,7 @@ std::pair<IDqSourceActor*, NActors::IActor*> CreateDqPqReadActor(
 
     TDqPqReadActor* actor = new TDqPqReadActor(
         inputIndex,
-        std::holds_alternative<ui64>(txId) ? ToString(txId) : std::get<TString>(txId),
+        txId,
         holderFactory,
         std::move(settings),
         std::move(readTaskParamsMsg),
@@ -409,11 +435,11 @@ std::pair<IDqSourceActor*, NActors::IActor*> CreateDqPqReadActor(
     return {actor, actor};
 }
 
-void RegisterDqPqReadActorFactory(TDqSourceFactory& factory, NYdb::TDriver driver, ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory, bool rangesMode) {
-    factory.Register<NPq::NProto::TDqPqTopicSource>("PqSource",
+void RegisterDqPqReadActorFactory(TDqAsyncIoFactory& factory, NYdb::TDriver driver, ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory, bool rangesMode) {
+    factory.RegisterSource<NPq::NProto::TDqPqTopicSource>("PqSource",
         [driver = std::move(driver), credentialsFactory = std::move(credentialsFactory), rangesMode](
             NPq::NProto::TDqPqTopicSource&& settings,
-            IDqSourceActorFactory::TArguments&& args)
+            IDqAsyncIoFactory::TSourceArguments&& args)
     {
         NLwTraceMonPage::ProbeRegistry().AddProbesList(LWTRACE_GET_PROBES(DQ_PQ_PROVIDER));
         return CreateDqPqReadActor(

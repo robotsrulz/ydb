@@ -11,10 +11,10 @@ add_library(contrib-libs-fmt)
 target_compile_options(contrib-libs-fmt PUBLIC
   -DFMT_EXPORT
 )
-target_include_directories(contrib-libs-fmt PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/libs/fmt/include
+target_compile_options(contrib-libs-fmt PRIVATE
+  -Wno-everything
 )
-target_include_directories(contrib-libs-fmt PRIVATE
+target_include_directories(contrib-libs-fmt PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/fmt/include
 )
 target_link_libraries(contrib-libs-fmt PUBLIC

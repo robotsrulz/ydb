@@ -1,5 +1,4 @@
-#undef __STDC_FORMAT_MACROS
-#include <contrib/libs/jwt-cpp/jwt.h>
+#include <contrib/libs/jwt-cpp/include/jwt-cpp/jwt.h>
 
 #include "jwt.h"
 

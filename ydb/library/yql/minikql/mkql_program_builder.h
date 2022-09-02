@@ -85,20 +85,20 @@ inline void AddAnyJoinSide(EAnyJoinSettings& combined, EAnyJoinSettings value) {
 }
 
 #define MKQL_SCRIPT_TYPES(xx) \
-    xx(Unknown, 0, unknown) \
-    xx(Python, 1, python) \
-    xx(Lua, 2, lua) \
-    xx(ArcPython, 3, arcpython) \
-    xx(CustomPython, 4, custompython) \
-    xx(Javascript, 5, javascript) \
-    xx(Python2, 6, python2) \
-    xx(ArcPython2, 7, arcpython2) \
-    xx(CustomPython2, 8, custompython2) \
-    xx(Python3, 9, python3) \
-    xx(ArcPython3, 10, arcpython3) \
-    xx(CustomPython3, 11, custompython3) \
-    xx(SystemPython2, 12, systempython2) \
-    xx(SystemPython3, 13, systempython3) \
+    xx(Unknown, 0, unknown, false) \
+    xx(Python, 1, python, false) \
+    xx(Lua, 2, lua, false) \
+    xx(ArcPython, 3, arcpython, false) \
+    xx(CustomPython, 4, custompython, true) \
+    xx(Javascript, 5, javascript, false) \
+    xx(Python2, 6, python2, false) \
+    xx(ArcPython2, 7, arcpython2, false) \
+    xx(CustomPython2, 8, custompython2, true) \
+    xx(Python3, 9, python3, false) \
+    xx(ArcPython3, 10, arcpython3, false) \
+    xx(CustomPython3, 11, custompython3, true) \
+    xx(SystemPython2, 12, systempython2, false) \
+    xx(SystemPython3, 13, systempython3, false) \
 
 enum class EScriptType {
     MKQL_SCRIPT_TYPES(ENUM_VALUE_GEN)
@@ -107,6 +107,7 @@ enum class EScriptType {
 std::string_view ScriptTypeAsStr(EScriptType type);
 EScriptType ScriptTypeFromStr(std::string_view str);
 bool IsCustomPython(EScriptType type);
+bool IsSystemPython(EScriptType type);
 EScriptType CanonizeScriptType(EScriptType type);
 
 struct TSwitchInput {
@@ -256,11 +257,11 @@ public:
         const std::string_view& file = std::string_view(""), ui32 row = 0, ui32 column = 0);
 
     TRuntimeNode ScriptUdf(
-            EScriptType scriptType,
-            const std::string_view& funcName,
-            TType* funcType,
-            TRuntimeNode script,
-            const std::string_view& file = std::string_view(""), ui32 row = 0, ui32 column = 0);
+        const std::string_view& moduleName,
+        const std::string_view& funcName,
+        TType* funcType,
+        TRuntimeNode script,
+        const std::string_view& file = std::string_view(""), ui32 row = 0, ui32 column = 0);
 
     typedef std::function<TRuntimeNode ()> TZeroLambda;
     typedef std::function<TRuntimeNode (TRuntimeNode)> TUnaryLambda;
@@ -623,14 +624,15 @@ public:
     typedef TRuntimeNode (TProgramBuilder::*ProcessFunctionMethod)(TRuntimeNode, const TUnaryLambda&);
     typedef TRuntimeNode (TProgramBuilder::*NarrowFunctionMethod)(TRuntimeNode, const TNarrowLambda&);
 
-    TRuntimeNode PgConst(TPgType* pgType, const std::string_view& value);
+    TRuntimeNode PgConst(TPgType* pgType, const std::string_view& value, TRuntimeNode typeMod = {});
     TRuntimeNode PgResolvedCall(bool useContext, const std::string_view& name, ui32 id,
         const TArrayRef<const TRuntimeNode>& args, TType* returnType);
-    TRuntimeNode PgCast(TRuntimeNode input, TType* returnType);
+    TRuntimeNode PgCast(TRuntimeNode input, TType* returnType, TRuntimeNode typeMod = {});
     TRuntimeNode FromPg(TRuntimeNode input, TType* returnType);
     TRuntimeNode ToPg(TRuntimeNode input, TType* returnType);
     TRuntimeNode WithContext(TRuntimeNode input, const std::string_view& contextType);
     TRuntimeNode PgInternal0(TType* returnType);
+    TRuntimeNode PgArray(const TArrayRef<const TRuntimeNode>& args, TType* returnType);
 
 protected:
     TRuntimeNode Invoke(const std::string_view& funcName, TType* resultType, const TArrayRef<const TRuntimeNode>& args);

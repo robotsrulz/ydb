@@ -6,10 +6,15 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(runtime_avx2)
+add_subdirectory(runtime_avx512)
+add_subdirectory(runtime_core2)
+add_subdirectory(runtime_corei7)
 
 add_library(contrib-libs-hyperscan)
 target_compile_options(contrib-libs-hyperscan PRIVATE
   -DDISABLE_AVX512VBMI_DISPATCH
+  -Wno-everything
 )
 target_include_directories(contrib-libs-hyperscan PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/hyperscan
@@ -19,6 +24,8 @@ target_include_directories(contrib-libs-hyperscan PRIVATE
 target_link_libraries(contrib-libs-hyperscan PUBLIC
   contrib-libs-cxxsupp
   contrib-restricted-boost
+  restricted-boost-icl
+  boost-libs-graph
 )
 target_sources(contrib-libs-hyperscan PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/hyperscan/src/alloc.c

@@ -17,7 +17,7 @@
 - Go
 
   Выполните команду из командной строки:
-  
+
   {% include [install/cmd_go.md](install/cmd_go.md) %}
 
   Для успешной установки в вашем окружении должен быть установлен [Go](https://go.dev/doc/install) версии не ниже 1.13.
@@ -33,5 +33,13 @@
 - PHP
 
   {% include [install/cmd_php.md](install/cmd_php.md) %}
+
+- Node.JS
+
+  {% include [install/cmd_nodejs.md](install/cmd_nodejs.md) %}
+
+- Rust
+
+  {% include [install/cmd_rust.md](install/cmd_rust.md) %}
 
 {% endlist %}

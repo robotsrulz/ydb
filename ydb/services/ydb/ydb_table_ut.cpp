@@ -89,7 +89,7 @@ static void MultiTenantSDK(bool asyncDiscovery) {
     NYdb::NTable::TTableClient clientbad2(driver, settings2);
 */
     const TString sql = R"__(
-        CREATE TABLE [Root/Test] (
+        CREATE TABLE `Root/Test` (
             Key Uint32,
             Value String,
             PRIMARY KEY (Key)
@@ -142,7 +142,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
         {
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Json,
                     Value String,
                     PRIMARY KEY (Key)
@@ -154,7 +154,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
         {
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Yson,
                     Value String,
                     PRIMARY KEY (Key)
@@ -178,7 +178,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
         {
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint32,
                     Value String,
                     PRIMARY KEY (Key)
@@ -188,7 +188,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
         }
         auto result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Key, Value)
+            UPSERT INTO `Root/Test` (Key, Value)
                 VALUES("foo", "bar");
             )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
 
@@ -197,6 +197,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
         auto ref = R"___(<main>: Error: Type annotation, code: 1030
     <main>:2:25: Error: At function: KiWriteTable!
         <main>:2:43: Error: Failed to convert type: Struct<'Key':String,'Value':String> to Struct<'Key':Uint32?,'Value':String?>
+            <main>:2:43: Error: Failed to convert 'Key': String to Optional<Uint32>
         <main>:2:43: Error: Failed to convert input columns types to scheme types, code: 2031
 )___";
         UNIT_ASSERT_EQUAL(result.GetIssues().Size(), 1);
@@ -370,7 +371,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
             UNIT_ASSERT(sessionResponse.IsSuccess());
             auto session = sessionResponse.GetSession();
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint32,
                     Value String,
                     PRIMARY KEY (Key)
@@ -386,7 +387,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
             auto session = sessionResponse.GetSession();
 
             // Assume 10us is too small to execute query and get response
-            auto res = session.ExecuteDataQuery("SELECT COUNT(*) FROM [Root/Test];",
+            auto res = session.ExecuteDataQuery("SELECT COUNT(*) FROM `Root/Test`;",
                 TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(),
                 NYdb::NTable::TExecDataQuerySettings().ClientTimeout(TDuration::MicroSeconds(10))).GetValueSync();
             UNIT_ASSERT_VALUES_EQUAL(client.GetActiveSessionCount(), 1);
@@ -592,7 +593,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
         {
             auto status = session.ExecuteSchemeQuery(R"__(
-            CREATE TABLE [Root/Test] (
+            CREATE TABLE `Root/Test` (
                 Column1 Uint32,
                 Column2 Uint32,
                 Column3 Uint32,
@@ -605,14 +606,14 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
         }
 
         session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Column1, Column2, Column3, Column4)
+            UPSERT INTO `Root/Test` (Column1, Column2, Column3, Column4)
             VALUES(1u, 12u, 13u, 14u);
-            UPSERT INTO [Root/Test] (Column1, Column2, Column3, Column4)
+            UPSERT INTO `Root/Test` (Column1, Column2, Column3, Column4)
             VALUES(2u, 22u, 23u, 24u);
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
 
         auto result = session.ExecuteDataQuery(R"___(
-            SELECT Column4, Column2, Column3, Column1 FROM [Root/Test];
+            SELECT Column4, Column2, Column3, Column1 FROM `Root/Test`;
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
 
         UNIT_ASSERT_EQUAL(result.IsTransportError(), false);
@@ -691,9 +692,9 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
         {
             TString query = R"___(
-                DECLARE $Value AS "Decimal(22,9)";
+                DECLARE $Value AS Decimal(22,9);
                 DECLARE $Key AS Int32;
-                UPSERT INTO [Root/FooTable] (Key, Value) VALUES
+                UPSERT INTO `Root/FooTable` (Key, Value) VALUES
                     ($Key, $Value);
              )___";
 
@@ -727,7 +728,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
         }
 
         {
-            TString query = R"___(SELECT SUM(Value),MIN(Value),MAX(Value) FROM [Root/FooTable])___";
+            TString query = R"___(SELECT SUM(Value),MIN(Value),MAX(Value) FROM `Root/FooTable`)___";
             auto result = session
                 .ExecuteDataQuery(query, TTxControl::BeginTx(TTxSettings::SerializableRW())
                     .CommitTx())
@@ -885,7 +886,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
         }
         {
             auto status = session.ExecuteSchemeQuery(R"__(
-            CREATE TABLE [Root/Foo/Test] (
+            CREATE TABLE `Root/Foo/Test` (
                 Column1 Uint32,
                 Column2 Uint32,
                 Column3 Uint32,
@@ -934,7 +935,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
             auto session = CreateSession(connection, "root@builtin");
             {
                 auto status = session.ExecuteSchemeQuery(R"__(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint32,
                     Value String,
                     PRIMARY KEY (Key)
@@ -981,7 +982,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
             {
                 auto status = session.ExecuteDataQuery(R"__(
-                    SELECT * FROM [Root/Test];
+                    SELECT * FROM `Root/Test`;
                 )__",TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
 
                 UNIT_ASSERT_EQUAL(status.IsTransportError(), false);
@@ -1247,7 +1248,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
             auto result = session
                 .ExecuteSchemeQuery(R"___(
-                    CREATE TABLE [Root/Test] (
+                    CREATE TABLE `Root/Test` (
                         Key Uint32,
                         Value String,
                         PRIMARY KEY (Key)
@@ -1258,7 +1259,7 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
             result = session
                 .ExecuteDataQuery(R"___(
-                    UPSERT INTO [Root/Test] (Key, Value)
+                    UPSERT INTO `Root/Test` (Key, Value)
                     VALUES(2u, "Two");
                 )___",
                 TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(),
@@ -1363,20 +1364,20 @@ Y_UNIT_TEST_SUITE(YdbYqlClient) {
 
         {
             auto status = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (Key Int32, Value String, PRIMARY KEY (Key));
+                CREATE TABLE `Root/Test` (Key Int32, Value String, PRIMARY KEY (Key));
             )___").ExtractValueSync();
             UNIT_ASSERT_EQUAL(status.GetStatus(), EStatus::SUCCESS);
         }
 
         auto result1 = session.ExecuteDataQuery(R"___(
-            INSERT INTO [Root/Test] (Key, Value) VALUES(1u, "One");
+            INSERT INTO `Root/Test` (Key, Value) VALUES(1u, "One");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result1.GetStatus(), EStatus::SUCCESS);
 
         {
             auto session2 = CreateSession(connection);
             auto result = session2.ExecuteDataQuery(R"___(
-                UPSERT INTO [Root/Test] (Key, Value) VALUES(1u, "Two");
+                UPSERT INTO `Root/Test` (Key, Value) VALUES(1u, "Two");
             )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
         }
@@ -1408,7 +1409,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         {
             auto status = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint64,
                     Value String,
                     PRIMARY KEY (Key)
@@ -1418,9 +1419,9 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         }
 
         auto fillQueryResult = session.PrepareDataQuery(R"___(
-            DECLARE $Data AS 'List<Struct<Key:Uint64, Value:String>>';
+            DECLARE $Data AS List<Struct<Key:Uint64, Value:String>>;
 
-            REPLACE INTO [Root/Test]
+            REPLACE INTO `Root/Test`
             SELECT data.Key AS Key, data.Value AS Value FROM (SELECT $Data AS data) FLATTEN BY data;
         )___").ExtractValueSync();
         UNIT_ASSERT_EQUAL(fillQueryResult.GetStatus(), EStatus::SUCCESS);
@@ -1456,7 +1457,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         }
 
         auto result = session.ExecuteDataQuery(R"___(
-            SELECT * FROM [Root/Test] WHERE Key != 1;
+            SELECT * FROM `Root/Test` WHERE Key != 1;
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(),  EStatus::UNDETERMINED);
 
@@ -1479,7 +1480,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         auto session = client.CreateSession().ExtractValueSync().GetSession();
 
         auto result = session.ExecuteSchemeQuery(R"___(
-            CREATE TABLE [Root/Test] (
+            CREATE TABLE `Root/Test` (
                 Key Double,
                 Value String,
                 PRIMARY KEY (Key)
@@ -1541,7 +1542,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         TVector<NYdb::TAsyncStatus> futures;
         for (ui32 i = 0; i < sessionsCount; ++i) {
             auto query = sessions[i].ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Int,
                     Value String,
                     PRIMARY KEY (Key)
@@ -1559,7 +1560,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         // Make sure table exists
         auto result = sessions[0].ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Key, Value) VALUES (1, "One");
+            UPSERT INTO `Root/Test` (Key, Value) VALUES (1, "One");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
     }
@@ -1578,7 +1579,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         {
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint32,
                     Value String,
                     PRIMARY KEY (Key)
@@ -1588,23 +1589,23 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         }
 
         auto result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Key, Value) VALUES(1u, "One");
+            UPSERT INTO `Root/Test` (Key, Value) VALUES(1u, "One");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         Cerr << result.GetIssues().ToString() << Endl;
         UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         auto prepareResult = session.PrepareDataQuery(R"___(
-            SELECT * FROM [Root/BadTable];
+            SELECT * FROM `Root/BadTable`;
         )___").ExtractValueSync();
         UNIT_ASSERT_EQUAL(prepareResult.GetStatus(), EStatus::SCHEME_ERROR);
 
         result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Key, Value) VALUES(2u, "Two");
+            UPSERT INTO `Root/Test` (Key, Value) VALUES(2u, "Two");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"___(
-            SELECT * FROM [Root/Test];
+            SELECT * FROM `Root/Test`;
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
@@ -1631,7 +1632,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         auto session = client.CreateSession().ExtractValueSync().GetSession();
 
         auto result = session.ExecuteSchemeQuery(R"___(
-               CREATE TABLE [Root/Test] (
+               CREATE TABLE `Root/Test` (
                    Key Uint32,
                    Value String,
                    PRIMARY KEY (Key)
@@ -1640,12 +1641,12 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/BadTable1] (Key, Value) VALUES(1u, "One");
+            UPSERT INTO `Root/BadTable1` (Key, Value) VALUES(1u, "One");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW())).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SCHEME_ERROR);
 
         result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/BadTable2] (Key, Value) VALUES(2u, "Two");
+            UPSERT INTO `Root/BadTable2` (Key, Value) VALUES(2u, "Two");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW())).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SCHEME_ERROR);
     }
@@ -1725,7 +1726,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         auto session = client.CreateSession().ExtractValueSync().GetSession();
 
         auto result = session.ExecuteSchemeQuery(R"___(
-            CREATE TABLE [Root/Test] (
+            CREATE TABLE `Root/Test` (
                 Key Uint64,
                 Value String,
                 PRIMARY KEY (Key)
@@ -1734,12 +1735,12 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"___(
-            INSERT INTO [Root/Test] (Key, Value) VALUES (1u, "One");
+            INSERT INTO `Root/Test` (Key, Value) VALUES (1u, "One");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"___(
-            INSERT INTO [Root/Test] (Key, Value) VALUES (1u, "Two");
+            INSERT INTO `Root/Test` (Key, Value) VALUES (1u, "Two");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::PRECONDITION_FAILED);
     }
@@ -1757,7 +1758,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         auto session = client.CreateSession().ExtractValueSync().GetSession();
 
         auto result = session.ExecuteSchemeQuery(R"___(
-            CREATE TABLE [Root/Test] (
+            CREATE TABLE `Root/Test` (
                 Key Uint64,
                 Value String,
                 PRIMARY KEY (Key)
@@ -1766,7 +1767,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, "One");
+            UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, "One");
         )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
@@ -1872,7 +1873,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Key, Fk, Value) VALUES
+            UPSERT INTO `Root/Test` (Key, Fk, Value) VALUES
             (1u, 1u, "One"),
             (1000000000u, 2u, "Two"),
             (4294967295u, 4u, "Last");
@@ -2001,7 +2002,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"___(
-            UPSERT INTO [Root/Test] (Key, Key2, Value) VALUES
+            UPSERT INTO `Root/Test` (Key, Key2, Value) VALUES
             (1u,          2u,          "A"),
             (429496730u,  20000u,      "B"),
             (858993459u,  20000u,      "C"),
@@ -2115,7 +2116,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         auto createFuture = client.RetryOperation([](TSession session) {
             return session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint64,
                     Value String,
                     PRIMARY KEY (Key)
@@ -2131,7 +2132,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
             return client.RetryOperation<TDataQueryResult>([](TSession session) {
                 return session.ExecuteDataQuery(R"___(
-                    UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, "One");
+                    UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, "One");
                 )___", TTxControl::BeginTx().CommitTx());
             }, TRetryOperationSettings().MaxRetries(0));
         });
@@ -2142,7 +2143,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         TMaybe<TResultSet> selectResult;
         auto selectStatus = client.RetryOperationSync([&selectResult] (TSession session) {
             auto result = session.ExecuteDataQuery(R"___(
-                SELECT * FROM [Root/Test];
+                SELECT * FROM `Root/Test`;
             )___", TTxControl::BeginTx().CommitTx()).GetValueSync();
 
             if (result.IsSuccess()) {
@@ -2172,7 +2173,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         auto session = client.CreateSession().ExtractValueSync().GetSession();
 
         auto result = session.ExecuteSchemeQuery(R"___(
-            CREATE TABLE [Root/Test] (
+            CREATE TABLE `Root/Test` (
                 Key Uint64,
                 Value String,
                 PRIMARY KEY (Key)
@@ -2181,12 +2182,12 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(Sprintf(R"___(
-            UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, "%s");
+            UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, "%s");
         )___", TString(100, '*').c_str()), TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(Sprintf(R"___(
-            UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, "%s");
+            UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, "%s");
         )___", TString(200, '*').c_str()), TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::BAD_REQUEST);
@@ -2198,7 +2199,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         result = session.ExecuteDataQuery(R"___(
             DECLARE $value AS String;
-            UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, $value);
+            UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, $value);
         )___", TTxControl::BeginTx().CommitTx(), std::move(params)).ExtractValueSync();
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
@@ -2209,7 +2210,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         result = session.ExecuteDataQuery(R"___(
             DECLARE $value AS String;
-            UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, $value);
+            UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, $value);
         )___", TTxControl::BeginTx().CommitTx(), std::move(params)).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
         UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::BAD_REQUEST);
@@ -2568,7 +2569,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         {
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint64,
                     Value String,
                     PRIMARY KEY (Key)
@@ -2577,7 +2578,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
             result = session.ExecuteDataQuery(R"___(
-                UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, "One");
+                UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, "One");
             )___", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
         }
@@ -2722,7 +2723,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         {
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint64,
                     Value String,
                     PRIMARY KEY (Key)
@@ -2731,7 +2732,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
             result = session.ExecuteDataQuery(R"___(
-                UPSERT INTO [Root/Test] (Key, Value) VALUES (1u, "One");
+                UPSERT INTO `Root/Test` (Key, Value) VALUES (1u, "One");
             )___", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
         }
@@ -2788,7 +2789,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         {
             auto result = session.ExecuteSchemeQuery(R"___(
-                CREATE TABLE [Root/Test] (
+                CREATE TABLE `Root/Test` (
                     Key Uint64,
                     Fk Uint64,
                     Value String,
@@ -2798,7 +2799,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
             result = session.ExecuteDataQuery(R"___(
-                UPSERT INTO [Root/Test] (Key, Fk, Value) VALUES (1u, 111u, "One");
+                UPSERT INTO `Root/Test` (Key, Fk, Value) VALUES (1u, 111u, "One");
             )___", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
             UNIT_ASSERT_EQUAL(result.GetStatus(), EStatus::SUCCESS);
         }
@@ -2869,7 +2870,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
                 execSettings.CollectQueryStats(ECollectQueryStatsMode::Basic);
             }
             {
-                auto query = "UPSERT INTO [/Root/Foo] (Key, Value) VALUES (0, 'aa');";
+                auto query = "UPSERT INTO `/Root/Foo` (Key, Value) VALUES (0, 'aa');";
                 auto result = session.ExecuteDataQuery(
                             query,
                             TTxControl::BeginTx().CommitTx(), execSettings).ExtractValueSync();
@@ -2899,7 +2900,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             }
 
             {
-                auto query = "UPSERT INTO [/Root/Foo] (Key, Value) VALUES (1, Utf8('bb')), (0xffffffff, Utf8('cc'));";
+                auto query = "UPSERT INTO `/Root/Foo` (Key, Value) VALUES (1, Utf8('bb')), (0xffffffff, Utf8('cc'));";
                 auto result = session.ExecuteDataQuery(
                             query,
                             TTxControl::BeginTx().CommitTx(), execSettings).ExtractValueSync();
@@ -2920,7 +2921,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             }
 
             {
-                auto query = "SELECT * FROM [/Root/Foo];";
+                auto query = "SELECT * FROM `/Root/Foo`;";
                 auto result = session.ExecuteDataQuery(
                             query,
                             TTxControl::BeginTx().CommitTx(), execSettings).ExtractValueSync();
@@ -2941,7 +2942,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             }
 
             {
-                auto query = "SELECT * FROM [/Root/Foo] WHERE Key == 1;";
+                auto query = "SELECT * FROM `/Root/Foo` WHERE Key == 1;";
                 auto result = session.ExecuteDataQuery(
                             query,
                             TTxControl::BeginTx().CommitTx(), execSettings).ExtractValueSync();
@@ -2962,7 +2963,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             }
 
             {
-                auto query = "DELETE FROM [/Root/Foo] WHERE Key > 0;";
+                auto query = "DELETE FROM `/Root/Foo` WHERE Key > 0;";
                 auto result = session.ExecuteDataQuery(
                             query,
                             TTxControl::BeginTx().CommitTx(), execSettings).ExtractValueSync();
@@ -3677,7 +3678,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
             TString query = Sprintf(R"___(
                 DECLARE $Key AS Uint32;
                 DECLARE $Value AS Utf8;
-                UPSERT INTO [Root/ydb_ut_tenant/Table-%d] (Key, Value) VALUES
+                UPSERT INTO `Root/ydb_ut_tenant/Table-%d` (Key, Value) VALUES
                     ($Key, $Value);
             )___", tableIdx);
 
@@ -3901,7 +3902,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         {
             auto result = session.ExecuteDataQuery(R"___(
-                UPSERT INTO [Root/Foo] (Key, Value)
+                UPSERT INTO `Root/Foo` (Key, Value)
                     VALUES(1, "bar");
                 )___", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync();
 
@@ -3977,7 +3978,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
 
         {
             auto result = session.ExecuteDataQuery(R"___(
-                UPSERT INTO [Root/Foo] (Key, Value) VALUES
+                UPSERT INTO `Root/Foo` (Key, Value) VALUES
                     (1, "one"),
                     (2, "two"),
                     (12, "twelve"),
@@ -3990,7 +3991,7 @@ R"___(<main>: Error: Transaction not found: , code: 2015
         }
 
         {
-            auto res = session.ExecuteDataQuery("select count(*) from [Root/Foo]", TTxControl::BeginTx().CommitTx())
+            auto res = session.ExecuteDataQuery("select count(*) from `Root/Foo`", TTxControl::BeginTx().CommitTx())
                 .GetValueSync();
             UNIT_ASSERT_C(res.IsSuccess(), res.GetIssues().ToString());
             TResultSetParser parser{res.GetResultSet(0)};

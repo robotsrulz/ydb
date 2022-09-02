@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(login)
 
 add_library(client-ydb_types-credentials)
 target_link_libraries(client-ydb_types-credentials PUBLIC
@@ -18,5 +19,4 @@ target_link_libraries(client-ydb_types-credentials PUBLIC
 )
 target_sources(client-ydb_types-credentials PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/public/sdk/cpp/client/ydb_types/credentials/credentials.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/public/sdk/cpp/client/ydb_types/credentials/login.cpp
 )

@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(dq-actors-compute)
 target_compile_options(dq-actors-compute PRIVATE
@@ -17,8 +18,6 @@ target_link_libraries(dq-actors-compute PUBLIC
   cpp-actors-core
   ydb-core-base
   ydb-core-protos
-  ydb-core-scheme
-  ydb-core-tablet_flat
   yql-dq-common
   yql-dq-proto
   yql-dq-runtime

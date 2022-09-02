@@ -64,9 +64,7 @@ struct TDescribeTopicResult : public TStatus {
     struct TTopicSettings {
         TTopicSettings(const Ydb::PersQueue::V1::TopicSettings&);
 
-#define GETTER(TYPE, NAME) TYPE NAME() const { \
-        return NAME ##_; \
-        }
+        #define GETTER(TYPE, NAME) TYPE NAME() const { return NAME##_; }
 
         struct TReadRule {
             TReadRule(const Ydb::PersQueue::V1::TopicSettings::ReadRule&);
@@ -120,11 +118,13 @@ struct TDescribeTopicResult : public TStatus {
         GETTER(ui64, MaxPartitionWriteBurst);
         GETTER(bool, ClientWriteDisabled);
 
+        // attributes
         GETTER(bool, AllowUnauthenticatedWrite);
         GETTER(bool, AllowUnauthenticatedRead);
-        GETTER(ui32, PartitionsPerTablet);
-        GETTER(ui32, AbcId);
-        GETTER(TString, AbcSlug);
+        GETTER(TMaybe<ui32>, PartitionsPerTablet);
+        GETTER(TMaybe<ui32>, AbcId);
+        GETTER(TMaybe<TString>, AbcSlug);
+        GETTER(TMaybe<TString>, FederationAccount);
 
         const TVector<TReadRule>& ReadRules() const {
             return ReadRules_;
@@ -143,13 +143,15 @@ struct TDescribeTopicResult : public TStatus {
         ui64 MaxPartitionWriteSpeed_;
         ui64 MaxPartitionWriteBurst_;
         bool ClientWriteDisabled_;
-        bool AllowUnauthenticatedRead_;
-        bool AllowUnauthenticatedWrite_;
-        ui32 PartitionsPerTablet_;
-        ui32 AbcId_;
-        TString AbcSlug_;
         TVector<TReadRule> ReadRules_;
         TMaybe<TRemoteMirrorRule> RemoteMirrorRule_;
+        // attributes
+        bool AllowUnauthenticatedRead_;
+        bool AllowUnauthenticatedWrite_;
+        TMaybe<ui32> PartitionsPerTablet_;
+        TMaybe<ui32> AbcId_;
+        TMaybe<TString> AbcSlug_;
+        TString FederationAccount_;
     };
 
     TDescribeTopicResult(TStatus status, const Ydb::PersQueue::V1::DescribeTopicResult& result);
@@ -241,10 +243,11 @@ struct TTopicSettings : public TOperationRequestSettings<TDerived> {
     FLUENT_SETTING_DEFAULT(bool, AllowUnauthenticatedWrite, false);
     FLUENT_SETTING_DEFAULT(bool, AllowUnauthenticatedRead, false);
 
-    FLUENT_SETTING_DEFAULT(ui32, PartitionsPerTablet, 2);
+    FLUENT_SETTING_OPTIONAL(ui32, PartitionsPerTablet);
 
     FLUENT_SETTING_OPTIONAL(ui32, AbcId);
     FLUENT_SETTING_OPTIONAL(TString, AbcSlug);
+    FLUENT_SETTING_OPTIONAL(TString, FederationAccount);
 
     //TODO: FLUENT_SETTING_VECTOR
     FLUENT_SETTING_DEFAULT(TVector<TReadRuleSettings>, ReadRules, {});
@@ -263,12 +266,12 @@ struct TTopicSettings : public TOperationRequestSettings<TDerived> {
         MaxPartitionWriteSpeed_ = settings.MaxPartitionWriteSpeed();
         MaxPartitionWriteBurst_ = settings.MaxPartitionWriteBurst();
         ClientWriteDisabled_ = settings.ClientWriteDisabled();
-        PartitionsPerTablet_ = settings.PartitionsPerTablet();
-        if (settings.AbcId()) AbcId_ = settings.AbcId();
-        if (!settings.AbcSlug().empty()) AbcSlug_ = settings.AbcSlug();
         AllowUnauthenticatedRead_ = settings.AllowUnauthenticatedRead();
         AllowUnauthenticatedWrite_ = settings.AllowUnauthenticatedWrite();
-
+        PartitionsPerTablet_ = settings.PartitionsPerTablet();
+        AbcId_ = settings.AbcId();
+        AbcSlug_ = settings.AbcSlug();
+        FederationAccount_ = settings.FederationAccount();
         ReadRules_.clear();
         for (const auto& readRule : settings.ReadRules()) {
             ReadRules_.push_back({});
@@ -355,19 +358,19 @@ struct TWriterCounters : public TThrRefBase {
     using TSelf = TWriterCounters;
     using TPtr = TIntrusivePtr<TSelf>;
 
-    explicit TWriterCounters(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters);
+    explicit TWriterCounters(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters);
 
-    NMonitoring::TDynamicCounters::TCounterPtr Errors;
-    NMonitoring::TDynamicCounters::TCounterPtr CurrentSessionLifetimeMs;
+    ::NMonitoring::TDynamicCounters::TCounterPtr Errors;
+    ::NMonitoring::TDynamicCounters::TCounterPtr CurrentSessionLifetimeMs;
 
-    NMonitoring::TDynamicCounters::TCounterPtr BytesWritten;
-    NMonitoring::TDynamicCounters::TCounterPtr MessagesWritten;
-    NMonitoring::TDynamicCounters::TCounterPtr BytesWrittenCompressed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesWritten;
+    ::NMonitoring::TDynamicCounters::TCounterPtr MessagesWritten;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesWrittenCompressed;
 
-    NMonitoring::TDynamicCounters::TCounterPtr BytesInflightUncompressed;
-    NMonitoring::TDynamicCounters::TCounterPtr BytesInflightCompressed;
-    NMonitoring::TDynamicCounters::TCounterPtr BytesInflightTotal;
-    NMonitoring::TDynamicCounters::TCounterPtr MessagesInflight;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesInflightUncompressed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesInflightCompressed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesInflightTotal;
+    ::NMonitoring::TDynamicCounters::TCounterPtr MessagesInflight;
 
     //! Histograms reporting % usage of memory limit in time.
     //! Provides a histogram looking like: 10% : 100ms, 20%: 300ms, ... 50%: 200ms, ... 100%: 50ms
@@ -376,11 +379,11 @@ struct TWriterCounters : public TThrRefBase {
     //! mean that writer is close to overflow (or being overflown) for major periods of time
     //! 3 histograms stand for:
     //! Total memory usage:
-    NMonitoring::THistogramPtr TotalBytesInflightUsageByTime;
+    ::NMonitoring::THistogramPtr TotalBytesInflightUsageByTime;
     //! Memory usage by messages waiting for comression:
-    NMonitoring::THistogramPtr UncompressedBytesInflightUsageByTime;
+    ::NMonitoring::THistogramPtr UncompressedBytesInflightUsageByTime;
     //! Memory usage by compressed messages pending for write:
-    NMonitoring::THistogramPtr CompressedBytesInflightUsageByTime;
+    ::NMonitoring::THistogramPtr CompressedBytesInflightUsageByTime;
 };
 
 struct TReaderCounters : public TThrRefBase {
@@ -388,19 +391,19 @@ struct TReaderCounters : public TThrRefBase {
     using TPtr = TIntrusivePtr<TSelf>;
 
     TReaderCounters() = default;
-    explicit TReaderCounters(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters);
+    explicit TReaderCounters(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters);
 
-    NMonitoring::TDynamicCounters::TCounterPtr Errors;
-    NMonitoring::TDynamicCounters::TCounterPtr CurrentSessionLifetimeMs;
+    ::NMonitoring::TDynamicCounters::TCounterPtr Errors;
+    ::NMonitoring::TDynamicCounters::TCounterPtr CurrentSessionLifetimeMs;
 
-    NMonitoring::TDynamicCounters::TCounterPtr BytesRead;
-    NMonitoring::TDynamicCounters::TCounterPtr MessagesRead;
-    NMonitoring::TDynamicCounters::TCounterPtr BytesReadCompressed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesRead;
+    ::NMonitoring::TDynamicCounters::TCounterPtr MessagesRead;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesReadCompressed;
 
-    NMonitoring::TDynamicCounters::TCounterPtr BytesInflightUncompressed;
-    NMonitoring::TDynamicCounters::TCounterPtr BytesInflightCompressed;
-    NMonitoring::TDynamicCounters::TCounterPtr BytesInflightTotal;
-    NMonitoring::TDynamicCounters::TCounterPtr MessagesInflight;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesInflightUncompressed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesInflightCompressed;
+    ::NMonitoring::TDynamicCounters::TCounterPtr BytesInflightTotal;
+    ::NMonitoring::TDynamicCounters::TCounterPtr MessagesInflight;
 
     //! Histograms reporting % usage of memory limit in time.
     //! Provides a histogram looking like: 10% : 100ms, 20%: 300ms, ... 50%: 200ms, ... 100%: 50ms
@@ -409,11 +412,11 @@ struct TReaderCounters : public TThrRefBase {
     //! mean that read session is close to overflow (or being overflown) for major periods of time.
     //!
     //! Total memory usage.
-    NMonitoring::THistogramPtr TotalBytesInflightUsageByTime;
+    ::NMonitoring::THistogramPtr TotalBytesInflightUsageByTime;
     //! Memory usage by messages waiting that are ready to be received by user.
-    NMonitoring::THistogramPtr UncompressedBytesInflightUsageByTime;
+    ::NMonitoring::THistogramPtr UncompressedBytesInflightUsageByTime;
     //! Memory usage by compressed messages pending for decompression.
-    NMonitoring::THistogramPtr CompressedBytesInflightUsageByTime;
+    ::NMonitoring::THistogramPtr CompressedBytesInflightUsageByTime;
 };
 
 //! Partition stream.
@@ -946,8 +949,11 @@ private:
     bool Started = false;
     TAdaptiveLock StartLock;
 };
+
 IExecutor::TPtr CreateThreadPoolExecutorAdapter(std::shared_ptr<IThreadPool> threadPool); // Thread pool is expected to have been started.
 IExecutor::TPtr CreateThreadPoolExecutor(size_t threads);
+
+IExecutor::TPtr CreateSyncExecutor();
 
 //! Events for write session.
 struct TWriteSessionEvent {

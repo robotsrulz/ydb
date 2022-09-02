@@ -172,6 +172,13 @@ private:
     THashMap<ui64, TColumnOrder> Storage;
 };
 
+enum class EHiddenMode {
+    Disable /* "disable" */,
+    Force /* "force" */,
+    Debug /* "debug" */,
+    Auto /* "auto" */
+};
+
 struct TTypeAnnotationContext: public TThrRefBase {
     TIntrusivePtr<ITimeProvider> TimeProvider;
     TIntrusivePtr<IRandomProvider> RandomProvider;
@@ -200,7 +207,7 @@ struct TTypeAnnotationContext: public TThrRefBase {
     TAutoPtr<IGraphTransformer> CustomInstantTypeTransformer;
     bool Diagnostics = false;
     THashMap<ui64, ui32> NodeToOperationId; // UniqueId->PublicId translation
-    bool EvaluationInProgress = false;
+    ui64 EvaluationInProgress = 0;
     THashMap<ui64, const TTypeAnnotationNode*> ExpectedTypes;
     THashMap<ui64, std::vector<const TConstraintNode*>> ExpectedConstraints;
     THashMap<ui64, TColumnOrder> ExpectedColumnOrders;
@@ -220,6 +227,7 @@ struct TTypeAnnotationContext: public TThrRefBase {
     TString DqFallbackPolicy = "";
     bool StrictTableProps = true;
     bool JsonQueryReturnsJsonDocument = false;
+    bool YsonCastToString = true;
     ui32 FolderSubDirsLimit = 1000;
 
     // compatibility with v0 or raw s-expression code
@@ -234,6 +242,7 @@ struct TTypeAnnotationContext: public TThrRefBase {
     std::tuple<std::optional<ui64>, std::optional<double>, std::optional<TGUID>> CachedRandom;
 
     std::optional<bool> InitializeResult;
+    EHiddenMode HiddenMode = EHiddenMode::Disable;
 
     template <typename T>
     T GetRandom() const noexcept;

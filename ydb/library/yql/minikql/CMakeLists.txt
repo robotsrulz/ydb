@@ -6,6 +6,16 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(arrow)
+add_subdirectory(benchmark)
+add_subdirectory(codegen)
+add_subdirectory(comp_nodes)
+add_subdirectory(computation)
+add_subdirectory(dom)
+add_subdirectory(invoke_builtins)
+add_subdirectory(jsonpath)
+add_subdirectory(perf)
+add_subdirectory(ut)
 
 add_library(library-yql-minikql)
 target_compile_options(library-yql-minikql PRIVATE
@@ -26,10 +36,10 @@ target_link_libraries(library-yql-minikql PUBLIC
   ydb-library-binary_json
   ydb-library-dynumber
   yql-minikql-dom
+  yql-parser-pg_catalog
   yql-public-udf
   public-udf-tz
   library-yql-utils
-  yql-parser-pg_catalog
 )
 target_sources(library-yql-minikql PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/aligned_page_pool.cpp
@@ -51,6 +61,7 @@ target_sources(library-yql-minikql PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/mkql_type_builder.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/mkql_type_ops.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/mkql_unboxed_value_stream.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/pack_num.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/primes.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/minikql/watermark_tracker.cpp
 )

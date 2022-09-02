@@ -6,16 +6,16 @@ namespace NKikimr {
     namespace NVDiskMon {
 
         TLtcHisto::TLtcHisto(
-                const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters,
+                const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
                 const TString &name,
                 const TString &value,
-                TPDiskCategory::EDeviceType type)
+                NPDisk::EDeviceType type)
         {
             auto group = counters->GetSubgroup(name, value);
             ThroughputBytes = group->GetCounter("requestBytes", true);
 
             // Set up Histo
-            TIntrusivePtr<NMonitoring::TDynamicCounters> histoGroup;
+            TIntrusivePtr<::NMonitoring::TDynamicCounters> histoGroup;
             histoGroup = group->GetSubgroup("subsystem", "latency_histo");
 
             auto h = NMonitoring::ExplicitHistogram(GetCommonLatencyHistBounds(type));

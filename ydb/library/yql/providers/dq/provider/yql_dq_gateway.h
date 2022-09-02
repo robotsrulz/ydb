@@ -64,7 +64,7 @@ public:
     virtual void CloseSession(const TString& sessionId) = 0;
 
     virtual NThreading::TFuture<TResult>
-    ExecutePlan(const TString& sessionId, NDqs::IDqsExecutionPlanner& plan, const TVector<TString>& columns,
+    ExecutePlan(const TString& sessionId, NDqs::TPlan&& plan, const TVector<TString>& columns,
                 const THashMap<TString, TString>& secureParams, const THashMap<TString, TString>& graphParams,
                 const TDqSettings::TPtr& settings,
                 const TDqProgressWriter& progressWriter, const THashMap<TString, TString>& modulesMapping,
@@ -79,7 +79,7 @@ public:
     }
 };
 
-TIntrusivePtr<IDqGateway> CreateDqGateway(const TString& host, int port, int threads);
+TIntrusivePtr<IDqGateway> CreateDqGateway(const TString& host, int port);
 TIntrusivePtr<IDqGateway> CreateDqGateway(const NProto::TDqConfig& config);
 
 } // namespace NYql

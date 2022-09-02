@@ -70,6 +70,8 @@ public:
 
         int ArgC;
         char** ArgV;
+        int InitialArgC;
+        char** InitialArgV;
         NLastGetopt::TOpts* Opts;
         const NLastGetopt::TOptsParseResult* ParseResult;
         TVector<TString> Tokens;
@@ -110,6 +112,8 @@ public:
         TConfig(int argc, char** argv)
             : ArgC(argc)
             , ArgV(argv)
+            , InitialArgC(argc)
+            , InitialArgV(argv)
             , Opts(nullptr)
             , ParseResult(nullptr)
             , TabletId(0)
@@ -122,85 +126,74 @@ public:
             };
         }
 
-        bool IsHelpCommand() {
+        bool IsHelpCommand() const {
             TString lastArg = ArgV[ArgC - 1];
             return lastArg == "--help" || lastArg == "-h" || lastArg == "-?";
         }
 
-        bool IsSvnVersionCommand() {
+        bool IsYdbCommand() const {
+            for (int i = 0; i < InitialArgC; ++i) {
+                TString arg = InitialArgV[i];
+                if (arg.EndsWith("ydb") || arg.EndsWith("ydb.exe")) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        bool IsSvnVersionCommand() const {
             TString lastArg = ArgV[ArgC - 1];
             return lastArg == "--svnrevision" || lastArg == "-V";
         }
 
-        bool IsVersionCommand() {
-            TString lastArg = ArgV[ArgC - 1];
-            if (lastArg == "version") {
-                return true;
-            }
-            if (ArgC > 1) {
-                TString penultimateArg = ArgV[ArgC - 2];
-                if (penultimateArg == "version" && lastArg == "--semantic") {
-                    return true;
-                }
-            }
-            return false;
+        bool IsVersionCommand() const {
+            return HasArgs({ "version" });
         }
 
-        bool IsUpdateCommand() {
-            TString lastArg = ArgV[ArgC - 1];
-            if (lastArg == "update") {
-                return true;
-            }
-            if (ArgC > 1) {
-                TString penultimateArg = ArgV[ArgC - 2];
-                if (penultimateArg == "update" && (lastArg == "--force" || lastArg == "-f")) {
-                    return true;
-                }
-            }
-            return false;
+        bool IsVersionForceCheckCommand() const {
+            return HasArgs({ "version", "--check" });
         }
 
-        bool IsInitCommand() {
-            TString lastArg = ArgV[ArgC - 1];
-            if (lastArg == "init" && ArgC > 1) {
-                TString penultimateArg = ArgV[ArgC - 2];
-                if (penultimateArg.EndsWith("ydb") || penultimateArg.EndsWith("ydb.exe")) {
-                    return true;
-                }
-            }
-            return false;
+        bool IsSetVersionCheckCommand() const {
+            return HasArgs({ "version", "--enable-checks" }) || HasArgs({ "version", "--disable-checks" });
         }
 
-        bool IsProfileCommand() {
-            for (int i = 1; i < 3; ++i) {
-                if (ArgC <= i) {
-                    return false;
-                }
-                TString currentArg = ArgV[ArgC - i - 1];
-                if (currentArg == "profile") {
-                    return true;
-                }
-            }
-            return false;
+        bool IsUpdateCommand() const {
+            return HasArgs({ "update" });
         }
 
-        bool IsLicenseCommand() {
+        bool IsInitCommand() const {
+            return HasArgs({ "init" }) && !HasArgs({ "workload" });
+        }
+
+        bool IsProfileCommand() const {
+            return HasArgs({ "profile" });
+        }
+
+        bool IsLicenseCommand() const {
             TString lastArg = ArgV[ArgC - 1];
             return lastArg == "--license";
         }
 
-        bool IsCreditsCommand() {
+        bool IsCreditsCommand() const {
             TString lastArg = ArgV[ArgC - 1];
             return lastArg == "--credits";
         }
 
-        bool IsHelpExCommand() {
+        bool IsHelpExCommand() const {
             TString lastArg = ArgV[ArgC - 1];
             return lastArg == "--help-ex";
         }
 
-        bool IsSystemCommand() {
-            return IsHelpCommand() || IsSvnVersionCommand() || IsUpdateCommand() || IsVersionCommand()
+        // "System" commands doesn't need endpoint, database and authentication to operate
+        bool IsSystemCommand() const {
+            if (IsHelpCommand()) {
+                return true;
+            }
+            if (!IsYdbCommand()) {
+                return false;
+            }
+            return IsSvnVersionCommand() || IsUpdateCommand() || IsVersionCommand()
                 || IsInitCommand() || IsProfileCommand() || IsLicenseCommand() || IsCreditsCommand()
                 || IsHelpExCommand();
         }
@@ -239,17 +232,17 @@ public:
             if (minFailed || maxFailed) {
                 if (minSet && maxSet) {
                     if (minValue == maxValue) {
-                        throw TMissUseException() << "Command " << ArgV[0]
+                        throw TMisuseException() << "Command " << ArgV[0]
                             << " requires exactly " << minValue << " free arg(s).";
                     }
-                    throw TMissUseException() << "Command " << ArgV[0]
+                    throw TMisuseException() << "Command " << ArgV[0]
                         << " requires from " << minValue << " to " << maxValue << " free arg(s).";
                 }
                 if (minFailed) {
-                    throw TMissUseException() << "Command " << ArgV[0]
+                    throw TMisuseException() << "Command " << ArgV[0]
                         << " requires at least " << minValue << " free arg(s).";
                 }
-                throw TMissUseException() << "Command " << ArgV[0]
+                throw TMisuseException() << "Command " << ArgV[0]
                     << " requires at most " << maxValue << " free arg(s).";
             }
         }
@@ -297,6 +290,22 @@ public:
                 }
             }
             return result;
+        }
+
+        bool HasArgs(const std::vector<TString>& args) const {
+            for (const auto& arg : args) {
+                bool found = false;
+                for (int i = 0; i < InitialArgC; ++i) {
+                    if (InitialArgV[i] == arg) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    return false;
+                }
+            }
+            return true;
         }
     };
 
@@ -358,11 +367,11 @@ protected:
     TString Path;
 };
 
-class TCommandWithStreamName {
+class TCommandWithTopicName {
 protected:
-    void ParseStreamName(const TClientCommand::TConfig& config, const size_t argPos);
+    void ParseTopicName(const TClientCommand::TConfig& config, const size_t argPos);
 
-    TString StreamName;
+    TString TopicName;
 };
 
 }

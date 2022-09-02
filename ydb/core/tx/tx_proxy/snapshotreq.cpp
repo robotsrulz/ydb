@@ -269,7 +269,7 @@ public:
 
         TxProxyMon->TxPrepareResolveHgram->Collect((WallClockResolved - WallClockResolveStarted).MicroSeconds());
 
-        bool hasOlapTable = false;
+        bool hasColumnTable = false;
         for (const auto& entry : msg->Tables) {
             // N.B. we create all keys as a read operation
             ui32 access = 0;
@@ -291,9 +291,9 @@ public:
                 continue;
             }
 
-            if (entry.IsOlapTable) {
+            if (entry.IsColumnTable) {
                 // OLAP tables don't create snapshots explicitly
-                hasOlapTable = true;
+                hasColumnTable = true;
                 continue;
             }
 
@@ -328,14 +328,14 @@ public:
                 return Die(ctx);
             }
 
-            for (auto& partition : entry.KeyDescription->Partitions) {
+            for (auto& partition : entry.KeyDescription->GetPartitions()) {
                 auto& state = PerShardStates[partition.ShardId];
                 state.Tables.insert(entry.KeyDescription->TableId);
             }
         }
 
         if (PerShardStates.empty()) {
-            if (!hasOlapTable) {
+            if (!hasColumnTable) {
                 // No real (OLTP or OLAP) tables in the request so we can use current time as a fake PlanStep
                 PlanStep = ctx.Now().MilliSeconds();
 
@@ -1315,7 +1315,7 @@ public:
                 continue;
             }
 
-            if (entry.IsOlapTable) {
+            if (entry.IsColumnTable) {
                 // OLAP tables don't create snapshots explicitly
                 continue;
             }
@@ -1367,7 +1367,7 @@ public:
                 return Die(ctx);
             }
 
-            for (auto& partition : entry.KeyDescription->Partitions) {
+            for (auto& partition : entry.KeyDescription->GetPartitions()) {
                 auto& state = PerShardStates[partition.ShardId];
                 state.Tables.insert(entry.KeyDescription->TableId);
             }

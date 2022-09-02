@@ -155,13 +155,14 @@ private:
     }
 
     static bool AreAllStagesKqpPure(const TVector<TDqPhyStage>& stages) {
-        return std::all_of(stages.begin(), stages.end(), [](const auto& x) { return IsKqpPureLambda(x.Program()); });
+        // TODO: Avoid lambda analysis here, use sources/sinks for table interaction.
+        return std::all_of(stages.begin(), stages.end(), [](const auto& x) { return IsKqpPureLambda(x.Program()) && IsKqpPureInputs(x.Inputs()); });
     }
 
     static TMaybeNode<TExprList> BuildTxResults(const TKqlQueryResultList& results, TVector<TDqPhyStage>& stages,
         TExprContext& ctx)
     {
-        if (NLog::YqlLogger().NeedToLog(NLog::EComponent::ProviderKqp, NLog::ELevel::TRACE)) {
+        if (NYql::NLog::YqlLogger().NeedToLog(NYql::NLog::EComponent::ProviderKqp, NYql::NLog::ELevel::TRACE)) {
             TStringBuilder sb;
             sb << "-- BuildTxResults" << Endl;
             sb << "  results:" << Endl;
@@ -399,7 +400,7 @@ public:
 
         DataTxTransformer = TTransformationPipeline(&typesCtx)
             .AddServiceTransformers()
-            .Add(TExprLogTransformer::Sync("TxOpt", NLog::EComponent::ProviderKqp, NLog::ELevel::TRACE), "TxOpt")
+            .Add(TExprLogTransformer::Sync("TxOpt", NYql::NLog::EComponent::ProviderKqp, NYql::NLog::ELevel::TRACE), "TxOpt")
             .Add(*TypeAnnTransformer, "TypeAnnotation")
             .AddPostTypeAnnotation(/* forSubgraph */ true)
             .Add(CreateKqpBuildPhyStagesTransformer(/* allowDependantConsumers */ false), "BuildPhysicalStages")
@@ -409,7 +410,7 @@ public:
 
         ScanTxTransformer = TTransformationPipeline(&typesCtx)
             .AddServiceTransformers()
-            .Add(TExprLogTransformer::Sync("TxOpt", NLog::EComponent::ProviderKqp, NLog::ELevel::TRACE), "TxOpt")
+            .Add(TExprLogTransformer::Sync("TxOpt", NYql::NLog::EComponent::ProviderKqp, NYql::NLog::ELevel::TRACE), "TxOpt")
             .Add(*TypeAnnTransformer, "TypeAnnotation")
             .AddPostTypeAnnotation(/* forSubgraph */ true)
             .Add(CreateKqpBuildPhyStagesTransformer(config->SpillingEnabled()), "BuildPhysicalStages")

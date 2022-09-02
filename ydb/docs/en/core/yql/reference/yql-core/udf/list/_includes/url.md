@@ -51,7 +51,7 @@ Encode a UTF-8 string to the urlencoded format (`Url::Encode`) and back (`Url::D
 ```sql
 SELECT Url::Decode("http://ydb.tech/%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0"); 
   -- "http://ydb.tech/page"
-SELECT Url::Encode("http://ydb.tech/page");                                         
+SELECT Url::Encode("http://ydb.tech/page");
   -- "http://ydb.tech/%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0"
 ```
 
@@ -121,12 +121,12 @@ Get a component of the URL.
   Returns a second-level domain in most cases and a third-level domain for the hostnames like: ***.XXX.YY, where XXX is com, net, org, co, gov, or edu. You can redefine this list using an optional second argument
 
 * ```Url::GetOwner(String{Flags:AutoMap}) -> String```
-  Returns the domain that's most likely owned by an individual or organization. Unlike Url::GetSignificantDomain, it uses a special whitelist. Besides the ***.co.uk domains, it can return a third-level domain used by free hosting sites and blogs (for example: something.livejournal.com)s
+  Returns the domain that's most likely owned by an individual or organization. Unlike Url::GetSignificantDomain, it uses a special whitelist. Besides the ***.co.uk domains, it can return a third-level domain used by free hosting sites and blogs (for example: something.livejournal.com)
 
 **Examples**
 
 ```sql
-SELECT Url::GetScheme("https://ydb.tech");           -- "https://"
+SELECT Url::GetScheme("https://ydb.tech");       -- "https://"
 SELECT Url::GetDomain("http://www.ydb.tech", 2); -- "ydb.tech"
 ```
 
@@ -139,7 +139,7 @@ SELECT Url::GetDomain("http://www.ydb.tech", 2); -- "ydb.tech"
   Returns the passed domain without the "www." prefix (if any).
 
 * ```Url::CutWWW2(String?) -> String?```
-  Returns the passed domain without the prefixes like " www.", " www2.", " wwww777." (if any).
+  Returns the passed domain without the prefixes like "www.", "www2.", "wwww777." (if any).
 
 * ```Url::CutQueryStringA­ndFragment(String{Flags:AutoMap}) -> String```
   Returns a copy of the passed URL, stripping out all the CGI parameters and fragments ("?foo=bar" and/or "#baz").
@@ -148,7 +148,7 @@ SELECT Url::GetDomain("http://www.ydb.tech", 2); -- "ydb.tech"
 
 ```sql
 SELECT Url::CutScheme("http://www.ydb.tech"); -- "www.ydb.tech"
-SELECT Url::CutWWW("www.ydb.tech");           -- "yydb.tech"
+SELECT Url::CutWWW("www.ydb.tech");           -- "ydb.tech"
 ```
 
 ## ...Punycode... {#punycode}
@@ -166,7 +166,7 @@ SELECT Url::CutWWW("www.ydb.tech");           -- "yydb.tech"
 **Examples**
 
 ```sql
-SELECT Url::PunycodeToHostName("xn--80aniges7g.xn--j1aef"); -- "экзампл.ком"
+SELECT Url::PunycodeToHostName("xn--80aniges7g.xn--j1aef"); -- "example.com"
 ```
 
 ## ...Query... {#query}

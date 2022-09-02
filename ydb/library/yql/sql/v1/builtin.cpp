@@ -607,7 +607,7 @@ public:
 class TYqlPgConst : public TCallNode {
 public:
     TYqlPgConst(TPosition pos, const TVector<TNodePtr>& args)
-        : TCallNode(pos, "PgConst", 2, 2, args)
+        : TCallNode(pos, "PgConst", 2, -1, args)
     {
     }
 
@@ -627,11 +627,63 @@ public:
             Args[0] = value;
         }
 
+        if (Args.size() > 2) {
+            TVector<TNodePtr> typeModArgs;
+            typeModArgs.push_back(Args[1]);
+            for (ui32 i = 2; i < Args.size(); ++i) {
+                if (!Args[i]->IsLiteral()) {
+                    ctx.Error(Args[i]->GetPos()) << "Expecting literal";
+                    return false;
+                }
+
+                typeModArgs.push_back(BuildQuotedAtom(Args[i]->GetPos(), Args[i]->GetLiteralValue()));
+            }
+
+            Args.erase(Args.begin() + 2, Args.end());
+            Args.push_back(new TCallNodeImpl(Pos, "PgTypeMod", typeModArgs));
+        }
+
         return TCallNode::DoInit(ctx, src);
     }
 
     TNodePtr DoClone() const final {
         return new TYqlPgConst(Pos, CloneContainer(Args));
+    }
+};
+
+class TYqlPgCast : public TCallNode {
+public:
+    TYqlPgCast(TPosition pos, const TVector<TNodePtr>& args)
+        : TCallNode(pos, "PgCast", 2, -1, args)
+    {
+    }
+
+    bool DoInit(TContext& ctx, ISource* src) final {
+        if (!ValidateArguments(ctx)) {
+            return false;
+        }
+
+        if (Args.size() > 2) {
+            TVector<TNodePtr> typeModArgs;
+            typeModArgs.push_back(Args[1]);
+            for (ui32 i = 2; i < Args.size(); ++i) {
+                if (!Args[i]->IsLiteral()) {
+                    ctx.Error(Args[i]->GetPos()) << "Expecting literal";
+                    return false;
+                }
+
+                typeModArgs.push_back(BuildQuotedAtom(Args[i]->GetPos(), Args[i]->GetLiteralValue()));
+            }
+
+            Args.erase(Args.begin() + 2, Args.end());
+            Args.push_back(new TCallNodeImpl(Pos, "PgTypeMod", typeModArgs));
+        }
+
+        return TCallNode::DoInit(ctx, src);
+    }
+
+    TNodePtr DoClone() const final {
+        return new TYqlPgCast(Pos, CloneContainer(Args));
     }
 };
 
@@ -687,6 +739,7 @@ public:
         }
 
         Args[0] = BuildQuotedAtom(Args[0]->GetPos(), Args[0]->GetLiteralValue());
+        Args.insert(Args.begin() + 1, Q(Y()));
         return TCallNode::DoInit(ctx, src);
     }
 
@@ -2727,12 +2780,13 @@ struct TBuiltinFuncData {
             {"pgconst", BuildSimpleBuiltinFactoryCallback<TYqlPgConst>() },
             {"pgop", BuildSimpleBuiltinFactoryCallback<TYqlPgOp>() },
             {"pgcall", BuildSimpleBuiltinFactoryCallback<TYqlPgCall>() },
-            {"pgcast", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("PgCast", 2, 3) },
+            {"pgcast", BuildSimpleBuiltinFactoryCallback<TYqlPgCast>() },
             {"frompg", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("FromPg", 1, 1) },
             {"topg", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("ToPg", 1, 1) },
             {"pgor", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("PgOr", 2, 2) },
             {"pgand", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("PgAnd", 2, 2) },
             {"pgnot", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("PgNot", 1, 1) },
+            {"pgarray", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("PgArray", 1, -1) },
             {"typeof", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("TypeOf", 1, 1) },
             {"instanceof", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("InstanceOf", 1, 1) },
             {"datatype", BuildSimpleBuiltinFactoryCallback<TYqlDataType>() },
@@ -2847,6 +2901,7 @@ struct TBuiltinFuncData {
             {"nvl", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("Coalesce", 1, -1) },
             {"nanvl", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("Nanvl", 2, 2) },
             {"likely", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("Likely", 1, -1)},
+            {"assumestrict", BuildNamedArgcBuiltinFactoryCallback<TCallNodeImpl>("AssumeStrict", 1, 1)},
             {"random", BuildNamedDepsArgcBuiltinFactoryCallback<TCallNodeDepArgs>(0, "Random", 1, -1)},
             {"randomnumber", BuildNamedDepsArgcBuiltinFactoryCallback<TCallNodeDepArgs>(0, "RandomNumber", 1, -1)},
             {"randomuuid", BuildNamedDepsArgcBuiltinFactoryCallback<TCallNodeDepArgs>(0, "RandomUuid", 1, -1) },
@@ -2856,6 +2911,8 @@ struct TBuiltinFuncData {
             {"jointablerow", BuildSimpleBuiltinFactoryCallback<TTableRow<true>>() },
             {"tablerows", BuildSimpleBuiltinFactoryCallback<TTableRows>() },
             {"weakfield", BuildSimpleBuiltinFactoryCallback<TWeakFieldOp>()},
+
+            {"systemmetadata", BuildNamedArgcBuiltinFactoryCallback<TCallDirectRow>("SystemMetadata", 1, -1)},
 
             // Hint builtins
             {"grouping", BuildSimpleBuiltinFactoryCallback<TGroupingNode>()},
@@ -2929,14 +2986,23 @@ struct TBuiltinFuncData {
             {"bottomby", BuildAggrFuncFactoryCallback("BottomBy", "bottom_by_traits_factory", TOP_BY)},
 
             {"histogram", BuildAggrFuncFactoryCallback("AdaptiveWardHistogram", "histogram_adaptive_ward_traits_factory", HISTOGRAM, "Histogram")},
+            {"histogramcdf", BuildAggrFuncFactoryCallback("AdaptiveWardHistogramCDF", "histogram_cdf_adaptive_ward_traits_factory", HISTOGRAM, "HistogramCDF")},
             {"adaptivewardhistogram", BuildAggrFuncFactoryCallback("AdaptiveWardHistogram", "histogram_adaptive_ward_traits_factory", HISTOGRAM)},
+            {"adaptivewardhistogramcdf", BuildAggrFuncFactoryCallback("AdaptiveWardHistogramCDF", "histogram_cdf_adaptive_ward_traits_factory", HISTOGRAM)},
             {"adaptiveweighthistogram", BuildAggrFuncFactoryCallback("AdaptiveWeightHistogram", "histogram_adaptive_weight_traits_factory", HISTOGRAM)},
+            {"adaptiveweighthistogramcdf", BuildAggrFuncFactoryCallback("AdaptiveWeightHistogramCDF", "histogram_cdf_adaptive_weight_traits_factory", HISTOGRAM)},
             {"adaptivedistancehistogram", BuildAggrFuncFactoryCallback("AdaptiveDistanceHistogram", "histogram_adaptive_distance_traits_factory", HISTOGRAM)},
+            {"adaptivedistancehistogramcdf", BuildAggrFuncFactoryCallback("AdaptiveDistanceHistogramCDF", "histogram_cdf_adaptive_distance_traits_factory", HISTOGRAM)},
             {"blockwardhistogram", BuildAggrFuncFactoryCallback("BlockWardHistogram", "histogram_block_ward_traits_factory", HISTOGRAM)},
+            {"blockwardhistogramcdf", BuildAggrFuncFactoryCallback("BlockWardHistogramCDF", "histogram_cdf_block_ward_traits_factory", HISTOGRAM)},
             {"blockweighthistogram", BuildAggrFuncFactoryCallback("BlockWeightHistogram", "histogram_block_weight_traits_factory", HISTOGRAM)},
+            {"blockweighthistogramcdf", BuildAggrFuncFactoryCallback("BlockWeightHistogramCDF", "histogram_cdf_block_weight_traits_factory", HISTOGRAM)},
             {"linearhistogram", BuildAggrFuncFactoryCallback("LinearHistogram", "histogram_linear_traits_factory", LINEAR_HISTOGRAM)},
+            {"linearhistogramcdf", BuildAggrFuncFactoryCallback("LinearHistogramCDF", "histogram_cdf_linear_traits_factory", LINEAR_HISTOGRAM)},
             {"logarithmichistogram", BuildAggrFuncFactoryCallback("LogarithmicHistogram", "histogram_logarithmic_traits_factory", LINEAR_HISTOGRAM)},
+            {"logarithmichistogramcdf", BuildAggrFuncFactoryCallback("LogarithmicHistogramCDF", "histogram_cdf_logarithmic_traits_factory", LINEAR_HISTOGRAM)},
             {"loghistogram", BuildAggrFuncFactoryCallback("LogarithmicHistogram", "histogram_logarithmic_traits_factory", LINEAR_HISTOGRAM, "LogHistogram")},
+            {"loghistogramcdf", BuildAggrFuncFactoryCallback("LogarithmicHistogramCDF", "histogram_cdf_logarithmic_traits_factory", LINEAR_HISTOGRAM, "LogHistogramCDF")},
 
             {"hyperloglog", BuildAggrFuncFactoryCallback("HyperLogLog", "hyperloglog_traits_factory", COUNT_DISTINCT_ESTIMATE)},
             {"hll", BuildAggrFuncFactoryCallback("HyperLogLog", "hyperloglog_traits_factory", COUNT_DISTINCT_ESTIMATE, "HLL")},
@@ -3229,8 +3295,8 @@ TNodePtr BuildBuiltinFunc(TContext& ctx, TPosition pos, TString name, const TVec
 
         return BuildUdf(ctx, pos, nameSpace, name, makeUdfArgs());
     } else if (scriptType != NKikimr::NMiniKQL::EScriptType::Unknown) {
-        auto scriptName = NKikimr::NMiniKQL::ScriptTypeAsStr(scriptType);
-        return new TScriptUdf(pos, TString(scriptName), name, args);
+        auto scriptName = NKikimr::NMiniKQL::IsCustomPython(scriptType) ? nameSpace : TString(NKikimr::NMiniKQL::ScriptTypeAsStr(scriptType));
+        return new TScriptUdf(pos, scriptName, name, args);
     } else if (ns.empty()) {
         if (auto simpleType = LookupSimpleType(normalizedName, ctx.FlexibleTypes, /* isPgType = */ false)) {
             const auto type = *simpleType;
@@ -3240,8 +3306,12 @@ TNodePtr BuildBuiltinFunc(TContext& ctx, TPosition pos, TString name, const TVec
             }
 
             if (type.StartsWith("pg")) {
-                TVector<TNodePtr> pgConstArgs = args;
-                pgConstArgs.push_back(new TCallNodeImpl(pos, "PgType", { BuildQuotedAtom(pos, type.substr(2)) }));
+                TVector<TNodePtr> pgConstArgs;
+                if (!args.empty()) {
+                    pgConstArgs.push_back(args.front());
+                    pgConstArgs.push_back(new TCallNodeImpl(pos, "PgType", { BuildQuotedAtom(pos, type.substr(2), TNodeFlags::Default) }));
+                    pgConstArgs.insert(pgConstArgs.end(), args.begin() + 1, args.end());
+                }
                 return new TYqlPgConst(pos, pgConstArgs);
             } else if (type == "Void" || type == "EmptyList" || type == "EmptyDict") {
                 return new TCallNodeImpl(pos, type, 0, 0, args);

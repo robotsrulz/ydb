@@ -121,7 +121,7 @@ public:
 
         const ui64 alterVersion = (*tableInfo)->AlterVersion;
 
-        const ui64 subDomainPathId = context.SS->ResolveDomainId(txState->TargetPathId).LocalPathId;
+        const ui64 subDomainPathId = context.SS->ResolvePathIdForDomain(txState->TargetPathId).LocalPathId;
 
         for (const auto& shard: txState->Shards) {
             // Skip src shard
@@ -290,16 +290,17 @@ public:
         auto oldAggrStats = tableInfo->GetStats().Aggregated;
 
         // Delete the whole old partitioning and persist the whole new partitionig as the indexes have changed
-        context.SS->DeleteTablePartitioning(db, tableId, tableInfo);
+        context.SS->PersistTablePartitioningDeletion(db, tableId, tableInfo);
         context.SS->SetPartitioning(tableId, tableInfo, std::move(newPartitioning));
         context.SS->PersistTablePartitioning(db, tableId, tableInfo);
         context.SS->PersistTablePartitionStats(db, tableId, tableInfo);
+
         context.SS->TabletCounters->Simple()[COUNTER_TABLE_SHARD_ACTIVE_COUNT].Sub(allSrcShardIdxs.size());
         context.SS->TabletCounters->Simple()[COUNTER_TABLE_SHARD_INACTIVE_COUNT].Add(allSrcShardIdxs.size());
 
         if (!tableInfo->IsBackup && !tableInfo->IsShardsStatsDetached()) {
             auto newAggrStats = tableInfo->GetStats().Aggregated;
-            auto subDomainId = context.SS->ResolveDomainId(tableId);
+            auto subDomainId = context.SS->ResolvePathIdForDomain(tableId);
             auto subDomainInfo = context.SS->ResolveDomainInfo(tableId);
             subDomainInfo->AggrDiskSpaceUsage(context.SS, newAggrStats, oldAggrStats);
             if (subDomainInfo->CheckDiskSpaceQuotas(context.SS)) {
@@ -649,7 +650,12 @@ public:
             return false;
         }
 
-        if (tableInfo->GetExpectedPartitionCount() + count - 1 > tableInfo->GetMaxPartitionsCount()) {
+        auto srcShardIdx = tableInfo->GetPartitions()[srcPartitionIdx].ShardIdx;
+        const auto forceShardSplitSettings = context.SS->SplitSettings.GetForceShardSplitSettings();
+
+        if (tableInfo->GetExpectedPartitionCount() + count - 1 > tableInfo->GetMaxPartitionsCount() &&
+            !tableInfo->IsForceSplitBySizeShardIdx(srcShardIdx, forceShardSplitSettings))
+        {
             errStr = "Reached MaxPartitionsCount limit: " + ToString(tableInfo->GetMaxPartitionsCount());
             return false;
         }
@@ -677,7 +683,6 @@ public:
 
         op.SplitDescription = std::make_shared<NKikimrTxDataShard::TSplitMergeDescription>();
         auto* srcRange = op.SplitDescription->AddSourceRanges();
-        auto srcShardIdx = tableInfo->GetPartitions()[srcPartitionIdx].ShardIdx;
         srcRange->SetShardIdx(ui64(srcShardIdx.GetLocalId()));
         srcRange->SetTabletID(ui64(context.SS->ShardInfos[srcShardIdx].TabletID));
         srcRange->SetKeyRangeEnd(tableInfo->GetPartitions()[srcPartitionIdx].EndOfRange);
@@ -899,7 +904,7 @@ public:
             THashMap<ui32, ui32> familyRooms;
             storageRooms.emplace_back(0);
 
-            if (!context.SS->GetBindingsRooms(path.DomainId(), tableInfo->PartitionConfig(), storageRooms, familyRooms, channelsBinding, errStr)) {
+            if (!context.SS->GetBindingsRooms(path.GetPathIdForDomain(), tableInfo->PartitionConfig(), storageRooms, familyRooms, channelsBinding, errStr)) {
                 errStr = TString("database doesn't have required storage pools to create tablet with storage config, details: ") + errStr;
                 result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
                 return result;
@@ -914,8 +919,8 @@ public:
                 protoFamily->SetId(familyRoom.first);
                 protoFamily->SetRoom(familyRoom.second);
             }
-        } else if (context.SS->IsCompatibleChannelProfileLogic(path.DomainId(), tableInfo)) {
-            if (!context.SS->GetChannelsBindings(path.DomainId(), tableInfo, channelsBinding, errStr)) {
+        } else if (context.SS->IsCompatibleChannelProfileLogic(path.GetPathIdForDomain(), tableInfo)) {
+            if (!context.SS->GetChannelsBindings(path.GetPathIdForDomain(), tableInfo, channelsBinding, errStr)) {
                 result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
                 return result;
             }
@@ -949,6 +954,10 @@ public:
             result->SetError(NKikimrScheme::StatusInvalidParameter, "Invalid request: only 1->N or N->1 are supported");
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxSplitTablePartition, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         ///////////
         /// Accept operation
@@ -956,7 +965,7 @@ public:
 
         auto guard = context.DbGuard();
         context.MemChanges.GrabNewTxState(context.SS, OperationId);
-        context.MemChanges.GrabDomain(context.SS, path.DomainId());
+        context.MemChanges.GrabDomain(context.SS, path.GetPathIdForDomain());
         context.MemChanges.GrabPath(context.SS, path->PathId);
         context.MemChanges.GrabTable(context.SS, path->PathId);
 

@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(blobstorage-vdisk-defrag)
 target_link_libraries(blobstorage-vdisk-defrag PUBLIC
@@ -13,6 +14,7 @@ target_link_libraries(blobstorage-vdisk-defrag PUBLIC
   yutil
   ydb-core-base
   blobstorage-vdisk-common
+  blobstorage-vdisk-hulldb
 )
 target_sources(blobstorage-vdisk-defrag PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/blobstorage/vdisk/defrag/defrag_actor.cpp

@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(run)
 target_compile_options(run PRIVATE
@@ -36,6 +37,7 @@ target_link_libraries(run PUBLIC
   library-cpp-svnversion
   ydb-core-actorlib_impl
   ydb-core-base
+  ydb-core-blob_depot
   ydb-core-blobstorage
   core-blobstorage-backpressure
   core-blobstorage-nodewarden
@@ -107,6 +109,8 @@ target_link_libraries(run PUBLIC
   ydb-library-pdisk_io
   ydb-library-security
   yql-minikql-comp_nodes
+  yql-minikql-computation
+  providers-pq-cm_client
   udf-service-exception_policy
   public-lib-base
   lib-deprecated-client
@@ -114,6 +118,7 @@ target_link_libraries(run PUBLIC
   ydb-services-cms
   ydb-services-datastreams
   ydb-services-discovery
+  ydb-services-fq
   ydb-services-kesus
   ydb-services-local_discovery
   ydb-services-monitoring

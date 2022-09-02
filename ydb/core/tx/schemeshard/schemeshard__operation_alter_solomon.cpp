@@ -287,8 +287,12 @@ public:
         }
 
         TChannelsBindings channelsBinding;
-        if (!context.SS->ResolveSolomonChannels(channelProfileId, path.DomainId(), channelsBinding)) {
+        if (!context.SS->ResolveSolomonChannels(channelProfileId, path.GetPathIdForDomain(), channelsBinding)) {
             result->SetError(NKikimrScheme::StatusInvalidParameter, "Unable to construct channel binding with the storage pool");
+            return result;
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxAlterSolomonVolume, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
             return result;
         }
 

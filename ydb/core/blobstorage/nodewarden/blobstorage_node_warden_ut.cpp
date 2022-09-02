@@ -150,7 +150,7 @@ void SetupServices(TTestActorRuntime &runtime, TString extraPath, TIntrusivePtr<
         app.SetChannels(std::move(channelProfiles));
     }
 
-    ui32 groupId = TGroupID(GroupConfigurationTypeStatic, DOMAIN_ID, 0).GetRaw();
+    ui32 groupId = TGroupID(EGroupConfigurationType::Static, DOMAIN_ID, 0).GetRaw();
     for (ui32 nodeIndex = 0; nodeIndex < runtime.GetNodeCount(); ++nodeIndex) {
         SetupStateStorage(runtime, nodeIndex, stateStorageGroup);
 
@@ -257,7 +257,7 @@ void SetupServices(TTestActorRuntime &runtime, TString extraPath, TIntrusivePtr<
 
     ui64 defaultStateStorageGroup = runtime.GetAppData(0).DomainsInfo->GetDefaultStateStorageGroup(DOMAIN_ID);
     CreateTestBootstrapper(runtime, CreateTestTabletInfo(MakeBSControllerID(defaultStateStorageGroup),
-        TTabletTypes::FLAT_BS_CONTROLLER, TBlobStorageGroupType::ErasureMirror3, groupId),
+        TTabletTypes::BSController, TBlobStorageGroupType::ErasureMirror3, groupId),
         &CreateFlatBsController);
 
     SetupBoxAndStoragePool(runtime, runtime.AllocateEdgeActor(), domainId);
@@ -461,8 +461,8 @@ Y_UNIT_TEST_SUITE(TBlobStorageWardenTest) {
         ui64 tabletId = 1234;
         ui32 generation = 1;
         BlockGroup(runtime, sender0, tabletId, groupId, generation, true);
-        BlockGroup(runtime, sender0, tabletId, groupId, generation, true, NKikimrProto::EReplyStatus::RACE);
-        BlockGroup(runtime, sender0, tabletId, groupId, generation-1, true, NKikimrProto::EReplyStatus::RACE);
+        BlockGroup(runtime, sender0, tabletId, groupId, generation, true, NKikimrProto::EReplyStatus::ALREADY);
+        BlockGroup(runtime, sender0, tabletId, groupId, generation-1, true, NKikimrProto::EReplyStatus::ALREADY);
 
         auto describePool = DescribeStoragePool(runtime, DOMAIN_ID, "test_storage");
         {

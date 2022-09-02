@@ -46,12 +46,11 @@ dsn := "grpcs://ydb.serverless.yandexcloud.net:2135/?database=/ru-central1/b1g8s
 // IAM token
 token := "t1.9euelZrOy8aVmZKJm5HGjceMkMeVj-..."
 // creating a DB connection object, which is the input point for YDB services
-db, err := ydb.Open(
-  ctx,
+db, err := ydb.Open(ctx,
   dsn,
 //  yc.WithInternalCA(), // using Yandex.Cloud certificates
   ydb.WithAccessTokenCredentials(token), // token-based authentication
-//  ydb.WithAnonimousCredentials(token), // anonymous authentication (for example, in docker ydb)
+//  ydb.WithAnonimousCredentials(), // anonymous authentication (for example, in docker ydb)
 //  yc.WithMetadataCredentials(token), // authentication from inside a VM in Yandex.Cloud or a function in Yandex Functions
 //  yc.WithServiceAccountKeyFileCredentials("~/.ydb/sa.json"), // authentication in Yandex.Cloud using a service account file
 //  environ.WithEnvironCredentials(ctx), // authentication using environment variables
@@ -155,9 +154,6 @@ err := db.Table().Do(
       `,
       table.NewQueryParameters(
         table.ValueParam("$seriesID", types.Uint64Value(1)), // substitution in the query condition
-      ),
-      options.WithQueryCachePolicy(
-        options.WithQueryCachePolicyKeepInCache(), // enabling the server cache of compiled queries
       ),
     )
     if err != nil {

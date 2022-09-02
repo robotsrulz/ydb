@@ -7,12 +7,14 @@
 #include <ydb/core/yq/libs/control_plane_storage/schema.h>
 #include <ydb/core/yq/libs/db_schema/db_schema.h>
 
+#include <library/cpp/protobuf/interop/cast.h>
+
 namespace NYq {
 
 namespace {
 
 struct TTaskInternal {
-    TEvControlPlaneStorage::TTask Task;
+    TTask Task;
     TRetryLimiter RetryLimiter;
     bool ShouldAbortTask = false;
     TString TablePathPrefix;
@@ -22,6 +24,36 @@ struct TTaskInternal {
     TInstant Deadline;
     TString TenantName;
 };
+
+    TString GetServiceAccountId(const YandexQuery::IamAuth& auth) {
+        return auth.has_service_account()
+                ? auth.service_account().id()
+                : TString{};
+    }
+
+    TString ExtractServiceAccountId(const YandexQuery::Connection& c) {
+        switch (c.content().setting().connection_case()) {
+        case YandexQuery::ConnectionSetting::kYdbDatabase: {
+            return GetServiceAccountId(c.content().setting().ydb_database().auth());
+        }
+        case YandexQuery::ConnectionSetting::kDataStreams: {
+            return GetServiceAccountId(c.content().setting().data_streams().auth());
+        }
+        case YandexQuery::ConnectionSetting::kObjectStorage: {
+            return GetServiceAccountId(c.content().setting().object_storage().auth());
+        }
+        case YandexQuery::ConnectionSetting::kMonitoring: {
+            return GetServiceAccountId(c.content().setting().monitoring().auth());
+        }
+        case YandexQuery::ConnectionSetting::kClickhouseCluster: {
+            return GetServiceAccountId(c.content().setting().clickhouse_cluster().auth());
+        }
+        // Do not replace with default. Adding a new connection should cause a compilation error
+        case YandexQuery::ConnectionSetting::CONNECTION_NOT_SET:
+        break;
+        }
+        return {};
+    }
 
 std::pair<TString, NYdb::TParams> MakeSql(const TTaskInternal& taskInternal, const TInstant& nowTimestamp, const TInstant& taskLeaseUntil) {
     const auto& task = taskInternal.Task;
@@ -132,24 +164,61 @@ std::tuple<TString, NYdb::TParams, std::function<std::pair<TString, NYdb::TParam
     return std::make_tuple(query.Sql, query.Params, prepareParams);
 }
 
+TDuration ExtractLimit(const TTask& task) {
+    const auto& limits = task.Query.content().Getlimits();
+
+    auto userExecutionLimit = TDuration::Zero();
+
+    switch (limits.timeout_case()) {
+        case YandexQuery::Limits::TimeoutCase::kExecutionDeadline: {
+            auto now = TInstant::Now();
+            auto deadline = NProtoInterop::CastFromProto(limits.execution_deadline());
+            if (!deadline) {
+                break;
+            }
+            if (deadline <= now) {
+                userExecutionLimit = TDuration::MilliSeconds(1);
+            } else {
+                userExecutionLimit = deadline - now;
+            }
+            break;
+        }
+        case YandexQuery::Limits::TimeoutCase::kExecutionTimeout: {
+            userExecutionLimit = NProtoInterop::CastFromProto(limits.execution_timeout());
+            break;
+        }
+        default:
+            break;
+    }
+
+    auto systemExecutionLimit = NProtoInterop::CastFromProto(task.Internal.execution_ttl());
+    auto executionLimit = std::min(userExecutionLimit, systemExecutionLimit);
+    if (systemExecutionLimit == TDuration::Zero()) {
+        executionLimit = userExecutionLimit;
+    } else if (userExecutionLimit == TDuration::Zero()) {
+        executionLimit = systemExecutionLimit;
+    }
+    return executionLimit;
+}
+
 void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetTaskRequest::TPtr& ev)
 {
     TInstant startTime = TInstant::Now();
     TRequestCountersPtr requestCounters = Counters.GetCommonCounters(RTC_GET_TASK);
     requestCounters->InFly->Inc();
 
-    TEvControlPlaneStorage::TEvGetTaskRequest& request = *ev->Get();
-    const TString owner = request.Owner;
-    const TString hostName = request.HostName;
-    const TString tenantName = request.TenantName;
+    auto& request = ev->Get()->Request;
+    const TString owner = request.owner_id();
+    const TString hostName = request.host();
+    const TString tenantName = request.tenant();
     const ui64 tasksBatchSize = Config.Proto.GetTasksBatchSize();
     const ui64 numTasksProportion = Config.Proto.GetNumTasksProportion();
 
-    CPS_LOG_T("GetTaskRequest: " << owner << " " << hostName);
+    CPS_LOG_T("GetTaskRequest: {" << request.DebugString() << "}");
 
     NYql::TIssues issues = ValidateGetTask(owner, hostName);
     if (issues) {
-        CPS_LOG_D("GetTaskRequest, validation failed: " << owner << " " << hostName << " " << issues.ToString());
+        CPS_LOG_W("GetTaskRequest: {" << request.DebugString() << "} validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvGetTaskResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(GetTaskRequest, owner, hostName, delta, false);
@@ -158,7 +227,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetTaskRequ
 
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
 
-    auto response = std::make_shared<std::tuple<TVector<TEvControlPlaneStorage::TTask>, TString>>(); //tasks, owner
+    auto response = std::make_shared<std::tuple<TVector<TTask>, TString>>(); //tasks, owner
 
     TSqlQueryBuilder queryBuilder(YdbConnection->TablePathPrefix, "GetTask(read stale ro)");
     auto now = TInstant::Now();
@@ -173,7 +242,8 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetTaskRequ
     );
 
     auto responseTasks = std::make_shared<TResponseTasks>();
-    auto prepareParams = [=, actorSystem=NActors::TActivationContext::ActorSystem(), responseTasks=responseTasks](const TVector<TResultSet>& resultSets) mutable {
+
+    auto prepareParams = [=, rootCounters=Counters.Counters, actorSystem=NActors::TActivationContext::ActorSystem(), responseTasks=responseTasks](const TVector<TResultSet>& resultSets) mutable {
         TVector<TTaskInternal> tasks;
         TVector<TPickTaskParams> pickTaskParams;
         const auto now = TInstant::Now();
@@ -203,12 +273,14 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetTaskRequ
             auto lastSeenAt = parser.ColumnParser(LAST_SEEN_AT_COLUMN_NAME).GetOptionalTimestamp().GetOrElse(TInstant::Zero());
 
             if (previousOwner) { // task lease timeout case only, other cases are updated at ping time
-                CPS_LOG_AS_D(*actorSystem, "Task (Query): " << task.QueryId <<  " Lease TIMEOUT, RetryCounterUpdatedAt " << taskInternal.RetryLimiter.RetryCounterUpdatedAt
+                CPS_LOG_AS_T(*actorSystem, "Task (Query): " << task.QueryId <<  " Lease TIMEOUT, RetryCounterUpdatedAt " << taskInternal.RetryLimiter.RetryCounterUpdatedAt
                     << " LastSeenAt: " << lastSeenAt);
                 taskInternal.ShouldAbortTask = !taskInternal.RetryLimiter.UpdateOnRetry(lastSeenAt, Config.TaskLeaseRetryPolicy, now);
             }
 
-            CPS_LOG_AS_D(*actorSystem, "Task (Query): " << task.QueryId <<  " RetryRate: " << taskInternal.RetryLimiter.RetryRate
+            *rootCounters->GetSubgroup("scope", task.Scope)->GetSubgroup("query_id", task.QueryId)->GetCounter("RetryCount") = taskInternal.RetryLimiter.RetryCount;
+
+            CPS_LOG_AS_T(*actorSystem, "Task (Query): " << task.QueryId <<  " RetryRate: " << taskInternal.RetryLimiter.RetryRate
                 << " RetryCounter: " << taskInternal.RetryLimiter.RetryCount << " At: " << taskInternal.RetryLimiter.RetryCounterUpdatedAt
                 << (taskInternal.ShouldAbortTask ? " ABORTED" : ""));
         }
@@ -229,7 +301,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetTaskRequ
     };
 
     const auto query = queryBuilder.Build();
-    auto [readStatus, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo, TTxSettings::StaleRO());
+    auto [readStatus, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo, TTxSettings::StaleRO());
     auto result = readStatus.Apply(
         [=,
         resultSets=resultSets,
@@ -271,7 +343,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetTaskRequ
             auto status = MakeFuture(TStatus{EStatus::SUCCESS, std::move(issues)});
             try {
                 future.GetValue();
-                TVector<TEvControlPlaneStorage::TTask> tasks;
+                TVector<TTask> tasks;
                 for (const auto& [_, task] : responseTasks->GetTasksNonBlocking()) {
                     tasks.emplace_back(task);
                 }
@@ -284,11 +356,67 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetTaskRequ
         });
     });
 
-    auto prepare = [response] { return *response; };
-    auto success = SendResponseTuple
-        <TEvControlPlaneStorage::TEvGetTaskResponse,
-        std::tuple<TVector<TEvControlPlaneStorage::TTask>, TString>> //tasks, owner
-        ("GetTaskRequest",
+    auto prepare = [response] {
+        Fq::Private::GetTaskResult result;
+        const auto& tasks = std::get<0>(*response);
+
+        for (const auto& task : tasks) {
+            const auto& queryType = task.Query.content().type();
+            if (queryType != YandexQuery::QueryContent::ANALYTICS && queryType != YandexQuery::QueryContent::STREAMING) { //TODO: fix
+                ythrow yexception()
+                    << "query type "
+                    << YandexQuery::QueryContent::QueryType_Name(queryType)
+                    << " unsupported";
+            }
+
+
+
+            auto* newTask = result.add_tasks();
+            newTask->set_query_type(queryType);
+            newTask->set_execute_mode(task.Query.meta().execute_mode());
+            newTask->set_state_load_mode(task.Internal.state_load_mode());
+            auto* queryId = newTask->mutable_query_id();
+            queryId->set_value(task.Query.meta().common().id());
+            newTask->set_streaming(queryType == YandexQuery::QueryContent::STREAMING);
+            newTask->set_text(task.Query.content().text());
+            *newTask->mutable_connection() = task.Internal.connection();
+            *newTask->mutable_binding() = task.Internal.binding();
+            newTask->set_user_token(task.Internal.token());
+            newTask->set_user_id(task.Query.meta().common().created_by());
+            newTask->set_generation(task.Generation);
+            newTask->set_status(task.Query.meta().status());
+            *newTask->mutable_created_topic_consumers() = task.Internal.created_topic_consumers();
+            newTask->mutable_sensor_labels()->insert({"cloud_id", task.Internal.cloud_id()});
+            newTask->mutable_sensor_labels()->insert({"scope", task.Scope});
+            newTask->set_automatic(task.Query.content().automatic());
+            newTask->set_query_name(task.Query.content().name());
+            *newTask->mutable_deadline() = NProtoInterop::CastToProto(task.Deadline);
+            newTask->mutable_disposition()->CopyFrom(task.Internal.disposition());
+            newTask->set_result_limit(task.Internal.result_limit());
+            *newTask->mutable_execution_limit() = NProtoInterop::CastToProto(ExtractLimit(task));
+            *newTask->mutable_request_started_at() = task.Query.meta().started_at();
+
+            for (const auto& connection: task.Internal.connection()) {
+                const auto serviceAccountId = ExtractServiceAccountId(connection);
+                if (!serviceAccountId) {
+                        continue;
+                }
+                auto* account = newTask->add_service_accounts();
+                account->set_value(serviceAccountId);
+            }
+
+            *newTask->mutable_dq_graph() = task.Internal.dq_graph();
+            newTask->set_dq_graph_index(task.Internal.dq_graph_index());
+            *newTask->mutable_dq_graph_compressed() = task.Internal.dq_graph_compressed();
+
+            *newTask->mutable_result_set_meta() = task.Query.result_set_meta();
+            newTask->set_scope(task.Scope);
+        }
+
+        return result;
+    };
+    auto success = SendResponse<TEvControlPlaneStorage::TEvGetTaskResponse, Fq::Private::GetTaskResult>
+        ("GetTaskRequest - GetTaskResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),

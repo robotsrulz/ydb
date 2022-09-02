@@ -11,12 +11,12 @@ add_library(contrib-restricted-uriparser)
 target_compile_options(contrib-restricted-uriparser PRIVATE
   -DURI_LIBRARY_BUILD
   -DURI_VISIBILITY
+  -Wno-everything
 )
 target_include_directories(contrib-restricted-uriparser PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/restricted/uriparser/include
 )
 target_include_directories(contrib-restricted-uriparser PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/restricted/uriparser/include
   ${CMAKE_SOURCE_DIR}/contrib/restricted/uriparser
 )
 target_link_libraries(contrib-restricted-uriparser PUBLIC

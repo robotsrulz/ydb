@@ -143,6 +143,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpDropColumnTable:
         case NKikimrSchemeOp::ESchemeOpDropSequence:
         case NKikimrSchemeOp::ESchemeOpDropReplication:
+        case NKikimrSchemeOp::ESchemeOpDropBlobDepot:
             return *modifyScheme.MutableDrop()->MutableName();
 
         case NKikimrSchemeOp::ESchemeOpAlterTable:
@@ -300,6 +301,9 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpMoveTableIndex:
             Y_FAIL("no implementation for ESchemeOpMoveTableIndex");
 
+        case NKikimrSchemeOp::ESchemeOpMoveIndex:
+            Y_FAIL("no implementation for ESchemeOpMoveIndex");
+
         case NKikimrSchemeOp::ESchemeOpCreateSequence:
         case NKikimrSchemeOp::ESchemeOpAlterSequence:
             return *modifyScheme.MutableSequence()->MutableName();
@@ -307,6 +311,10 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpCreateReplication:
         case NKikimrSchemeOp::ESchemeOpAlterReplication:
             return *modifyScheme.MutableReplication()->MutableName();
+
+        case NKikimrSchemeOp::ESchemeOpCreateBlobDepot:
+        case NKikimrSchemeOp::ESchemeOpAlterBlobDepot:
+            return *modifyScheme.MutableBlobDepot()->MutableName();
         }
     }
 
@@ -546,6 +554,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpAlterColumnTable:
         case NKikimrSchemeOp::ESchemeOpAlterSequence:
         case NKikimrSchemeOp::ESchemeOpAlterReplication:
+        case NKikimrSchemeOp::ESchemeOpAlterBlobDepot:
         {
             auto toResolve = TPathToResolve(pbModifyScheme.GetOperationType());
             toResolve.Path = Merge(workingDir, SplitPath(GetPathNameForScheme(pbModifyScheme)));
@@ -563,7 +572,8 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpDropColumnStore:
         case NKikimrSchemeOp::ESchemeOpDropColumnTable:
         case NKikimrSchemeOp::ESchemeOpDropSequence:
-        case NKikimrSchemeOp::ESchemeOpDropReplication: {
+        case NKikimrSchemeOp::ESchemeOpDropReplication:
+        case NKikimrSchemeOp::ESchemeOpDropBlobDepot: {
             auto toResolve = TPathToResolve(pbModifyScheme.GetOperationType());
             toResolve.Path = Merge(workingDir, SplitPath(GetPathNameForScheme(pbModifyScheme)));
             toResolve.RequiredAccess = NACLib::EAccessRights::RemoveSchema;
@@ -620,6 +630,7 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
         case NKikimrSchemeOp::ESchemeOpCreateSolomonVolume:
         case NKikimrSchemeOp::ESchemeOpCreateSequence:
         case NKikimrSchemeOp::ESchemeOpCreateReplication:
+        case NKikimrSchemeOp::ESchemeOpCreateBlobDepot:
         {
             auto toResolve = TPathToResolve(pbModifyScheme.GetOperationType());
             toResolve.Path = workingDir;
@@ -658,6 +669,16 @@ struct TBaseSchemeReq: public TActorBootstrapped<TDerived> {
                 auto dstDir = ToString(ExtractParent(descr.GetDstPath()));
                 toResolve.Path = SplitPath(dstDir);
                 toResolve.RequiredAccess = NACLib::EAccessRights::CreateTable;
+                ResolveForACL.push_back(toResolve);
+            }
+            break;
+        }
+        case NKikimrSchemeOp::ESchemeOpMoveIndex: {
+            auto& descr = pbModifyScheme.GetMoveIndex();
+            {
+                auto toResolve = TPathToResolve(pbModifyScheme.GetOperationType());
+                toResolve.Path = SplitPath(descr.GetTablePath());
+                toResolve.RequiredAccess = NACLib::EAccessRights::AlterSchema;
                 ResolveForACL.push_back(toResolve);
             }
             break;

@@ -38,10 +38,12 @@ TDuration GetDuration(const TString& value, const TDuration& defaultValue);
 
 NConfig::TControlPlaneStorageConfig FillDefaultParameters(NConfig::TControlPlaneStorageConfig config);
 
-bool DoesPingTaskUpdateQueriesTable(const TEvControlPlaneStorage::TEvPingTaskRequest* request);
+bool DoesPingTaskUpdateQueriesTable(const Fq::Private::PingTaskRequest& request);
 
 NYdb::TValue PackItemsToList(const TVector<NYdb::TValue>& items);
 
 std::pair<TString, TString> SplitId(const TString& id, char delim = '-');
+
+bool IsValidIntervalUnit(const TString& unit);
 
 } // namespace NYq

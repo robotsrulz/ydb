@@ -22,7 +22,7 @@ public:
 
     static TStockWorkloadGenerator* New(const TStockWorkloadParams* params) {
         if (!validateDbPath(params->DbPath)) {
-            return nullptr;
+            throw yexception() << "Invalid path to database." << Endl;
         }
         return new TStockWorkloadGenerator(params);
     }
@@ -33,7 +33,11 @@ public:
 
     TQueryInfoList GetInitialData() override;
 
+    std::string GetCleanDDLQueries() const override;
+
     TQueryInfoList GetWorkload(int type) override;
+
+    TStockWorkloadParams* GetParams() override;
 
     enum class EType {
         InsertRandomOrder,
@@ -62,16 +66,6 @@ private:
     TProductsQuantity GenerateOrder(unsigned int productCountInOrder, int quantity);
 
     TStockWorkloadGenerator(const TStockWorkloadParams* params);
-
-    static bool validateDbPath(const std::string& path) {
-        for (size_t i = 0; i < path.size(); ++i) {
-            char c = path[i];
-            if (!std::isalnum(c) && c != '/' && c != '_' && c != '-') {
-                return false;
-            }
-        }
-        return true;
-    }
 
     TQueryInfo FillStockData() const;
 

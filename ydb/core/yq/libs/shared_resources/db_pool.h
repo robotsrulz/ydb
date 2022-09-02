@@ -21,15 +21,17 @@ public:
 
     NActors::TActorId GetNextActor();
 
+    TString TablePathPrefix;
+
 private:
     friend class TDbPoolMap;
 
-    TDbPool(ui32 sessionsCount, const NYdb::NTable::TTableClient& tableClient, const NMonitoring::TDynamicCounterPtr& counters);
+    TDbPool(ui32 sessionsCount, const NYdb::NTable::TTableClient& tableClient, const ::NMonitoring::TDynamicCounterPtr& counters, const TString& tablePathPrefix);
 
     TMutex Mutex;
     TVector<NActors::TActorId> Actors;
     ui32 Index = 0;
-    const NMonitoring::TDynamicCounterPtr Counters;
+    const ::NMonitoring::TDynamicCounterPtr Counters;
 };
 
 enum class EDbPoolId {
@@ -41,7 +43,7 @@ class TDbPoolMap: public TThrRefBase {
 public:
     using TPtr = TIntrusivePtr<TDbPoolMap>;
 
-    TDbPool::TPtr GetOrCreate(EDbPoolId poolId, ui32 sessionsCount);
+    TDbPool::TPtr GetOrCreate(EDbPoolId poolId, ui32 sessionsCount, const TString& tablePathPrefix);
 
 private:
     friend class TDbPoolHolder;
@@ -49,7 +51,7 @@ private:
     TDbPoolMap(const NYq::NConfig::TDbPoolConfig& config,
                NYdb::TDriver driver,
                const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-               const NMonitoring::TDynamicCounterPtr& counters);
+               const ::NMonitoring::TDynamicCounterPtr& counters);
 
     void Reset(const NYq::NConfig::TDbPoolConfig& config);
     TMutex Mutex;
@@ -58,7 +60,7 @@ private:
     THashMap<EDbPoolId, TDbPool::TPtr> Pools;
     THolder<NYdb::NTable::TTableClient> TableClient;
     NKikimr::TYdbCredentialsProviderFactory CredentialsProviderFactory;
-    const NMonitoring::TDynamicCounterPtr Counters;
+    const ::NMonitoring::TDynamicCounterPtr Counters;
 };
 
 class TDbPoolHolder: public TThrRefBase {
@@ -68,12 +70,12 @@ public:
         const NYq::NConfig::TDbPoolConfig& config,
         const NYdb::TDriver& driver,
         const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-        const NMonitoring::TDynamicCounterPtr& counters);
+        const ::NMonitoring::TDynamicCounterPtr& counters);
 
     ~TDbPoolHolder();
 
     void Reset(const NYq::NConfig::TDbPoolConfig& config);
-    TDbPool::TPtr GetOrCreate(EDbPoolId poolId, ui32 sessionsCount);
+    TDbPool::TPtr GetOrCreate(EDbPoolId poolId, ui32 sessionsCount, const TString& tablePathPrefix);
     NYdb::TDriver& GetDriver();
     TDbPoolMap::TPtr Get();
 

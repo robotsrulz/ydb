@@ -19,6 +19,8 @@ target_compile_options(libs-hyperscan-runtime_avx512 PRIVATE
   -DHAVE_AVX
   -mavx2
   -mfma
+  -mbmi
+  -mbmi2
   -DHAVE_AVX2
   -mavx512f
   -mavx512cd
@@ -434,6 +436,7 @@ target_compile_options(libs-hyperscan-runtime_avx512 PRIVATE
   -DstreamInitSufPQ=avx512_streamInitSufPQ
   -DtruffleExec=avx512_truffleExec
   -Dvbs_mask_data=avx512_vbs_mask_data
+  -Wno-everything
 )
 target_include_directories(libs-hyperscan-runtime_avx512 PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/hyperscan

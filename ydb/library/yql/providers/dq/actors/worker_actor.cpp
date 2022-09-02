@@ -49,7 +49,7 @@ struct TOutputChannel {
 };
 
 struct TSourceInfo {
-    IDqSourceActor* SourceActor = nullptr;
+    IDqComputeActorAsyncInput* Source = nullptr;
     NActors::IActor* Actor = nullptr;
     i64 FreeSpace = 1;
     bool HasData = false;
@@ -76,47 +76,37 @@ public:
 
     explicit TDqWorker(
         const ITaskRunnerActorFactory::TPtr& taskRunnerActorFactory,
-        const IDqSourceActorFactory::TPtr& sourceActorFactory,
-        const IDqSinkFactory::TPtr& sinkFactory,
+        const IDqAsyncIoFactory::TPtr& asyncIoFactory,
         TWorkerRuntimeData* runtimeData,
         const TString& traceId)
         : TRichActor<TDqWorker>(&TDqWorker::Handler)
-        , SourceActorFactory(sourceActorFactory)
-        , SinkFactory(sinkFactory)
+        , AsyncIoFactory(asyncIoFactory)
         , TaskRunnerActorFactory(taskRunnerActorFactory)
         , RuntimeData(runtimeData)
         , TraceId(traceId)
     {
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG) << "TDqWorker created ";
-
-        if (RuntimeData) {
-            RuntimeData->OnWorkerStart(TraceId);
-        }
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << "TDqWorker created ";
     }
 
     ~TDqWorker()
     {
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG) << "TDqWorker destroyed ";
-
-        if (RuntimeData) {
-            RuntimeData->OnWorkerStop(TraceId);
-        }
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << "TDqWorker destroyed ";
     }
 
     void DoPassAway() override {
-        YQL_LOG_CTX_SCOPE(TraceId);
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
         for (const auto& inputs : InputMap) {
             Send(inputs.first, new NActors::TEvents::TEvPoison());
         }
 
-        YQL_LOG(DEBUG) << "TDqWorker passed away ";
+        YQL_CLOG(DEBUG, ProviderDq) << "TDqWorker passed away ";
         if (Actor) {
             Actor->PassAway();
         }
         for (const auto& [_, v] : SourcesMap) {
-            v.SourceActor->PassAway();
+            v.Source->PassAway();
         }
         for (const auto& [_, v] : SinksMap) {
             v.Sink->PassAway();
@@ -137,7 +127,7 @@ private:
         HFunc(TEvTaskRunnerCreateFinished, OnTaskRunnerCreated);
         HFunc(TEvChannelPopFinished, OnChannelPopFinished);
         HFunc(TEvTaskRunFinished, OnRunFinished);
-        HFunc(TEvSourcePushFinished, OnSourcePushFinished);
+        HFunc(TEvAsyncInputPushFinished, OnAsyncInputPushFinished);
 
         // weird to have two events for error handling, but we need to use TEvDqFailure
         // between worker_actor <-> executer_actor, cause it transmits statistics in 'Metric' field
@@ -146,8 +136,8 @@ private:
         HFunc(TEvContinueRun, OnContinueRun);
         cFunc(TEvents::TEvWakeup::EventType, OnWakeup);
 
-        hFunc(IDqSourceActor::TEvNewSourceDataArrived, OnNewSourceDataArrived);
-        hFunc(IDqSourceActor::TEvSourceError, OnSourceError);
+        hFunc(IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived, OnNewAsyncInputDataArrived);
+        hFunc(IDqComputeActorAsyncInput::TEvAsyncInputError, OnAsyncInputError);
     })
 
     void ExtractStats(::Ydb::Issue::IssueMessage* issue) {
@@ -194,10 +184,9 @@ private:
         }
         // hacky conversion to TEvDqFailure
         auto convertedError = MakeHolder<TEvDqFailure>();
-        convertedError->Record.SetDeprecatedRetriable(NCommon::IsRetriable(ev));
-        convertedError->Record.SetDeprecatedNeedFallback(NCommon::NeedFallback(ev));
         convertedError->Record.SetStatusCode(ev->Get()->Record.GetStatusCode());
         convertedError->Record.MutableIssues()->Swap(ev->Get()->Record.MutableIssues());
+        Y_VERIFY(convertedError->Record.GetStatusCode() != NYql::NDqProto::StatusIds::SUCCESS);
         SendFailure(std::move(convertedError));  // enreached with stats inside
     }
 
@@ -208,7 +197,7 @@ private:
     void SendFailure(THolder<TEvDqFailure> ev) {
         if (!Executer) {
             // Posible Error on Undelivered before OnDqTask
-            YQL_LOG(ERROR) << "Error " << ev->Record.ShortUtf8DebugString();
+            YQL_CLOG(ERROR, ProviderDq) << "Error " << ev->Record.ShortUtf8DebugString();
             return;
         }
         Stat.FlushCounters(ev->Record);
@@ -221,14 +210,12 @@ private:
 
     void OnDqTask(TEvDqTask::TPtr& ev, const NActors::TActorContext& ctx) {
         Y_UNUSED(ctx);
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG) << "TDqWorker::OnDqTask";
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << "TDqWorker::OnDqTask";
 
         TFailureInjector::Reach("dq_task_failure", [] {::_exit(1); });
 
         Y_VERIFY(!TaskRunnerActor);
-
-        Stat.StartCounter(Stat.GetCounterName("Actor", {{"ClusterName", RuntimeData ? RuntimeData->ClusterName : "local"}}, "ProcessInit"));
         Y_VERIFY(!Executer);
         Executer = ev->Sender;
         Task = ev->Get()->Record.GetTask();
@@ -248,7 +235,7 @@ private:
         }
 
         NActors::IActor* actor;
-        std::tie(Actor, actor) = TaskRunnerActorFactory->Create(this, TraceId);
+        std::tie(Actor, actor) = TaskRunnerActorFactory->Create(this, TraceId, Task.GetId());
         TaskRunnerActor = RegisterLocalChild(actor);
         TDqTaskRunnerMemoryLimits limits; // used for local mode only
         limits.ChannelBufferSize = 20_MB;
@@ -257,10 +244,10 @@ private:
     }
 
     void OnTaskRunnerCreated(TEvTaskRunnerCreateFinished::TPtr& ev, const TActorContext& ) {
-        Stat.FlushCounter(Stat.GetCounterName("Actor", {{"ClusterName", RuntimeData ? RuntimeData->ClusterName : "local"}}, "ProcessInit"));
         TaskRunnerPrepared = true;
 
         try {
+            TFailureInjector::Reach("dq_fail_on_task_runner_created", [] { throw yexception() << "dq_fail_on_task_runner_created"; });
             Stat.AddCounters2(ev->Get()->Sensors);
 
             const auto& secureParams = ev->Get()->SecureParams;
@@ -275,9 +262,9 @@ private:
                     if (input.HasSource()) {
                         auto& source = SourcesMap[inputId];
                         source.TypeEnv = const_cast<NKikimr::NMiniKQL::TTypeEnvironment*>(&typeEnv);
-                        std::tie(source.SourceActor, source.Actor) =
-                            SourceActorFactory->CreateDqSourceActor(
-                            IDqSourceActorFactory::TArguments{
+                        std::tie(source.Source, source.Actor) =
+                            AsyncIoFactory->CreateDqSource(
+                            IDqAsyncIoFactory::TSourceArguments {
                                 .InputDesc = input,
                                 .InputIndex = static_cast<ui64>(inputId),
                                 .TxId = TraceId,
@@ -306,13 +293,13 @@ private:
                     if (output.HasSink()) {
                         auto& sink = SinksMap[outputId];
                         sink.TypeEnv = const_cast<NKikimr::NMiniKQL::TTypeEnvironment*>(&typeEnv);
-                        std::tie(sink.Sink, sink.Actor) = SinkFactory->CreateDqSink(
-                            IDqSinkFactory::TArguments {
+                        std::tie(sink.Sink, sink.Actor) = AsyncIoFactory->CreateDqSink(
+                            IDqAsyncIoFactory::TSinkArguments {
                                 .OutputDesc = output,
                                 .OutputIndex = static_cast<ui64>(outputId),
                                 .TxId = TraceId,
-                                .SecureParams = secureParams,
                                 .Callback = this,
+                                .SecureParams = secureParams,
                                 .TypeEnv = typeEnv,
                                 .HolderFactory = holderFactory
                             });
@@ -334,14 +321,14 @@ private:
                 Schedule(PingPeriod, new TEvents::TEvWakeup);
             }
         } catch (...) {
-            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, CurrentExceptionMessage(), false, false));
+            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, CurrentExceptionMessage()));
         }
     }
 
     void OnPullRequest(TEvPullDataRequest::TPtr& ev, const NActors::TActorContext& ctx) {
         Y_UNUSED(ctx);
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(TRACE) << "TDqWorker::OnPullRequest " << ev->Sender;
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(TRACE, ProviderDq) << "TDqWorker::OnPullRequest " << ev->Sender;
 
         if (!TaskRunnerActor || !TaskRunnerPrepared) {
             // waiting for initialization
@@ -360,6 +347,7 @@ private:
 
     void OnChannelPopFinished(TEvChannelPopFinished::TPtr& ev, const NActors::TActorContext& ctx) {
         try {
+            TFailureInjector::Reach("dq_fail_on_channel_pop_finished", [] { throw yexception() << "dq_fail_on_channel_pop_finished"; });
             auto outputActorId = OutChannelId2ActorId[ev->Get()->ChannelId];
             auto& outChannel = OutputMap[outputActorId];
             TPullResponse response;
@@ -387,14 +375,14 @@ private:
 
             Run(ctx);
         } catch (...) {
-            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, CurrentExceptionMessage(), false, false));
+            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, CurrentExceptionMessage()));
         }
     }
 
     void OnPullResponse(TEvPullDataResponse::TPtr& ev, const NActors::TActorContext& ctx) {
         Y_UNUSED(ctx);
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(TRACE) << "TDqWorker::OnPullResponse";
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(TRACE, ProviderDq) << "TDqWorker::OnPullResponse";
 
         Stat.AddCounters(ev->Get()->Record);
 
@@ -411,7 +399,7 @@ private:
             return;
         }
         if (responseType == ERROR) {
-            Send(SelfId(), MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNSPECIFIED, ev->Get()->Record.GetErrorMessage(), false, false));
+            Send(SelfId(), MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNSPECIFIED, ev->Get()->Record.GetErrorMessage()));
             return;
         }
         Y_VERIFY (responseType == FINISH || responseType == CONTINUE);
@@ -447,7 +435,7 @@ private:
                 channel.PingStartTime = now;
             } else if ((now - channel.PingStartTime) > PingTimeout) {
                 Stat.AddCounter("PingTimeout", static_cast<ui64>(1));
-                SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::TIMEOUT, "PingTimeout " + TimeoutInfo(channel.ActorID, now, channel.PingStartTime), true, true));
+                SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::TIMEOUT, "PingTimeout " + TimeoutInfo(channel.ActorID, now, channel.PingStartTime)));
             }
         }
 
@@ -490,7 +478,7 @@ private:
                         ? 0
                         : maybeChannel->second.Retries
                 ) + " " + JobDebugInfo(ev->Sender);
-            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNAVAILABLE, message, /*retriable = */ true, /*fallback =*/ true));
+            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNAVAILABLE, message));
         } else if (ev->Get()->SourceType == TEvPullDataRequest::EventType) {
             TActivationContext::Schedule(TDuration::MilliSeconds(100),
                 new IEventHandle(maybeChannel->second.ActorID, SelfId(), new TEvPullDataRequest(INPUT_SIZE), IEventHandle::FlagTrackDelivery)
@@ -527,14 +515,6 @@ private:
     void OnRunFinished(TEvTaskRunFinished::TPtr& ev, const TActorContext& ctx) {
         Y_UNUSED(ctx);
         auto res = ev->Get()->RunStatus;
-        if (RuntimeData) {
-            ::TRusage delta;
-            delta.Stime = TDuration::MicroSeconds(ev->Get()->Rusage.Stime);
-            delta.Utime = TDuration::MicroSeconds(ev->Get()->Rusage.Utime);
-            delta.MajorPageFaults = ev->Get()->Rusage.MajorPageFaults;
-            RuntimeData->AddRusageDelta(delta);
-        }
-
         Stat.AddCounters2(ev->Get()->Sensors);
 
         switch (res) {
@@ -550,7 +530,7 @@ private:
                         auto hasFreeSpace = freeSpace == ev->Get()->InputChannelFreeSpace.end()
                             || freeSpace->second > 0;
                         if (hasFreeSpace) {
-                            YQL_LOG(TRACE) << "Send TEvPullDataRequest to " <<
+                            YQL_CLOG(TRACE, ProviderDq) << "Send TEvPullDataRequest to " <<
                                 channel.ActorID << " from " <<
                                 SelfId();
                             Send(channel.ActorID, MakeHolder<TEvPullDataRequest>(INPUT_SIZE), IEventHandle::FlagTrackDelivery);
@@ -560,7 +540,7 @@ private:
                     } else if (channel.Requested && !channel.Finished) {
                         if (PullRequestTimeout && (now - channel.RequestTime) > PullRequestTimeout) {
                             Stat.AddCounter("ReadTimeout", static_cast<ui64>(1));
-                            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::TIMEOUT, "PullTimeout " + TimeoutInfo(channel.ActorID, now, channel.RequestTime), false, true));
+                            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::TIMEOUT, "PullTimeout " + TimeoutInfo(channel.ActorID, now, channel.RequestTime)));
                         }
                     }
                 }
@@ -577,7 +557,7 @@ private:
                     auto guard = source.TypeEnv->BindAllocator();
                     NKikimr::NMiniKQL::TUnboxedValueVector batch;
                     bool finished = false;
-                    const i64 space = source.SourceActor->GetSourceData(batch, finished, freeSpace);
+                    const i64 space = source.Source->GetAsyncInputData(batch, finished, freeSpace);
                     const ui64 index = inputIndex;
                     if (space <= 0) {
                         continue;
@@ -585,7 +565,7 @@ private:
                     source.PushStarted = true;
                     source.Finished = finished;
 
-                    Actor->SourcePush(0, index, std::move(batch), space, finished);
+                    Actor->AsyncInputPush(0, index, std::move(batch), space, finished);
                 }
                 break;
             }
@@ -634,18 +614,18 @@ private:
         for (const auto& [actorId, channel] : InputMap) {
             if (!channel.Finished) {
                 if (channel.Requested) {
-                    YQL_LOG(DEBUG) << "Input " << JobDebugInfo(actorId) << (now - channel.RequestTime) << " Requested? " << channel.Requested;
+                    YQL_CLOG(DEBUG, ProviderDq) << "Input " << JobDebugInfo(actorId) << (now - channel.RequestTime) << " Requested? " << channel.Requested;
                     if (RuntimeData) {
                         RuntimeData->UpdateChannelInputDelay(now - channel.RequestTime);
                     }
                 } else {
-                    YQL_LOG(DEBUG) << "Input " << JobDebugInfo(actorId) << (now - channel.ResponseTime)  << " Requested? " << channel.Requested;
+                    YQL_CLOG(DEBUG, ProviderDq) << "Input " << JobDebugInfo(actorId) << (now - channel.ResponseTime)  << " Requested? " << channel.Requested;
                     if (RuntimeData) {
                         RuntimeData->UpdateChannelInputDelay(now - channel.ResponseTime);
                     }
                 }
             } else {
-                YQL_LOG(DEBUG) << "Input " << JobDebugInfo(actorId) << " Finished";
+                YQL_CLOG(DEBUG, ProviderDq) << "Input " << JobDebugInfo(actorId) << " Finished";
                 if (RuntimeData) {
                     RuntimeData->UpdateChannelInputDelay(TDuration::Seconds(0));
                 }
@@ -654,12 +634,12 @@ private:
 
         for (const auto& [actorId, channel] : OutputMap) {
             if (!channel.Finished) {
-                YQL_LOG(DEBUG) << "Output " << JobDebugInfo(actorId) << (now - channel.RequestTime);
+                YQL_CLOG(DEBUG, ProviderDq) << "Output " << JobDebugInfo(actorId) << (now - channel.RequestTime);
                 if (RuntimeData) {
                     RuntimeData->UpdateChannelOutputDelay(now - channel.RequestTime);
                 }
             } else {
-                YQL_LOG(DEBUG) << "Output " << JobDebugInfo(actorId) << " Finished";
+                YQL_CLOG(DEBUG, ProviderDq) << "Output " << JobDebugInfo(actorId) << " Finished";
                 if (RuntimeData) {
                     RuntimeData->UpdateChannelOutputDelay(TDuration::Seconds(0));
                 }
@@ -667,8 +647,8 @@ private:
         }
     }
 
-    /*____________________ SourceActorEvents __________________*/
-    void OnNewSourceDataArrived(const IDqSourceActor::TEvNewSourceDataArrived::TPtr& ev) {
+    /*____________________ SourceEvents __________________*/
+    void OnNewAsyncInputDataArrived(const IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived::TPtr& ev) {
         try {
             if (!TaskRunnerPrepared) {
                 return;
@@ -677,14 +657,18 @@ private:
             source.HasData = true;
             Send(SelfId(), new TEvContinueRun());
         } catch (...) {
-            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNSPECIFIED, CurrentExceptionMessage(), false, false));
+            SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNSPECIFIED, CurrentExceptionMessage()));
         }
     }
-    void OnSourceError(const IDqSourceActor::TEvSourceError::TPtr& ev) {
+    void OnAsyncInputError(const IDqComputeActorAsyncInput::TEvAsyncInputError::TPtr& ev) {
         Y_UNUSED(ev->Get()->InputIndex);
-        SendFailure(MakeHolder<TEvDqFailure>(ev->Get()->IsFatal ? NYql::NDqProto::StatusIds::UNSPECIFIED : NYql::NDqProto::StatusIds::INTERNAL_ERROR, ev->Get()->Issues.ToString(), !ev->Get()->IsFatal, !ev->Get()->IsFatal));
+        auto fatalCode = ev->Get()->FatalCode;
+        if (fatalCode != NYql::NDqProto::StatusIds::UNSPECIFIED) {
+            fatalCode = NYql::NDqProto::StatusIds::INTERNAL_ERROR;
+        }
+        SendFailure(MakeHolder<TEvDqFailure>(fatalCode, ev->Get()->Issues.ToString()));
     }
-    void OnSourcePushFinished(TEvSourcePushFinished::TPtr& ev, const TActorContext& ctx) {
+    void OnAsyncInputPushFinished(TEvAsyncInputPushFinished::TPtr& ev, const TActorContext& ctx) {
         auto index = ev->Get()->Index;
         auto& source = SourcesMap[index];
         source.PushStarted = false;
@@ -696,16 +680,23 @@ private:
         Send(SelfId(), new TEvContinueRun());
     }
 
-    void OnSinkError(ui64 outputIndex, const TIssues& issues, bool isFatal) override {
+    void OnAsyncOutputError(ui64 outputIndex, const TIssues& issues, NYql::NDqProto::StatusIds::StatusCode fatalCode) override {
         Y_UNUSED(outputIndex);
-        SendFailure(MakeHolder<TEvDqFailure>(isFatal ? NYql::NDqProto::StatusIds::UNSPECIFIED : NYql::NDqProto::StatusIds::INTERNAL_ERROR, issues.ToString(), !isFatal, !isFatal));
+        if (fatalCode != NYql::NDqProto::StatusIds::UNSPECIFIED) {
+            fatalCode = NYql::NDqProto::StatusIds::INTERNAL_ERROR;
+        }
+        SendFailure(MakeHolder<TEvDqFailure>(fatalCode, issues.ToString()));
     }
 
-    void OnSinkStateSaved(NDqProto::TSinkState&& state, ui64 outputIndex, const NDqProto::TCheckpoint& checkpoint) override {
+    void OnAsyncOutputFinished(ui64 outputIndex) override {
+        Y_UNUSED(outputIndex);
+    }
+
+    void OnAsyncOutputStateSaved(NDqProto::TSinkState&& state, ui64 outputIndex, const NDqProto::TCheckpoint& checkpoint) override {
         Y_UNUSED(state);
         Y_UNUSED(outputIndex);
         Y_UNUSED(checkpoint);
-        SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::BAD_REQUEST, "Unimplemented", false, false));
+        SendFailure(MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::BAD_REQUEST, "Unimplemented"));
     }
 
     void SinkSend(
@@ -725,8 +716,7 @@ private:
 
     /*_________________________________________________________*/
 
-    IDqSourceActorFactory::TPtr SourceActorFactory;
-    IDqSinkFactory::TPtr SinkFactory;
+    IDqAsyncIoFactory::TPtr AsyncIoFactory;
     ITaskRunnerActorFactory::TPtr TaskRunnerActorFactory;
     NTaskRunnerActor::ITaskRunnerActor* Actor = nullptr;
     TActorId TaskRunnerActor;
@@ -764,15 +754,13 @@ NActors::IActor* CreateWorkerActor(
     TWorkerRuntimeData* runtimeData,
     const TString& traceId,
     const ITaskRunnerActorFactory::TPtr& taskRunnerActorFactory,
-    const IDqSourceActorFactory::TPtr& sourceActorFactory,
-    const IDqSinkFactory::TPtr& sinkFactory)
+    const IDqAsyncIoFactory::TPtr& asyncIoFactory)
 {
     Y_VERIFY(taskRunnerActorFactory);
     return new TLogWrapReceive(
         new TDqWorker(
             taskRunnerActorFactory,
-            sourceActorFactory,
-            sinkFactory,
+            asyncIoFactory,
             runtimeData,
             traceId), traceId);
 }

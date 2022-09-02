@@ -6,19 +6,20 @@ namespace NYdb {
 namespace NYq {
 
 template<typename T>
-T CreateYqSettings(const TString& folderId)
+T CreateYqSettings(const TScope& scope)
 {
     T settings;
-    settings.Header_ = {{ "x-yq-scope", TScope::YandexCloudScopeSchema + "://" + folderId }};
+    settings.Header_ = {
+        { "x-yq-scope", scope.ToString() }, // TODO: remove YQ-1055
+        { "x-ydb-fq-project", scope.ToString() }
+    };
     return settings;
 }
 
 template<typename T>
-T CreateYqSettings(const TScope& scope)
+T CreateYqSettings(const TString& folderId)
 {
-    T settings;
-    settings.Header_ = {{ "x-yq-scope",  scope.ToString() }};
-    return settings;
+    return CreateYqSettings<T>(TScope{TScope::YandexCloudScopeSchema + "://" + folderId});
 }
 
 } // namespace NYq

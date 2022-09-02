@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut_integration)
 
 add_library(ydb-services-yq)
 target_link_libraries(ydb-services-yq PUBLIC
@@ -20,5 +21,4 @@ target_link_libraries(ydb-services-yq PUBLIC
 )
 target_sources(ydb-services-yq PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/services/yq/grpc_service.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/services/yq/private_grpc.cpp
 )

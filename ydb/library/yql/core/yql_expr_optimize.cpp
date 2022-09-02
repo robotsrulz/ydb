@@ -100,6 +100,10 @@ namespace {
             return node;
         }
 
+        if (ctx.Settings.VisitChecker && !ctx.Settings.VisitChecker(*node)) {
+            return node;
+        }
+
         YQL_ENSURE(level < 3000U, "Too deep graph!");
 
         if (ctx.Settings.ProcessedNodes) {
@@ -223,6 +227,10 @@ namespace {
     TExprNode::TPtr OptimizeNode(const TExprNode::TPtr& node, bool& changed, TOptimizationContext<TCallableOptimizerFast>& ctx, size_t level) {
         if (node->Type() == TExprNode::Atom || node->Type() == TExprNode::Argument ||
             node->Type() == TExprNode::Arguments || node->Type() == TExprNode::World) {
+            return node;
+        }
+
+        if (ctx.Settings.VisitChecker && !ctx.Settings.VisitChecker(*node)) {
             return node;
         }
 

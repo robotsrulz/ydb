@@ -1,17 +1,20 @@
 #include "datashard_impl.h"
+#include <ydb/core/tablet/resource_broker.h>
 #include <ydb/core/tablet_flat/flat_stat_table.h>
 #include <ydb/core/tablet_flat/flat_dbase_sz_env.h>
 
 namespace NKikimr {
 namespace NDataShard {
 
+using namespace NResourceBroker;
 
 class TAsyncTableStatsBuilder : public TActorBootstrapped<TAsyncTableStatsBuilder> {
 public:
-    TAsyncTableStatsBuilder(TActorId replyTo, ui64 tableId, ui64 indexSize, const TAutoPtr<NTable::TSubset> subset,
+    TAsyncTableStatsBuilder(TActorId replyTo, ui64 tabletId, ui64 tableId, ui64 indexSize, const TAutoPtr<NTable::TSubset> subset,
                             ui64 memRowCount, ui64 memDataSize,
                             ui64 rowCountResolution, ui64 dataSizeResolution, ui64 searchHeight, TInstant statsUpdateTime)
         : ReplyTo(replyTo)
+        , TabletId(tabletId)
         , TableId(tableId)
         , IndexSize(indexSize)
         , StatsUpdateTime(statsUpdateTime)
@@ -28,6 +31,47 @@ public:
     }
 
     void Bootstrap(const TActorContext& ctx) {
+        SubmitTask(ctx);
+        Become(&TThis::StateWaitResource);
+    }
+
+private:
+    void Die(const TActorContext& ctx) override {
+        ctx.Send(MakeResourceBrokerID(), new TEvResourceBroker::TEvNotifyActorDied);
+        TActorBootstrapped::Die(ctx);
+    }
+
+    void SubmitTask(const TActorContext& ctx) {
+        ctx.Send(MakeResourceBrokerID(),
+            new TEvResourceBroker::TEvSubmitTask(
+                /* task id */ 1,
+                /* task name */ TStringBuilder() << "build-stats-table-" << TableId << "-tablet-" << TabletId,
+                /* cpu & memory */ {{ 1, 0 }},
+                /* task type */ "datashard_build_stats",
+                /* priority */ 5,
+                /* cookie */ nullptr));
+    }
+
+    void FinishTask(const TActorContext& ctx) {
+        ctx.Send(MakeResourceBrokerID(), new TEvResourceBroker::TEvFinishTask(/* task id */ 1, /* cancelled */ false));
+    }
+
+private:
+    STFUNC(StateWaitResource) {
+        switch (ev->GetTypeRewrite()) {
+            SFunc(TEvents::TEvPoison, Die);
+            HFunc(TEvResourceBroker::TEvResourceAllocated, Handle);
+        }
+    }
+
+    void Handle(TEvResourceBroker::TEvResourceAllocated::TPtr& ev, const TActorContext& ctx) {
+        auto* msg = ev->Get();
+        Y_VERIFY(!msg->Cookie.Get(), "Unexpected cookie in TEvResourceAllocated");
+        Y_VERIFY(msg->TaskId == 1, "Unexpected task id in TEvResourceAllocated");
+        Start(ctx);
+    }
+
+    void Start(const TActorContext& ctx) {
         THolder<TDataShard::TEvPrivate::TEvAsyncTableStats> ev = MakeHolder<TDataShard::TEvPrivate::TEvAsyncTableStats>();
         ev->TableId = TableId;
         ev->IndexSize = IndexSize;
@@ -45,11 +89,14 @@ public:
 
         ctx.Send(ReplyTo, ev.Release());
 
+        FinishTask(ctx);
+
         return Die(ctx);
     }
 
 private:
     TActorId ReplyTo;
+    ui64 TabletId;
     ui64 TableId;
     ui64 IndexSize;
     TInstant StatsUpdateTime;
@@ -177,6 +224,8 @@ void ListTableNames(const TTables& tables, TStringBuilder& names) {
 }
 
 void TDataShard::Handle(TEvPrivate::TEvAsyncTableStats::TPtr& ev, const TActorContext& ctx) {
+    Actors.erase(ev->Sender);
+
     ui64 tableId = ev->Get()->TableId;
     LOG_DEBUG(ctx, NKikimrServices::TX_DATASHARD, "Stats rebuilt at datashard %" PRIu64, TabletID());
 
@@ -236,6 +285,31 @@ public:
 
     TTxType GetTxType() const override { return TXTYPE_INITIATE_STATS_UPDATE; }
 
+    void CheckIdleMemCompaction(const TUserTable& table, TTransactionContext& txc, const TActorContext& ctx) {
+        // Note: we only care about changes in the main table
+        auto lastTableChange = txc.DB.Head(table.LocalTid);
+        if (table.LastTableChange.Serial != lastTableChange.Serial ||
+            table.LastTableChange.Epoch != lastTableChange.Epoch)
+        {
+            table.LastTableChange = lastTableChange;
+            table.LastTableChangeTimestamp = ctx.Monotonic();
+            return;
+        }
+
+        // We only want to start idle compaction when there are some operations in the mem table
+        if (txc.DB.GetTableMemOpsCount(table.LocalTid) == 0) {
+            return;
+        }
+
+        // Compact non-empty mem table when there have been no changes for a while
+        TDuration elapsed = ctx.Monotonic() - table.LastTableChangeTimestamp;
+        TDuration idleInterval = TDuration::Seconds(AppData(ctx)->DataShardConfig.GetIdleMemCompactionIntervalSeconds());
+        if (elapsed >= idleInterval) {
+            Self->Executor()->CompactMemTable(table.LocalTid);
+            table.LastTableChangeTimestamp = ctx.Monotonic();
+        }
+    }
+
     bool Execute(TTransactionContext& txc, const TActorContext& ctx) override {
         if (Self->State != TShardState::Ready)
             return true;
@@ -243,6 +317,8 @@ public:
         for (auto& ti : Self->TableInfos) {
             const ui32 localTableId = ti.second->LocalTid;
             const ui32 shadowTableId = ti.second->ShadowTid;
+
+            CheckIdleMemCompaction(*ti.second, txc, ctx);
 
             if (ti.second->StatsUpdateInProgress) {
                 // We don't want to update mem counters during updates, since
@@ -313,6 +389,7 @@ public:
             }
 
             auto* builder = new TAsyncTableStatsBuilder(ctx.SelfID,
+                Self->TabletID(),
                 tableId,
                 indexSize,
                 subsetForStats,
@@ -323,7 +400,8 @@ public:
                 searchHeight,
                 AppData(ctx)->TimeProvider->Now());
 
-            ctx.Register(builder, TMailboxType::HTSwap, AppData(ctx)->BatchPoolId);
+            TActorId actorId = ctx.Register(builder, TMailboxType::HTSwap, AppData(ctx)->BatchPoolId);
+            Self->Actors.insert(actorId);
         }
 
         Self->SysTablesPartOnwers.clear();
@@ -388,6 +466,7 @@ void TDataShard::CollectCpuUsage(const TActorContext &ctx) {
                     << "% is higher than threshold of " << (i64)CpuUsageReportThreshlodPercent
                     << "% in-flight Tx: " << TxInFly()
                     << " immediate Tx: " << ImmediateInFly()
+                    << " readIterators: " << ReadIteratorsInFly()
                     << " at datashard: " << TabletID()
                     << " table: " << names);
     }

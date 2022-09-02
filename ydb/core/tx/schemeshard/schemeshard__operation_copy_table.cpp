@@ -70,7 +70,7 @@ public:
                  "CopyTable paritition counts don't match");
         const ui64 dstSchemaVersion = NEW_TABLE_ALTER_VERSION;
 
-        const ui64 subDomainPathId = context.SS->ResolveDomainId(txState->TargetPathId).LocalPathId;
+        const ui64 subDomainPathId = context.SS->ResolvePathIdForDomain(txState->TargetPathId).LocalPathId;
 
         for (ui32 i = 0; i < dstTableInfo->GetPartitions().size(); ++i) {
             TShardIdx srcShardIdx = srcTableInfo->GetPartitions()[i].ShardIdx;
@@ -398,6 +398,9 @@ public:
         const ui32 maxShardsToCreate = srcPath.Shards();
         const TString acl = Transaction.GetModifyACL().GetDiffACL();
 
+        auto schema = Transaction.GetCreateTable();
+        const bool isBackup = schema.GetIsBackup();
+
         TPath dstPath = parent.Child(name);
         {
             TPath::TChecker checks = dstPath.Check();
@@ -420,11 +423,15 @@ public:
                 checks
                     .IsValidLeafName()
                     .IsTheSameDomain(srcPath)
-                    .PathsLimit()
-                    .DirChildrenLimit()
-                    .ShardsLimit(maxShardsToCreate)
                     .PathShardsLimit(maxShardsToCreate)
                     .IsValidACL(acl);
+            }
+
+            if (checks && !isBackup) {
+                checks
+                    .PathsLimit()
+                    .DirChildrenLimit()
+                    .ShardsLimit(maxShardsToCreate);
             }
 
             if (!checks) {
@@ -439,10 +446,10 @@ public:
         auto domainInfo = parent.DomainInfo();
         bool transactionSupport = domainInfo->IsSupportTransactions();
         if (domainInfo->GetAlter()) {
-            TPathId domainId = parent.DomainId();
-            Y_VERIFY(context.SS->PathsById.contains(domainId));
-            TPathElement::TPtr domain = context.SS->PathsById.at(domainId);
-            Y_VERIFY(domain->PlannedToCreate() || domain->HasActiveChanges());
+            TPathId domainPathId = parent.GetPathIdForDomain();
+            Y_VERIFY(context.SS->PathsById.contains(domainPathId));
+            TPathElement::TPtr domainPath = context.SS->PathsById.at(domainPathId);
+            Y_VERIFY(domainPath->PlannedToCreate() || domainPath->HasActiveChanges());
 
             transactionSupport |= domainInfo->GetAlter()->IsSupportTransactions();
         }
@@ -479,14 +486,18 @@ public:
             }
         }
 
-        auto schema = Transaction.GetCreateTable();
         const bool omitFollowers = schema.GetOmitFollowers();
-        const bool isBackup = schema.GetIsBackup();
+
         PrepareScheme(&schema, name, srcTableInfo, context);
+        schema.SetIsBackup(isBackup);
+
         if (omitFollowers) {
             schema.MutablePartitionConfig()->AddFollowerGroups()->Clear();
         }
-        schema.SetIsBackup(isBackup);
+
+        if (isBackup) {
+            schema.ClearTTLSettings();
+        }
 
         NKikimrSchemeOp::TPartitionConfig compilationPartitionConfig;
         if (!TPartitionConfigMerger::ApplyChanges(compilationPartitionConfig, srcTableInfo->PartitionConfig(), schema.GetPartitionConfig(), AppData(), errStr)
@@ -517,7 +528,7 @@ public:
             THashMap<ui32, ui32> familyRooms;
             storageRooms.emplace_back(0);
 
-            if (!context.SS->GetBindingsRooms(dstPath.DomainId(), tableInfo->PartitionConfig(), storageRooms, familyRooms, channelsBinding, errStr)) {
+            if (!context.SS->GetBindingsRooms(dstPath.GetPathIdForDomain(), tableInfo->PartitionConfig(), storageRooms, familyRooms, channelsBinding, errStr)) {
                 errStr = TString("database doesn't have required storage pools to create tablet with storage config, details: ") + errStr;
                 result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
                 return result;
@@ -533,11 +544,15 @@ public:
                 protoFamily->SetId(familyRoom.first);
                 protoFamily->SetRoom(familyRoom.second);
             }
-        } else if (context.SS->IsCompatibleChannelProfileLogic(dstPath.DomainId(), tableInfo)) {
-            if (!context.SS->GetChannelsBindings(dstPath.DomainId(), tableInfo, channelsBinding, errStr)) {
+        } else if (context.SS->IsCompatibleChannelProfileLogic(dstPath.GetPathIdForDomain(), tableInfo)) {
+            if (!context.SS->GetChannelsBindings(dstPath.GetPathIdForDomain(), tableInfo, channelsBinding, errStr)) {
                 result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
                 return result;
             }
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxCopyTable, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
         }
 
         auto guard = context.DbGuard();
@@ -546,7 +561,7 @@ public:
         context.MemChanges.GrabPath(context.SS, parent.Base()->PathId);
         context.MemChanges.GrabPath(context.SS, srcPath.Base()->PathId);
         context.MemChanges.GrabNewTxState(context.SS, OperationId);
-        context.MemChanges.GrabDomain(context.SS, parent.DomainId());
+        context.MemChanges.GrabDomain(context.SS, parent.GetPathIdForDomain());
         context.MemChanges.GrabNewTable(context.SS, allocatedPathId);
 
         context.DbChanges.PersistPath(allocatedPathId);
@@ -623,10 +638,10 @@ public:
         const ui32 shardsToCreate = tableInfo->GetPartitions().size();
         Y_VERIFY_S(shardsToCreate <= maxShardsToCreate, "shardsToCreate: " << shardsToCreate << " maxShardsToCreate: " << maxShardsToCreate);
 
-        dstPath.DomainInfo()->IncPathsInside();
-        dstPath.DomainInfo()->AddInternalShards(txState);
+        dstPath.DomainInfo()->IncPathsInside(1, isBackup);
+        dstPath.DomainInfo()->AddInternalShards(txState, isBackup);
         dstPath.Base()->IncShardsInside(shardsToCreate);
-        parent.Base()->IncAliveChildren();
+        parent.Base()->IncAliveChildren(1, isBackup);
 
         State = NextState();
         SetState(SelectStateFunc(State));

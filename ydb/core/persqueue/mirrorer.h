@@ -37,6 +37,7 @@ private:
 
     const TDuration LOG_STATE_INTERVAL = TDuration::Minutes(1);
     const TDuration INIT_TIMEOUT = TDuration::Minutes(1);
+    const TDuration RECEIVE_READ_EVENT_TIMEOUT = TDuration::Minutes(1);
     const TDuration WRITE_TIMEOUT = TDuration::Minutes(10);
 
 
@@ -55,7 +56,7 @@ private:
         TRACE_EVENT(NKikimrServices::PQ_MIRRORER);
         switch (ev->GetTypeRewrite()) {
             HFuncTraced(TEvPQ::TEvInitCredentials, HandleInitCredentials);
-            HFuncTraced(TEvPQ::TEvChangeConfig, HandleChangeConfig);
+            HFuncTraced(TEvPQ::TEvChangePartitionConfig, HandleChangeConfig);
             HFuncTraced(TEvPQ::TEvCreateConsumer, CreateConsumer);
             HFuncTraced(TEvPQ::TEvRetryWrite, HandleRetryWrite);
             HFuncTraced(TEvPersQueue::TEvResponse, Handle);
@@ -72,7 +73,7 @@ private:
 
         TRACE_EVENT(NKikimrServices::PQ_MIRRORER);
         switch (ev->GetTypeRewrite()) {
-            HFuncTraced(TEvPQ::TEvChangeConfig, HandleChangeConfig);
+            HFuncTraced(TEvPQ::TEvChangePartitionConfig, HandleChangeConfig);
             CFunc(TEvents::TSystem::Wakeup, HandleWakeup);
             HFuncTraced(TEvPQ::TEvRequestPartitionStatus, RequestSourcePartitionStatus);
             HFuncTraced(TEvPQ::TEvRetryWrite, HandleRetryWrite);
@@ -132,7 +133,7 @@ public:
     void Handle(TEvents::TEvPoisonPill::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPersQueue::TEvResponse::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPQ::TEvUpdateCounters::TPtr& ev, const TActorContext& ctx);
-    void HandleChangeConfig(TEvPQ::TEvChangeConfig::TPtr& ev, const TActorContext& ctx);
+    void HandleChangeConfig(TEvPQ::TEvChangePartitionConfig::TPtr& ev, const TActorContext& ctx);
     void TryToRead(const TActorContext& ctx);
     void TryToWrite(const TActorContext& ctx);
     void HandleInitCredentials(TEvPQ::TEvInitCredentials::TPtr& ev, const TActorContext& ctx);
@@ -189,6 +190,7 @@ private:
     TMap<ui64, std::pair<TInstant, NThreading::TFuture<void>>> ReadFeatures;
     ui64 ReadFeatureId = 0;
     ui64 ReadFuturesInFlight = 0;
+    TInstant LastReadEventTime;
 };
 
 }// NPQ

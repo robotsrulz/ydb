@@ -6,7 +6,7 @@ namespace NKikimr {
 
     class TTestEnv : TNonCopyable {
         std::unique_ptr<TTestActorSystem> Runtime;
-        NMonitoring::TDynamicCounterPtr Counters;
+        ::NMonitoring::TDynamicCounterPtr Counters;
         TIntrusivePtr<TVDiskConfig> VDiskConfig;
         TIntrusivePtr<TBlobStorageGroupInfo> Info;
         const ui32 GroupId = 0;
@@ -24,7 +24,7 @@ namespace NKikimr {
     public:
         TTestEnv(TIntrusivePtr<TPDiskMockState> state = nullptr)
             : Runtime(std::make_unique<TTestActorSystem>(1))
-            , Counters(new NMonitoring::TDynamicCounters)
+            , Counters(new ::NMonitoring::TDynamicCounters)
             , AllVDiskKinds(new TAllVDiskKinds)
             , PDiskMockState(state ? state : new TPDiskMockState(NodeId, PDiskId, PDiskGuid, (ui64)10 << 40))
         {
@@ -99,7 +99,7 @@ namespace NKikimr {
 
             // create vdisk config
             TVDiskConfig::TBaseInfo baseInfo(VDiskId, PDiskServiceId, PDiskGuid, PDiskId,
-                TPDiskCategory::DEVICE_TYPE_SSD, VSlotId, NKikimrBlobStorage::TVDiskKind::Default, 1,
+                NPDisk::DEVICE_TYPE_SSD, VSlotId, NKikimrBlobStorage::TVDiskKind::Default, 1,
                 "static");
             VDiskConfig = AllVDiskKinds->MakeVDiskConfig(baseInfo);
 

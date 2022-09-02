@@ -87,6 +87,8 @@ public:
         , GetCachePolicy(std::move(getCachePolicy))
     {}
 
+    static constexpr char ActorName[] = "HTTP_OUT_CACHE_ACTOR";
+
     void Bootstrap(const NActors::TActorContext&) {
         //
         Become(&THttpOutgoingCacheActor::StateWork, RefreshTimeout, new NActors::TEvents::TEvWakeup());
@@ -316,7 +318,7 @@ public:
         }
 
         TString GetName() const {
-            return TStringBuilder() << (Request->Secure ? "https://" : "http://") << Request->Host << Request->URL
+            return TStringBuilder() << (Request->Endpoint->Secure ? "https://" : "http://") << Request->Host << Request->URL
                 << " (" << CacheId << ")";
         }
     };
@@ -338,6 +340,8 @@ public:
         : HttpProxyId(httpProxyId)
         , GetCachePolicy(std::move(getCachePolicy))
     {}
+
+    static constexpr char ActorName[] = "HTTP_IN_CACHE_ACTOR";
 
     void Bootstrap(const NActors::TActorContext&) {
         //
@@ -383,6 +387,7 @@ public:
 
     void SendCacheRequest(const TCacheKey& cacheKey, TCacheRecord& cacheRecord, const NActors::TActorContext& ctx) {
         cacheRecord.Request = cacheRecord.Request->Duplicate();
+        cacheRecord.Request->AcceptEncoding.Clear(); // disable compression
         IncomingRequests[cacheRecord.Request.Get()] = cacheKey;
         TActorId handler = GetRequestHandler(cacheRecord.Request);
         if (handler) {

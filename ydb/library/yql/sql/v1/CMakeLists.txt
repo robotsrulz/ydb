@@ -6,6 +6,10 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(format)
+add_subdirectory(lexer)
+add_subdirectory(perf)
+add_subdirectory(proto_parser)
 
 add_library(yql-sql-v1)
 target_compile_options(yql-sql-v1 PRIVATE
@@ -17,6 +21,7 @@ target_link_libraries(yql-sql-v1 PUBLIC
   library-cpp-charset
   library-cpp-enumbitset
   cpp-yson-node
+  library-cpp-json
   yql-core-sql_types
   library-yql-minikql
   yql-public-udf

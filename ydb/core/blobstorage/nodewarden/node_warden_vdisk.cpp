@@ -71,7 +71,7 @@ namespace NKikimr::NStorage {
         Y_VERIFY_S(pdiskIt != LocalPDisks.end(), "PDiskId# " << vslotId.NodeId << ":" << vslotId.PDiskId << " not found");
         auto& pdisk = pdiskIt->second;
         Y_VERIFY_S(pdisk.Record.GetPDiskGuid() == pdiskGuid, "PDiskId# " << vslotId.NodeId << ":" << vslotId.PDiskId << " PDiskGuid mismatch");
-        const TPDiskCategory::EDeviceType deviceType = TPDiskCategory(pdisk.Record.GetPDiskCategory()).Type();
+        const NPDisk::EDeviceType deviceType = TPDiskCategory(pdisk.Record.GetPDiskCategory()).Type();
 
         const TActorId pdiskServiceId = MakeBlobStoragePDiskID(vslotId.NodeId, vslotId.PDiskId);
         const TActorId vdiskServiceId = MakeBlobStorageVDiskID(vslotId.NodeId, vslotId.PDiskId, vslotId.VDiskSlotId);
@@ -144,9 +144,16 @@ namespace NKikimr::NStorage {
         const ui64 scrubCookie = ++LastScrubCookie;
 
         std::vector<std::pair<TVDiskID, TActorId>> donorDiskIds;
+        std::vector<NKikimrBlobStorage::TVSlotId> donors;
         for (const auto& donor : vdisk.Config.GetDonors()) {
-            const TVSlotId donorSlot(donor.GetVDiskLocation());
+            const auto& location = donor.GetVDiskLocation();
+            const TVSlotId donorSlot(location);
             donorDiskIds.emplace_back(VDiskIDFromVDiskID(donor.GetVDiskId()), donorSlot.GetVDiskServiceId());
+            NKikimrBlobStorage::TVSlotId slotId;
+            slotId.SetNodeId(location.GetNodeID());
+            slotId.SetPDiskId(location.GetPDiskID());
+            slotId.SetVSlotId(location.GetVDiskSlotID());
+            donors.emplace_back(slotId);
         }
 
         TVDiskConfig::TBaseInfo baseInfo(vdiskId, pdiskServiceId, pdiskGuid, vslotId.PDiskId, deviceType,
@@ -166,7 +173,7 @@ namespace NKikimr::NStorage {
 
         // issue initial report to whiteboard before creating actor to avoid races
         Send(WhiteboardId, new NNodeWhiteboard::TEvWhiteboard::TEvVDiskStateUpdate(vdiskId, groupInfo->GetStoragePoolName(),
-            vslotId.PDiskId, vslotId.VDiskSlotId, pdiskGuid, kind, donorMode, whiteboardInstanceGuid));
+            vslotId.PDiskId, vslotId.VDiskSlotId, pdiskGuid, kind, donorMode, whiteboardInstanceGuid, std::move(donors)));
         vdisk.WhiteboardVDiskId.emplace(vdiskId);
 
         // create an actor
@@ -178,7 +185,7 @@ namespace NKikimr::NStorage {
             (PDiskGuid, pdiskGuid));
 
         // for dynamic groups -- start state aggregator
-        if (TGroupID(groupInfo->GroupID).ConfigurationType() == GroupConfigurationTypeDynamic) {
+        if (TGroupID(groupInfo->GroupID).ConfigurationType() == EGroupConfigurationType::Dynamic) {
             StartAggregator(vdiskServiceId, groupInfo->GroupID);
         }
 
@@ -225,7 +232,7 @@ namespace NKikimr::NStorage {
 
         const auto& loc = vdisk.GetVDiskLocation();
         if (loc.GetNodeID() != LocalNodeId) {
-            if (TGroupID(vdisk.GetVDiskID().GetGroupID()).ConfigurationType() != GroupConfigurationTypeStatic) {
+            if (TGroupID(vdisk.GetVDiskID().GetGroupID()).ConfigurationType() != EGroupConfigurationType::Static) {
                 STLOG_DEBUG_FAIL(BS_NODE, NW31, "incorrect NodeId in VDisk configuration", (Record, vdisk), (NodeId, LocalNodeId));
             }
             return;

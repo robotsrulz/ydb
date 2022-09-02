@@ -15,7 +15,7 @@
 #include <dlfcn.h>
 #endif
 
-#include <util/system/atomic.h>
+#include <library/cpp/deprecated/atomic/atomic.h>
 #include <util/system/defaults.h>
 #include <util/system/event.h>
 #include <util/system/rwlock.h>
@@ -192,10 +192,10 @@ namespace {
 }
 
 void SetAsyncSignalHandler(int signum, TAutoPtr<TEventHandler> handler) {
-    static TAtomic lock;
+    static TAdaptiveLock lock;
 
     if (Y_UNLIKELY(SIGNALS_HANDLER == nullptr)) {
-        TGuard<TAtomic> dnd(lock);
+        TGuard dnd(lock);
 
         if (SIGNALS_HANDLER == nullptr) {
             // NEVERS GETS DESTROYED

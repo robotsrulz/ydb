@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_sources.h>
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io.h>
 #include <ydb/library/yql/providers/common/http_gateway/yql_http_gateway.h>
 #include <ydb/library/yql/providers/clickhouse/proto/source.pb.h>
 #include <ydb/library/yql/providers/common/token_accessor/client/factory.h>
@@ -8,7 +8,7 @@
 
 namespace NYql::NDq {
 
-std::pair<NYql::NDq::IDqSourceActor*, NActors::IActor*> CreateClickHouseReadActor(
+std::pair<NYql::NDq::IDqComputeActorAsyncInput*, NActors::IActor*> CreateClickHouseReadActor(
     IHTTPGateway::TPtr gateway,
     NCH::TSource&& params,
     ui64 inputIndex,
@@ -18,4 +18,3 @@ std::pair<NYql::NDq::IDqSourceActor*, NActors::IActor*> CreateClickHouseReadActo
     ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory);
 
 } // namespace NYql::NDq
-

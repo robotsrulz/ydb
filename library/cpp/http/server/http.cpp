@@ -4,13 +4,12 @@
 #include <library/cpp/threading/equeue/equeue.h>
 
 #include <util/generic/buffer.h>
-#include <util/generic/cast.h>
 #include <util/generic/intrlist.h>
 #include <util/generic/yexception.h>
 #include <util/network/address.h>
 #include <util/network/socket.h>
 #include <util/network/poller.h>
-#include <util/system/atomic.h>
+#include <library/cpp/deprecated/atomic/atomic.h>
 #include <util/system/compat.h> // stricmp, strnicmp, strlwr, strupr, stpcpy
 #include <util/system/defaults.h>
 #include <util/system/event.h>
@@ -21,10 +20,6 @@
 
 #include <cerrno>
 #include <cstring>
-#include <ctime>
-
-#include <sys/stat.h>
-#include <sys/types.h>
 
 using namespace NAddr;
 

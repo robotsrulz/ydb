@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(core-kqp-runtime)
 target_compile_options(core-kqp-runtime PRIVATE
@@ -41,6 +42,8 @@ target_sources(core-kqp-runtime PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/kqp/runtime/kqp_read_table.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/kqp/runtime/kqp_scan_data.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/kqp/runtime/kqp_spilling_file.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/kqp/runtime/kqp_stream_lookup_actor.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/kqp/runtime/kqp_stream_lookup_factory.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/kqp/runtime/kqp_tasks_runner.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/kqp/runtime/kqp_transport.cpp
 )

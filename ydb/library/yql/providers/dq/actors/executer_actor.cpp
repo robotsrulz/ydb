@@ -42,7 +42,7 @@ public:
         const NActors::TActorId& printerId,
         const TString& traceId, const TString& username,
         const TDqConfiguration::TPtr& settings,
-        const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters,
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
         TInstant requestStartTime,
         bool createTaskSuspended)
         : TRichActor<TDqExecuter>(&TDqExecuter::Handler)
@@ -76,18 +76,19 @@ private:
         HFunc(TEvAllocateWorkersResponse, OnAllocateWorkersResponse);
         cFunc(TEvents::TEvPoison::EventType, PassAway);
         hFunc(NActors::TEvents::TEvPoisonTaken, Handle);
+        hFunc(TEvDqStats, OnTransientIssues);
         HFunc(TEvDqFailure, OnFailure);
         HFunc(TEvGraphFinished, OnGraphFinished);
         HFunc(TEvQueryResponse, OnQueryResponse);
         // execution timeout
         cFunc(TEvents::TEvBootstrap::EventType, [this]() {
-            YQL_LOG_CTX_SCOPE(TraceId);
-            YQL_LOG(DEBUG) << "Execution timeout";
+            YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+            YQL_CLOG(DEBUG, ProviderDq) << "Execution timeout";
             auto issue = TIssue("Execution timeout");
             issue.SetCode(TIssuesIds::DQ_GATEWAY_NEED_FALLBACK_ERROR, TSeverityIds::S_ERROR);
             Issues.AddIssues({issue});
             *ExecutionTimeoutCounter += 1;
-            Finish(NYql::NDqProto::StatusIds::LIMIT_EXCEEDED, /*retriable=*/ false, /*needFallback=*/ true);
+            Finish(NYql::NDqProto::StatusIds::LIMIT_EXCEEDED);
         })
         cFunc(TEvents::TEvWakeup::EventType, OnWakeup)
     })
@@ -99,7 +100,7 @@ private:
                 TStringInput inputStream1(Settings->WorkerFilter.Get().GetOrElse(""));
                 ParseFromTextFormat(inputStream1, pragmaFilter);
             } catch (...) {
-                YQL_LOG(INFO) << "Cannot parse filter pragma " << CurrentExceptionMessage();
+                YQL_CLOG(INFO, ProviderDq) << "Cannot parse filter pragma " << CurrentExceptionMessage();
             }
         }
         return pragmaFilter;
@@ -128,10 +129,15 @@ private:
     }
 
     void OnGraph(TEvGraphRequest::TPtr& ev, const NActors::TActorContext&) {
-        YQL_LOG_CTX_SCOPE(TraceId);
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
         Y_VERIFY(!ControlId);
         Y_VERIFY(!ResultId);
-        YQL_LOG(DEBUG) << "TDqExecuter::OnGraph";
+        YQL_CLOG(DEBUG, ProviderDq) << "TDqExecuter::OnGraph";
+        TFailureInjector::Reach("dq_fail_on_graph", [&] {
+            // YQL-15117, it's very likely that the status was INTERNAL_ERROR, originated from worker_actor::OnTaskRunnerCreated (with no issues attached)
+            auto ev = MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::StatusCode::StatusIds_StatusCode_INTERNAL_ERROR);
+            Send(SelfId(), std::move(ev));
+        });
         ControlId = NActors::ActorIdFromProto(ev->Get()->Record.GetControlId());
         ResultId = NActors::ActorIdFromProto(ev->Get()->Record.GetResultId());
         CheckPointCoordinatorId = NActors::ActorIdFromProto(ev->Get()->Record.GetCheckPointCoordinatorId());
@@ -141,7 +147,7 @@ private:
         AddChild(CheckPointCoordinatorId);
 
         int workerCount = ev->Get()->Record.GetRequest().GetTask().size();
-        YQL_LOG(INFO) << (TStringBuilder() << "Trying to allocate " << workerCount << " workers");
+        YQL_CLOG(INFO, ProviderDq) << (TStringBuilder() << "Trying to allocate " << workerCount << " workers");
 
         THashMap<TString, Yql::DqsProto::TFile> files;
         TVector<NDqProto::TDqTask> tasks;
@@ -174,7 +180,7 @@ private:
 
 
         const bool enableComputeActor = Settings->EnableComputeActor.Get().GetOrElse(false);
-        const TString computeActorType = Settings->ComputeActorType.Get().GetOrElse("old");
+        const TString computeActorType = Settings->ComputeActorType.Get().GetOrElse("sync");
 
         auto resourceAllocator = RegisterChild(CreateResourceAllocator(
             GwmActorId, SelfId(), ControlId, workerCount,
@@ -225,7 +231,7 @@ private:
         Timeout = tasks.size() == 1
             ? TDuration::MilliSeconds(Settings->_LiteralTimeout.Get().GetOrElse(TDqSettings::TDefault::LiteralTimeout))
             : TDuration::MilliSeconds(Settings->_TableTimeout.Get().GetOrElse(TDqSettings::TDefault::TableTimeout));
-
+        YQL_CLOG(DEBUG, ProviderDq) << "Dq timeout set to: " << ToString(Timeout);
 
         if (Timeout) {
             if (StartTime - RequestStartTime > Timeout) {
@@ -236,17 +242,15 @@ private:
         }
     }
 
-    void Finish(NYql::NDqProto::StatusIds::StatusCode statusCode, bool retriable, bool needFallback = false)
+    void Finish(NYql::NDqProto::StatusIds::StatusCode statusCode)
     {
-        YQL_LOG(DEBUG) << __FUNCTION__ << ", retriable=" << retriable << ", needFallback=" << needFallback;
+        YQL_CLOG(DEBUG, ProviderDq) << __FUNCTION__ << " with status=" << static_cast<int>(statusCode) << " issues=" << Issues.ToString();
         if (Finished) {
-            YQL_LOG(WARN) << "Re-Finish IGNORED with Retriable=" << retriable << ", NeedFallback=" << needFallback;
+            YQL_CLOG(WARN, ProviderDq) << "Re-Finish IGNORED with status=" << static_cast<int>(statusCode);
         } else {
             FlushCounter("ExecutionTime");
             TQueryResponse result;
             IssuesToMessage(Issues, result.MutableIssues());
-            result.SetDeprecatedRetriable(retriable);
-            result.SetDeprecatedNeedFallback(needFallback);
             result.SetStatusCode(statusCode);
             FlushCounters(result);
             Send(ControlId, MakeHolder<TEvQueryResponse>(std::move(result)));
@@ -256,31 +260,34 @@ private:
 
     void OnFailure(TEvDqFailure::TPtr& ev, const NActors::TActorContext&) {
         if (!Finished) {
-            YQL_LOG_CTX_SCOPE(TraceId);
-            YQL_LOG(DEBUG) << __FUNCTION__;
+            YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+            YQL_CLOG(DEBUG, ProviderDq) << __FUNCTION__ 
+                            << ", status=" << static_cast<int>(ev->Get()->Record.GetStatusCode())
+                            << ", issues size=" << ev->Get()->Record.IssuesSize()
+                            << ", sender=" << ev->Sender;
             AddCounters(ev->Get()->Record);
-            bool retriable = ev->Get()->Record.GetDeprecatedRetriable();
-            bool fallback = ev->Get()->Record.GetDeprecatedNeedFallback();
             if (ev->Get()->Record.IssuesSize()) {
                 TIssues issues;
                 IssuesFromMessage(ev->Get()->Record.GetIssues(), issues);
                 Issues.AddIssues(issues);
+                YQL_CLOG(DEBUG, ProviderDq) << "Issues: " << Issues.ToString();
             }
-            Finish(ev->Get()->Record.GetStatusCode(), retriable, fallback);
+            Y_VERIFY(ev->Get()->Record.GetStatusCode() != NYql::NDqProto::StatusIds::SUCCESS);
+            Finish(ev->Get()->Record.GetStatusCode());
         }
     }
 
     void OnGraphFinished(TEvGraphFinished::TPtr&, const NActors::TActorContext&) {
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG) << __FUNCTION__;
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << __FUNCTION__;
         if (!Finished) {
             try {
                 TFailureInjector::Reach("dq_fail_on_finish", [] { throw yexception() << "dq_fail_on_finish"; });
-                Finish(NYql::NDqProto::StatusIds::SUCCESS, false);
+                Finish(NYql::NDqProto::StatusIds::SUCCESS);
             } catch (...) {
-                YQL_LOG(ERROR) << " FailureInjector " << CurrentExceptionMessage();
+                YQL_CLOG(ERROR, ProviderDq) << " FailureInjector " << CurrentExceptionMessage();
                 Issues.AddIssue(TIssue("FailureInjection"));
-                Finish(NYql::NDqProto::StatusIds::UNAVAILABLE, true);
+                Finish(NYql::NDqProto::StatusIds::UNAVAILABLE);
             }
         }
     }
@@ -288,10 +295,16 @@ private:
     // TBD: wait for PoisonTaken from CheckPointCoordinator before send TEvQueryResponse to PrinterId
 
     void OnQueryResponse(TEvQueryResponse::TPtr& ev, const TActorContext&) {
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG) << __FUNCTION__;
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << __FUNCTION__ << " status=" << static_cast<int>(ev->Get()->Record.GetStatusCode()) << " issuses_size=" << ev->Get()->Record.IssuesSize();
         Send(PrinterId, ev->Release().Release());
         PassAway();
+    }
+
+    void OnTransientIssues(TEvDqStats::TPtr& ev) {
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << __FUNCTION__;
+        Send(PrinterId, ev->Release().Release());
     }
 
     void Handle(NActors::TEvents::TEvPoisonTaken::TPtr&) {
@@ -299,8 +312,8 @@ private:
     }
 
     void OnAllocateWorkersResponse(TEvAllocateWorkersResponse::TPtr& ev, const NActors::TActorContext&) {
-        YQL_LOG_CTX_SCOPE(TraceId);
-        YQL_LOG(DEBUG) << "TDqExecuter::TEvAllocateWorkersResponse";
+        YQL_LOG_CTX_ROOT_SCOPE(TraceId);
+        YQL_CLOG(DEBUG, ProviderDq) << "TDqExecuter::TEvAllocateWorkersResponse";
 
         AddCounters(ev->Get()->Record);
         FlushCounter("AllocateWorkers");
@@ -310,11 +323,11 @@ private:
             case TAllocateWorkersResponse::kWorkers:
                 break;
             case TAllocateWorkersResponse::kError: {
-                YQL_LOG(ERROR) << "Error on allocate workers "
+                YQL_CLOG(ERROR, ProviderDq) << "Error on allocate workers "
                     << ev->Get()->Record.GetError().GetMessage() << ":"
                     << static_cast<int>(ev->Get()->Record.GetError().GetErrorCode());
                 Issues.AddIssue(TIssue(ev->Get()->Record.GetError().GetMessage()).SetCode(TIssuesIds::DQ_GATEWAY_NEED_FALLBACK_ERROR, TSeverityIds::S_ERROR));
-                Finish(NYql::NDqProto::StatusIds::OVERLOADED, /*retriable = */ true, /*fallback = */ true);
+                Finish(NYql::NDqProto::StatusIds::CLUSTER_OVERLOADED);
                 return;
             }
             case TAllocateWorkersResponse::kNodes:
@@ -324,7 +337,7 @@ private:
 
         auto& workerGroup = response.GetWorkers();
         ResourceId = workerGroup.GetResourceId();
-        YQL_LOG(DEBUG) << "Allocated resource " << ResourceId;
+        YQL_CLOG(DEBUG, ProviderDq) << "Allocated resource " << ResourceId;
         TVector<NActors::TActorId> workers;
         for (const auto& actorIdProto : workerGroup.GetWorkerActor()) {
             workers.emplace_back(NActors::ActorIdFromProto(actorIdProto));
@@ -341,10 +354,10 @@ private:
 
                 WorkerInfo[workerInfo.GetNodeId()] = std::make_tuple(workerInfo, taskMeta.GetStageId());
 
-                YQL_LOG(DEBUG) << "WorkerInfo: " << NDqs::NExecutionHelpers::PrettyPrintWorkerInfo(workerInfo, taskMeta.GetStageId());
-                YQL_LOG(DEBUG) << "TaskInfo: " << i << "/" << tasks[i].GetId();
+                YQL_CLOG(DEBUG, ProviderDq) << "WorkerInfo: " << NDqs::NExecutionHelpers::PrettyPrintWorkerInfo(workerInfo, taskMeta.GetStageId());
+                YQL_CLOG(DEBUG, ProviderDq) << "TaskInfo: " << i << "/" << tasks[i].GetId();
                 for (const auto& file: taskMeta.GetFiles()) {
-                    YQL_LOG(DEBUG) << " ObjectId: " << file.GetObjectId();
+                    YQL_CLOG(DEBUG, ProviderDq) << " ObjectId: " << file.GetObjectId();
                 }
                 i++;
 
@@ -353,7 +366,7 @@ private:
             AddCounter("UniqueWorkers", uniqueWorkers.size());
         }
 
-        YQL_LOG(INFO) << workers.size() << " workers allocated";
+        YQL_CLOG(INFO, ProviderDq) << workers.size() << " workers allocated";
 
         YQL_ENSURE(workers.size() == tasks.size());
 
@@ -389,7 +402,7 @@ private:
         auto readyState1 = res->Record;
         auto readyState2 = res->Record;
         Send(ControlId, res.Release());
-        if (ResultId != SelfId()) {
+        if (ResultId != SelfId() && ResultId != ControlId) {
             Send(ResultId, new TEvReadyState(std::move(readyState1)));
         }
         if (CheckPointCoordinatorId) {
@@ -455,7 +468,7 @@ private:
     ui64 ResourceId = 0;
     const TString TraceId;
     const TString Username;
-    TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters;
     TDynamicCounters::TCounterPtr LongWorkersAllocationCounter;
     TDynamicCounters::TCounterPtr ExecutionTimeoutCounter;
 
@@ -482,7 +495,7 @@ NActors::IActor* MakeDqExecuter(
     const NActors::TActorId& printerId,
     const TString& traceId, const TString& username,
     const TDqConfiguration::TPtr& settings,
-    const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters,
+    const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
     TInstant requestStartTime,
     bool createTaskSuspended
 ) {

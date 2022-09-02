@@ -31,7 +31,7 @@ private:
 };
 
 
-bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext&) {
+bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext& ctx) {
     Y_VERIFY(Ev);
     Y_VERIFY(Self->InsertTable);
     Y_VERIFY(Self->PrimaryIndex);
@@ -44,6 +44,9 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext&) {
     auto changes = Ev->Get()->IndexChanges;
     Y_VERIFY(changes);
 
+    LOG_S_DEBUG("TTxWriteIndex (" << changes->TypeString()
+        << ") changes: " << *changes << " at tablet " << Self->TabletID());
+
     bool ok = false;
     if (Ev->Get()->PutStatus == NKikimrProto::OK) {
         NOlap::TSnapshot snapshot = changes->ApplySnapshot;
@@ -55,13 +58,15 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext&) {
         NOlap::TDbWrapper dbWrap(txc.DB, &dsGroupSelector);
         ok = Self->PrimaryIndex->ApplyChanges(dbWrap, changes, snapshot); // update changes + apply
         if (ok) {
-            LOG_S_DEBUG("TTxWriteIndex (" << changes->TypeString()
-                << ") apply changes: " << *changes << " at tablet " << Self->TabletID());
+            LOG_S_DEBUG("TTxWriteIndex (" << changes->TypeString() << ") apply at tablet " << Self->TabletID());
 
             TBlobManagerDb blobManagerDb(txc.DB);
             for (const auto& cmtd : changes->DataToIndex) {
                 Self->InsertTable->EraseCommitted(dbWrap, cmtd);
                 Self->BlobManager->DeleteBlob(cmtd.BlobId, blobManagerDb);
+            }
+            if (!changes->DataToIndex.empty()) {
+                Self->UpdateInsertTableCounters();
             }
 
             const auto& switchedPortions = changes->SwitchedPortions;
@@ -197,7 +202,6 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext&) {
                 Self->BlobManager->SaveBlobBatch(std::move(Ev->Get()->BlobBatch), blobManagerDb);
             }
 
-            Self->UpdateInsertTableCounters();
             Self->UpdateIndexCounters();
         } else {
             LOG_S_INFO("TTxWriteIndex (" << changes->TypeString()
@@ -211,6 +215,7 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext&) {
     }
 
     if (BlobsToExport.size()) {
+        size_t numBlobs = BlobsToExport.size();
         for (auto& [blobId, tierName] : BlobsToExport) {
             ExportTierBlobs[tierName].emplace(blobId, TString{});
         }
@@ -219,18 +224,21 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext&) {
         ExportNo = Self->LastExportNo + 1;
         Self->LastExportNo += ExportTierBlobs.size();
 
+        LOG_S_DEBUG("TTxWriteIndex init export " << ExportNo << " of " << numBlobs << " blobs in "
+            << ExportTierBlobs.size() << " tiers at tablet " << Self->TabletID());
+
         NIceDb::TNiceDb db(txc.DB);
         Schema::SaveSpecialValue(db, Schema::EValueIds::LastExportNumber, Self->LastExportNo);
     }
 
     if (changes->IsInsert()) {
-        Self->ActiveIndexing = false;
+        Self->ActiveIndexingOrCompaction = false;
 
         Self->IncCounter(ok ? COUNTER_INDEXING_SUCCESS : COUNTER_INDEXING_FAIL);
         Self->IncCounter(COUNTER_INDEXING_BLOBS_WRITTEN, blobsWritten);
         Self->IncCounter(COUNTER_INDEXING_BYTES_WRITTEN, bytesWritten);
     } else if (changes->IsCompaction()) {
-        Self->ActiveCompaction = false;
+        Self->ActiveIndexingOrCompaction = false;
 
         Y_VERIFY(changes->CompactionInfo);
         bool inGranule = changes->CompactionInfo->InGranule;
@@ -256,7 +264,7 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext&) {
         Self->IncCounter(COUNTER_EVICTION_BYTES_WRITTEN, bytesWritten);
     }
 
-    Self->UpdateResourceMetrics(Ev->Get()->ResourceUsage);
+    Self->UpdateResourceMetrics(ctx, Ev->Get()->ResourceUsage);
     return true;
 }
 

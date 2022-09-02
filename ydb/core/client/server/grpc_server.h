@@ -32,6 +32,7 @@ public:
 
     //! Send reply.
     virtual void Reply(const NKikimrClient::TResponse& resp) = 0;
+    virtual void Reply(const NKikimrClient::TDsTestLoadResponse& resp) = 0;
     virtual void Reply(const NKikimrClient::TBsTestLoadResponse& resp) = 0;
     virtual void Reply(const NKikimrClient::TJSON& resp) = 0;
     virtual void Reply(const NKikimrClient::TNodeRegistrationResponse& resp) = 0;
@@ -60,7 +61,7 @@ public:
     void InitService(grpc::ServerCompletionQueue* cq, NGrpc::TLoggerPtr logger) override;
     void SetGlobalLimiterHandle(NGrpc::TGlobalLimiter* limiter) override;
 
-    NThreading::TFuture<void> Prepare(NActors::TActorSystem* system, const NActors::TActorId& pqMeta, const NActors::TActorId& msgBusProxy, TIntrusivePtr<NMonitoring::TDynamicCounters> counters);
+    NThreading::TFuture<void> Prepare(NActors::TActorSystem* system, const NActors::TActorId& pqMeta, const NActors::TActorId& msgBusProxy, TIntrusivePtr<::NMonitoring::TDynamicCounters> counters);
     void Start();
 
     bool IncRequest();
@@ -86,7 +87,7 @@ private:
     size_t PersQueueWriteSessionsMaxCount = 1000000;
     size_t PersQueueReadSessionsMaxCount  = 100000;
 
-    TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters;
 
     std::function<void()> InitCb_;
     // In flight request management.

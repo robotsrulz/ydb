@@ -99,28 +99,6 @@ struct TAppData {
     NYdb::TDriver* YdbDriver = nullptr;
     const NPDisk::IIoContextFactory* IoContextFactory = nullptr;
 
-    struct TDefaultTabletTypes {
-        TTabletTypes::EType SchemeShard;
-        TTabletTypes::EType DataShard;
-        TTabletTypes::EType KeyValue;
-        TTabletTypes::EType PersQueue;
-        TTabletTypes::EType PersQueueReadBalancer;
-        TTabletTypes::EType Dummy;
-        TTabletTypes::EType Coordinator;
-        TTabletTypes::EType Mediator;
-        TTabletTypes::EType Kesus;
-        TTabletTypes::EType Hive;
-        TTabletTypes::EType SysViewProcessor;
-        TTabletTypes::EType ColumnShard;
-        TTabletTypes::EType TestShard;
-        TTabletTypes::EType SequenceShard;
-        TTabletTypes::EType ReplicationController;
-
-        TDefaultTabletTypes();
-    };
-
-    TDefaultTabletTypes DefaultTabletTypes;
-
     static TIntrusivePtr<IRandomProvider> RandomProvider;
     static TIntrusivePtr<ITimeProvider> TimeProvider;
     TIntrusivePtr<IMonotonicTimeProvider> MonotonicTimeProvider;
@@ -135,7 +113,7 @@ struct TAppData {
     ui64 CompilerSchemeCacheTables;
 
     NActors::TMon* Mon;
-    NMonitoring::TDynamicCounterPtr Counters;
+    ::NMonitoring::TDynamicCounterPtr Counters;
     NMonitoring::TBusNgMonPage* BusMonPage;
     TIntrusivePtr<NKikimr::TControlBoard> Icb;
     TIntrusivePtr<NGRpcService::TInFlightLimiterRegistry> InFlightLimiterRegistry;
@@ -157,6 +135,7 @@ struct TAppData {
     TFeatureFlags FeatureFlags;
     NKikimrConfig::THiveConfig HiveConfig;
     NKikimrConfig::TDataShardConfig DataShardConfig;
+    NKikimrConfig::TSchemeShardConfig SchemeShardConfig;
     NKikimrConfig::TMeteringConfig MeteringConfig;
     NKikimrConfig::TCompactionConfig CompactionConfig;
     NKikimrConfig::TDomainsConfig DomainsConfig;
@@ -165,6 +144,7 @@ struct TAppData {
     bool EnableKqpSpilling = false;
     bool AllowShadowDataInSchemeShardForTests = false;
     bool EnableMvccSnapshotWithLegacyDomainRoot = false;
+    bool UsePartitionStatsCollectorForTests = false;
     TVector<TString> AdministrationAllowedSIDs; // users/groups which allowed to perform administrative tasks
     TVector<TString> DefaultUserSIDs;
     TString AllAuthenticatedUsers;

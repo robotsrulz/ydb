@@ -2,12 +2,12 @@
 
 #include <ydb/library/yql/dq/common/dq_common.h>
 #include <ydb/library/yql/dq/proto/dq_tasks.pb.h>
+#include <ydb/library/yql/dq/runtime/dq_async_output.h>
 #include <ydb/library/yql/dq/runtime/dq_compute.h>
 #include <ydb/library/yql/dq/runtime/dq_input_channel.h>
 #include <ydb/library/yql/dq/runtime/dq_output_channel.h>
 #include <ydb/library/yql/dq/runtime/dq_output_consumer.h>
-#include <ydb/library/yql/dq/runtime/dq_source.h>
-#include <ydb/library/yql/dq/runtime/dq_sink.h>
+#include <ydb/library/yql/dq/runtime/dq_async_input.h>
 
 #include <ydb/library/yql/minikql/mkql_alloc.h>
 #include <ydb/library/yql/minikql/mkql_function_registry.h>
@@ -81,7 +81,7 @@ struct TTaskRunnerStatsBase {
     NMonitoring::IHistogramCollectorPtr ComputeCpuTimeByRun; // in millis
 
     THashMap<ui64, const TDqInputChannelStats*> InputChannels; // Channel id -> Channel stats
-    THashMap<ui64, const TDqSourceStats*> Sources; // Input index -> Source stats
+    THashMap<ui64, const TDqAsyncInputBufferStats*> Sources; // Input index -> Source stats
     THashMap<ui64, const TDqOutputChannelStats*> OutputChannels; // Channel id -> Channel stats
 
     TVector<TMkqlStat> MkqlStats;
@@ -127,7 +127,7 @@ struct TTaskRunnerStatsBase {
 
 private:
     virtual TDqInputChannelStats* MutableInputChannel(ui64 channelId) = 0;
-    virtual TDqSourceStats* MutableSource(ui64 sourceId) = 0;  // todo: (whcrc) unused, not modified by these pointers
+    virtual TDqAsyncInputBufferStats* MutableSource(ui64 sourceId) = 0;  // todo: (whcrc) unused, not modified by these pointers
     virtual TDqOutputChannelStats* MutableOutputChannel(ui64 channelId) = 0;
 };
 
@@ -137,8 +137,8 @@ struct TDqTaskRunnerStats : public TTaskRunnerStatsBase {
         return const_cast<TDqInputChannelStats*>(InputChannels[channelId]);
     }
 
-    TDqSourceStats* MutableSource(ui64 sourceId) override {
-        return const_cast<TDqSourceStats*>(Sources[sourceId]);
+    TDqAsyncInputBufferStats* MutableSource(ui64 sourceId) override {
+        return const_cast<TDqAsyncInputBufferStats*>(Sources[sourceId]);
     }
 
     TDqOutputChannelStats* MutableOutputChannel(ui64 channelId) override {
@@ -149,7 +149,7 @@ struct TDqTaskRunnerStats : public TTaskRunnerStatsBase {
 struct TDqTaskRunnerStatsInplace : public TTaskRunnerStatsBase {
     // all stats are owned by this object
     TVector<THolder<TDqInputChannelStats>> InputChannelHolder;
-    TVector<THolder<TDqSourceStats>> SourceHolder;
+    TVector<THolder<TDqAsyncInputBufferStats>> SourceHolder;
     TVector<THolder<TDqOutputChannelStats>> OutputChannelHolder;
 
     template<typename TStat>
@@ -166,7 +166,7 @@ struct TDqTaskRunnerStatsInplace : public TTaskRunnerStatsBase {
         return GetOrCreate(InputChannels, InputChannelHolder, channelId);
     }
 
-    TDqSourceStats* MutableSource(ui64 sourceId) override {
+    TDqAsyncInputBufferStats* MutableSource(ui64 sourceId) override {
         return GetOrCreate(Sources, SourceHolder, sourceId);
     }
 
@@ -271,6 +271,7 @@ struct TDqTaskRunnerSettings {
 struct TDqTaskRunnerMemoryLimits {
     ui32 ChannelBufferSize = 0;
     ui32 OutputChunkMaxSize = 0;
+    ui32 ChunkSizeLimit = 48_MB;
 };
 
 NUdf::TUnboxedValue DqBuildInputValue(const NDqProto::TTaskInput& inputDesc, const NKikimr::NMiniKQL::TType* type,
@@ -292,15 +293,20 @@ public:
 
     virtual void Prepare(const NDqProto::TDqTask& task, const TDqTaskRunnerMemoryLimits& memoryLimits,
         const IDqTaskRunnerExecutionContext& execCtx = TDqTaskRunnerExecutionContext(),
-        const TDqTaskRunnerParameterProvider& parameterProvider = {}) = 0;
+        const TDqTaskRunnerParameterProvider& parameterProvider = {},
+        const std::shared_ptr<NKikimr::NMiniKQL::TPatternWithEnv>& compPattern = {}) = 0;
     virtual ERunStatus Run() = 0;
 
     virtual bool HasEffects() const = 0;
 
     virtual IDqInputChannel::TPtr GetInputChannel(ui64 channelId) = 0;
-    virtual IDqSource::TPtr GetSource(ui64 inputIndex) = 0;
+    virtual IDqAsyncInputBuffer::TPtr GetSource(ui64 inputIndex) = 0;
     virtual IDqOutputChannel::TPtr GetOutputChannel(ui64 channelId) = 0;
     virtual IDqAsyncOutputBuffer::TPtr GetSink(ui64 outputIndex) = 0;
+    virtual std::pair<NUdf::TUnboxedValue, IDqAsyncInputBuffer::TPtr> GetInputTransform(ui64 inputIndex) = 0;
+    virtual std::pair<IDqAsyncOutputBuffer::TPtr, IDqOutputConsumer::TPtr> GetOutputTransform(ui64 outputIndex) = 0;
+
+    virtual IRandomProvider* GetRandomProvider() const = 0;
 
     // if memoryLimit = Nothing()  then don't set memory limit, use existing one (if any)
     // if memoryLimit = 0          then set unlimited

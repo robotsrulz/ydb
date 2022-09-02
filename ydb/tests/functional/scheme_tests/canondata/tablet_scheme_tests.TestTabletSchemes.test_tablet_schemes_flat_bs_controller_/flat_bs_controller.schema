@@ -7,16 +7,6 @@
         ],
         "ColumnsAdded": [
             {
-                "ColumnId": 17,
-                "ColumnName": "PDiskSpaceColorBorder",
-                "ColumnType": "Uint32"
-            },
-            {
-                "ColumnId": 18,
-                "ColumnName": "GroupLayoutSanitizer",
-                "ColumnType": "Bool"
-            },
-            {
                 "ColumnId": 1,
                 "ColumnName": "FixedKey",
                 "ColumnType": "Bool"
@@ -90,14 +80,27 @@
                 "ColumnId": 16,
                 "ColumnName": "MaxScrubbedDisksAtOnce",
                 "ColumnType": "Uint32"
+            },
+            {
+                "ColumnId": 17,
+                "ColumnName": "PDiskSpaceColorBorder",
+                "ColumnType": "Uint32"
+            },
+            {
+                "ColumnId": 18,
+                "ColumnName": "GroupLayoutSanitizer",
+                "ColumnType": "Bool"
+            },
+            {
+                "ColumnId": 19,
+                "ColumnName": "NextVirtualGroupId",
+                "ColumnType": "Uint32"
             }
         ],
         "ColumnsDropped": [],
         "ColumnFamilies": {
             "0": {
                 "Columns": [
-                    17,
-                    18,
                     1,
                     2,
                     4,
@@ -112,7 +115,10 @@
                     13,
                     14,
                     15,
-                    16
+                    16,
+                    17,
+                    18,
+                    19
                 ],
                 "RoomID": 0,
                 "Codec": 0,
@@ -379,6 +385,46 @@
                 "ColumnId": 14,
                 "ColumnName": "SeenOperational",
                 "ColumnType": "Bool"
+            },
+            {
+                "ColumnId": 15,
+                "ColumnName": "DecommitStatus",
+                "ColumnType": "Uint32"
+            },
+            {
+                "ColumnId": 102,
+                "ColumnName": "VirtualGroupState",
+                "ColumnType": "Uint32"
+            },
+            {
+                "ColumnId": 106,
+                "ColumnName": "BlobDepotConfig",
+                "ColumnType": "String"
+            },
+            {
+                "ColumnId": 109,
+                "ColumnName": "BlobDepotId",
+                "ColumnType": "Uint64"
+            },
+            {
+                "ColumnId": 110,
+                "ColumnName": "ErrorReason",
+                "ColumnType": "Utf8"
+            },
+            {
+                "ColumnId": 111,
+                "ColumnName": "NeedAlter",
+                "ColumnType": "Bool"
+            },
+            {
+                "ColumnId": 112,
+                "ColumnName": "VirtualGroupName",
+                "ColumnType": "Utf8"
+            },
+            {
+                "ColumnId": 113,
+                "ColumnName": "HiveId",
+                "ColumnType": "Uint64"
             }
         ],
         "ColumnsDropped": [],
@@ -398,7 +444,15 @@
                     11,
                     12,
                     13,
-                    14
+                    14,
+                    15,
+                    102,
+                    106,
+                    109,
+                    110,
+                    111,
+                    112,
+                    113
                 ],
                 "RoomID": 0,
                 "Codec": 0,

@@ -17,6 +17,9 @@
 #include <util/stream/input.h>
 #include <util/random/fast.h>
 #include <util/system/unaligned_mem.h>
+#include <util/string/vector.h>
+#include <util/string/type.h>
+#include <util/string/cast.h>
 
 namespace NKikimr {
 
@@ -584,7 +587,7 @@ TBlobStorageGroupInfo::TBlobStorageGroupInfo(TBlobStorageGroupType gtype, ui32 n
 }
 
 TBlobStorageGroupInfo::TBlobStorageGroupInfo(std::shared_ptr<TTopology> topology, TDynamicInfo&& dyn, TString storagePoolName,
-        TMaybe<TKikimrScopeId> acceptedScope, TPDiskCategory::EDeviceType deviceType)
+        TMaybe<TKikimrScopeId> acceptedScope, NPDisk::EDeviceType deviceType)
     : GroupID(dyn.GroupId)
     , GroupGeneration(dyn.GroupGeneration)
     , Type(topology->GType)
@@ -596,7 +599,7 @@ TBlobStorageGroupInfo::TBlobStorageGroupInfo(std::shared_ptr<TTopology> topology
 {}
 
 TBlobStorageGroupInfo::TBlobStorageGroupInfo(TTopology&& topology, TDynamicInfo&& dyn, TString storagePoolName,
-        TMaybe<TKikimrScopeId> acceptedScope, TPDiskCategory::EDeviceType deviceType)
+        TMaybe<TKikimrScopeId> acceptedScope, NPDisk::EDeviceType deviceType)
     : TBlobStorageGroupInfo(std::make_shared<TTopology>(std::move(topology)), std::move(dyn), std::move(storagePoolName),
             std::move(acceptedScope), deviceType)
 {
@@ -651,12 +654,18 @@ TIntrusivePtr<TBlobStorageGroupInfo> TBlobStorageGroupInfo::Parse(const NKikimrB
         const auto& scope = group.GetAcceptedScope();
         acceptedScope.ConstructInPlace(scope.GetX1(), scope.GetX2());
     }
-    TPDiskCategory::EDeviceType commonDeviceType = TPDiskCategory::DEVICE_TYPE_UNKNOWN;
+    NPDisk::EDeviceType commonDeviceType = NPDisk::DEVICE_TYPE_UNKNOWN;
     if (group.HasDeviceType()) {
         commonDeviceType = PDiskTypeToPDiskType(group.GetDeviceType());
     }
     auto res = MakeIntrusive<TBlobStorageGroupInfo>(std::move(topology), std::move(dyn), group.GetStoragePoolName(),
         acceptedScope, commonDeviceType);
+    if (group.HasBlobDepotId()) {
+        res->BlobDepotId = group.GetBlobDepotId();
+    }
+    if (group.HasDecommitStatus()) {
+        res->DecommitStatus = group.GetDecommitStatus();
+    }
 
     // process encryption parameters
     res->EncryptionMode = static_cast<EEncryptionMode>(group.GetEncryptionMode());
@@ -911,6 +920,42 @@ void VDiskIDFromVDiskID(const TVDiskID &id, NKikimrBlobStorage::TVDiskID *proto)
     proto->SetRing(id.FailRealm);
     proto->SetDomain(id.FailDomain);
     proto->SetVDisk(id.VDisk);
+}
+
+TVDiskID VDiskIDFromString(TString str, bool* isGenerationSet) {
+    if (str[0] != '[' || str.back() != ']') {
+        return TVDiskID::InvalidId;
+    }
+    str.pop_back();
+    str.erase(str.begin());
+    TVector<TString> parts = SplitString(str, ":");
+    if (parts.size() != 5) {
+        return TVDiskID::InvalidId;
+    } 
+
+    ui32 groupGeneration = 0;
+
+    if (!IsHexNumber(parts[0]) || !IsNumber(parts[2]) || !IsNumber(parts[3]) || !IsNumber(parts[4]) 
+        || !(IsNumber(parts[1]) || parts[1] == "_")) {
+        return TVDiskID::InvalidId;
+    }
+    
+    if (parts[1] == "_") {
+        if (isGenerationSet) {
+            *isGenerationSet = false;
+        }
+    } else {
+        if (isGenerationSet) {
+            *isGenerationSet = true;
+        }
+        groupGeneration = IntFromString<ui32, 10>(parts[1]);
+    }
+
+    return TVDiskID(IntFromString<ui32, 16>(parts[0]), 
+        groupGeneration, 
+        IntFromString<ui8, 10>(parts[2]), 
+        IntFromString<ui8, 10>(parts[3]), 
+        IntFromString<ui8, 10>(parts[4]));
 }
 
 

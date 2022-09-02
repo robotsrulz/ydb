@@ -56,6 +56,12 @@ TExprBase KqpPropagatePrecomuteScalarRowset(TExprBase node, TExprContext& ctx, I
                     return false;
                 }
 
+                auto consumers = GetConsumers(maybePrecompute.Cast(), parentsMap);
+                if (consumers.size() > 1) {
+                    visitResult = false;
+                    return false;
+                }
+
                 precompute = maybePrecompute;
                 return false;
             }
@@ -95,90 +101,6 @@ TExprBase KqpPropagatePrecomuteScalarRowset(TExprBase node, TExprContext& ctx, I
         .Done();
 
     auto result = DqPushLambdaToStageUnionAll(precompute.Cast().Connection(), processLambda, {}, ctx, optCtx);
-    if (!result) {
-        return node;
-    }
-
-    return Build<TDqPhyPrecompute>(ctx, node.Pos())
-        .Connection(result.Cast())
-        .Done();
-}
-
-TExprBase KqpPropagatePrecomuteTake(TExprBase node, TExprContext& ctx, IOptimizationContext& optCtx,
-    const TParentsMap& parentsMap, bool allowStageMultiUsage)
-{
-    if (!node.Maybe<TCoTake>().Input().Maybe<TDqPhyPrecompute>()) {
-        return node;
-    }
-
-    auto take = node.Cast<TCoTake>();
-    auto precompute = take.Input().Cast<TDqPhyPrecompute>();
-
-    if (!IsSingleConsumerConnection(precompute.Connection(), parentsMap, allowStageMultiUsage)) {
-        return node;
-    }
-
-    if (!CanPushDqExpr(take.Count(), precompute.Connection())) {
-        return node;
-    }
-
-    auto takeLambda = Build<TCoLambda>(ctx, node.Pos())
-        .Args({"list_stream"})
-        .Body<TCoMap>()
-            .Input("list_stream")
-            .Lambda()
-                .Args({"list"})
-                .Body<TCoTake>()
-                    .Input("list")
-                    .Count(take.Count())
-                    .Build()
-                .Build()
-            .Build()
-        .Done();
-
-    auto result = DqPushLambdaToStageUnionAll(precompute.Connection(), takeLambda, {}, ctx, optCtx);
-    if (!result) {
-        return node;
-    }
-
-    return Build<TDqPhyPrecompute>(ctx, node.Pos())
-        .Connection(result.Cast())
-        .Done();
-}
-
-TExprBase KqpPropagatePrecomuteFlatmap(TExprBase node, TExprContext& ctx, IOptimizationContext& optCtx,
-    const TParentsMap& parentsMap, bool allowStageMultiUsage)
-{
-    if (!node.Maybe<TCoFlatMap>().Input().Maybe<TDqPhyPrecompute>()) {
-        return node;
-    }
-
-    auto flatmap = node.Cast<TCoFlatMap>();
-    auto precompute = flatmap.Input().Cast<TDqPhyPrecompute>();
-
-    if (!IsSingleConsumerConnection(precompute.Connection(), parentsMap, allowStageMultiUsage)) {
-        return node;
-    }
-
-    if (!CanPushDqExpr(flatmap.Lambda(), precompute.Connection())) {
-        return node;
-    }
-
-    auto flatmapLambda = Build<TCoLambda>(ctx, node.Pos())
-        .Args({"list_stream"})
-        .Body<TCoMap>()
-            .Input("list_stream")
-            .Lambda()
-                .Args({"list"})
-                .Body<TCoFlatMap>()
-                    .Input("list")
-                    .Lambda(flatmap.Lambda())
-                    .Build()
-                .Build()
-            .Build()
-        .Done();
-
-    auto result = DqPushLambdaToStageUnionAll(precompute.Connection(), flatmapLambda, {}, ctx, optCtx);
     if (!result) {
         return node;
     }

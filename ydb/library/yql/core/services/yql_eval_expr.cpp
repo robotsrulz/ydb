@@ -137,7 +137,10 @@ private:
         static THashSet<TStringBuf> FILE_CALLABLES = {"FilePath", "FileContent", "FolderPath"};
         if (node.IsCallable(FILE_CALLABLES)) {
             const auto alias = node.Head().Content();
-            if (PendingFileAliases.contains(alias) || AnyOf(PendingFolderPrefixes, [alias](const TStringBuf prefix) { return alias.StartsWith(prefix); })) {
+            if (PendingFileAliases.contains(alias) || AnyOf(PendingFolderPrefixes, [alias](const TStringBuf prefix) {
+                auto withSlash = TString(prefix) + "/";
+                return alias.StartsWith(withSlash);
+                })) {
                 for (auto& curr: CurrentEvalNodes) {
                     Reachable.erase(curr);
                 }
@@ -439,7 +442,7 @@ IGraphTransformer::TStatus EvaluateExpression(const TExprNode::TPtr& input, TExp
                                 continue;
                             }
 
-                            if (!p->GetExecWorld(*x.first, calcWorldRoot)) {
+                            if (!p->GetExecWorld(x.first, calcWorldRoot)) {
                                 canExec = false;
                                 break;
                             }
@@ -472,12 +475,12 @@ IGraphTransformer::TStatus EvaluateExpression(const TExprNode::TPtr& input, TExp
                 ctx.AddError(TIssue(ctx.GetPosition(input->Pos()), TStringBuilder() << "Only pure expressions are supported"));
                 return IGraphTransformer::TStatus::Error;
             }
+        }
 
-            if (!calcWorldRoot) {
-                calcWorldRoot = ctx.NewWorld(input->Pos());
-                calcWorldRoot->SetTypeAnn(ctx.MakeType<TUnitExprType>());
-                calcWorldRoot->SetState(TExprNode::EState::ConstrComplete);
-            }
+        if (!calcWorldRoot) {
+            calcWorldRoot = ctx.NewWorld(input->Pos());
+            calcWorldRoot->SetTypeAnn(ctx.MakeType<TUnitExprType>());
+            calcWorldRoot->SetState(TExprNode::EState::ConstrComplete);
         }
 
         return IGraphTransformer::TStatus::Ok;
@@ -945,10 +948,10 @@ IGraphTransformer::TStatus EvaluateExpression(const TExprNode::TPtr& input, TExp
             calcWorldRoot.Drop();
             fullTransformer->Rewind();
             auto prevSteps = ctx.Step;
-            types.EvaluationInProgress = true;
+            ++types.EvaluationInProgress;
             status = SyncTransform(*fullTransformer, clonedArg, ctx);
             ctx.Step = prevSteps;
-            types.EvaluationInProgress = false;
+            --types.EvaluationInProgress;
             if (status.Level == IGraphTransformer::TStatus::Error) {
                 return nullptr;
             }

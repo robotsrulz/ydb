@@ -21,6 +21,7 @@ namespace NActors {
             ES_PROFILER = 9,
             ES_YF = 10,
             ES_HTTP = 11,
+            ES_PGWIRE = 12,
 
             ES_USERSPACE = 4096,
 
@@ -97,6 +98,7 @@ namespace NActors {
                 InvokeResult,
                 CoroTimeout,
                 InvokeQuery,
+                Wilson,
                 End,
 
                 // Compatibility section

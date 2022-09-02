@@ -44,12 +44,16 @@ struct TSettings {
     TControlWrapper CacheDataAfterIndexing;
     TControlWrapper CacheDataAfterCompaction;
     TControlWrapper MaxSmallBlobSize;
+    TControlWrapper OverloadTxInFly;
+    TControlWrapper OverloadWritesInFly;
 
     TSettings()
         : BlobWriteGrouppingEnabled(1, 0, 1)
         , CacheDataAfterIndexing(1, 0, 1)
         , CacheDataAfterCompaction(1, 0, 1)
         , MaxSmallBlobSize(0, 0, 8000000)
+        , OverloadTxInFly(1000, 0, 10000)
+        , OverloadWritesInFly(1000, 0, 10000)
     {}
 
     void RegisterControls(TControlBoard& icb) {
@@ -57,6 +61,8 @@ struct TSettings {
         icb.RegisterSharedControl(CacheDataAfterIndexing, "ColumnShardControls.CacheDataAfterIndexing");
         icb.RegisterSharedControl(CacheDataAfterCompaction, "ColumnShardControls.CacheDataAfterCompaction");
         icb.RegisterSharedControl(MaxSmallBlobSize, "ColumnShardControls.MaxSmallBlobSize");
+        icb.RegisterSharedControl(OverloadTxInFly, "ColumnShardControls.OverloadTxInFly");
+        icb.RegisterSharedControl(OverloadWritesInFly, "ColumnShardControls.OverloadWritesInFly");
     }
 };
 
@@ -128,6 +134,7 @@ class TColumnShard
 
     void Die(const TActorContext& ctx) override {
         // TODO
+        NTabletPipe::CloseAndForgetClient(SelfId(), StatsReportPipe);
         UnregisterMediatorTimeCast();
         return IActor::Die(ctx);
     }
@@ -158,7 +165,7 @@ class TColumnShard
     }
 
     void IncCounter(NColumnShard::EPercentileCounters counter, const TDuration& latency) const {
-        TabletCounters->Percentile()[counter].IncrementFor(latency.MilliSeconds());
+        TabletCounters->Percentile()[counter].IncrementFor(latency.MicroSeconds());
     }
 
 protected:
@@ -285,20 +292,7 @@ private:
             return DropVersion != TRowVersion::Max();
         }
     };
-#if 0
-    struct TTtlSettingsPreset {
-        using TVerProto = NKikimrTxColumnShard::TTtlSettingsPresetVersionInfo;
 
-        ui32 Id;
-        TString Name;
-        TMap<TRowVersion, TVerProto> Versions;
-        TRowVersion DropVersion = TRowVersion::Max();
-
-        bool IsDropped() const {
-            return DropVersion != TRowVersion::Max();
-        }
-    };
-#endif
     struct TTableInfo {
         using TVerProto = NKikimrTxColumnShard::TTableVersionInfo;
 
@@ -340,6 +334,10 @@ private:
     ui64 LastPlannedTxId = 0;
     ui64 LastCompactedGranule = 0;
     ui64 LastExportNo = 0;
+    ui64 WritesInFly = 0;
+    ui64 StorePathId = 0;
+    ui64 StatsReportRound = 0;
+    ui64 BackgroundActivation = 0;
 
     TIntrusivePtr<TMediatorTimecastEntry> MediatorTimeCastEntry;
     bool MediatorTimeCastRegistered = false;
@@ -348,11 +346,14 @@ private:
     TDuration MaxCommitTxDelay = TDuration::Seconds(30); // TODO: Make configurable?
     TDuration ActivationPeriod = TDuration::Seconds(60);
     TDuration FailActivationDelay = TDuration::Seconds(1);
+    TDuration StatsReportInterval = TDuration::Seconds(10);
     TInstant LastBackActivation;
+    TInstant LastStatsReport;
 
     TActorId IndexingActor;     // It's logically bounded to 1: we move each portion of data to multiple indices.
     TActorId CompactionActor;   // It's memory bounded to 1: we have no memory for parallel compation.
     TActorId EvictionActor;
+    TActorId StatsReportPipe;
     THashMap<TString, TActorId> S3Actors;
     std::unique_ptr<TTabletCountersBase> TabletCountersPtr;
     TTabletCountersBase* TabletCounters;
@@ -372,15 +373,13 @@ private:
     THashMap<ui64, TAlterMeta> AltersInFlight;
     THashMap<ui64, TCommitMeta> CommitsInFlight; // key is TxId from propose
     THashMap<ui32, TSchemaPreset> SchemaPresets;
-    //THashMap<ui32, TTtlSettingsPreset> TtlSettingsPresets;
     THashMap<ui64, TTableInfo> Tables;
     THashMap<TWriteId, TLongTxWriteInfo> LongTxWrites;
     THashMap<TULID, TLongTxWriteInfo*> LongTxWritesByUniqueId;
     TMultiMap<TRowVersion, TEvColumnShard::TEvRead::TPtr> WaitingReads;
     TMultiMap<TRowVersion, TEvColumnShard::TEvScan::TPtr> WaitingScans;
     THashSet<ui64> PathsToDrop;
-    bool ActiveIndexing = false;
-    bool ActiveCompaction = false;
+    bool ActiveIndexingOrCompaction = false;
     bool ActiveCleanup = false;
     bool ActiveTtl = false;
     std::unique_ptr<TBlobManager> BlobManager;
@@ -401,13 +400,28 @@ private:
     ui64 GetAllowedStep() const;
     bool HaveOutdatedTxs() const;
 
+    bool ShardOverloaded() const {
+        ui64 txLimit = Settings.OverloadTxInFly;
+        ui64 writesLimit = Settings.OverloadWritesInFly;
+        return (txLimit && Executor()->GetStats().TxInFly > txLimit) ||
+           (writesLimit && WritesInFly > writesLimit);
+    }
+
+    bool InsertTableOverloaded() const {
+        return InsertTable && InsertTable->HasOverloaded();
+    }
+
+    bool IndexOverloaded() const {
+        return PrimaryIndex && PrimaryIndex->HasOverloadedGranules();
+    }
+
     TWriteId GetLongTxWrite(NIceDb::TNiceDb& db, const NLongTxService::TLongTxId& longTxId);
     void AddLongTxWrite(TWriteId writeId, ui64 txId);
     void LoadLongTxWrite(TWriteId writeId, const NLongTxService::TLongTxId& longTxId);
-    void RemoveLongTxWrite(NIceDb::TNiceDb& db, TWriteId writeId, ui64 txId = 0);
+    bool RemoveLongTxWrite(NIceDb::TNiceDb& db, TWriteId writeId, ui64 txId = 0);
     bool RemoveTx(NTable::TDatabase& database, ui64 txId);
 
-    void EnqueueProgressTx();
+    void EnqueueProgressTx(const TActorContext& ctx);
     void EnqueueBackgroundActivities(bool periodic = false, bool insertOnly = false);
 
     void UpdateSchemaSeqNo(const TMessageSeqNo& seqNo, NTabletFlatExecutor::TTransactionContext& txc);
@@ -419,6 +433,7 @@ private:
     //ui32 EnsureTtlSettingsPreset(NIceDb::TNiceDb& db, const NKikimrSchemeOp::TColumnTableTtlSettingsPreset& presetProto, const TRowVersion& version);
 
     void RunSchemaTx(const NKikimrTxColumnShard::TSchemaTxBody& body, const TRowVersion& version, NTabletFlatExecutor::TTransactionContext& txc);
+    void RunInit(const NKikimrTxColumnShard::TInitShard& body, const TRowVersion& version, NTabletFlatExecutor::TTransactionContext& txc);
     void RunEnsureTable(const NKikimrTxColumnShard::TCreateTable& body, const TRowVersion& version, NTabletFlatExecutor::TTransactionContext& txc);
     void RunAlterTable(const NKikimrTxColumnShard::TAlterTable& body, const TRowVersion& version, NTabletFlatExecutor::TTransactionContext& txc);
     void RunDropTable(const NKikimrTxColumnShard::TDropTable& body, const TRowVersion& version, NTabletFlatExecutor::TTransactionContext& txc);
@@ -445,7 +460,9 @@ private:
     void UpdateBlobMangerCounters();
     void UpdateInsertTableCounters();
     void UpdateIndexCounters();
-    void UpdateResourceMetrics(const TUsage& usage);
+    void UpdateResourceMetrics(const TActorContext& ctx, const TUsage& usage);
+    ui64 MemoryUsage() const;
+    void SendPeriodicStats();
 
 public:
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {

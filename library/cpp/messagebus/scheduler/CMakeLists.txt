@@ -12,6 +12,7 @@ target_link_libraries(cpp-messagebus-scheduler PUBLIC
   contrib-libs-cxxsupp
   yutil
   cpp-threading-future
+  cpp-deprecated-atomic
 )
 target_sources(cpp-messagebus-scheduler PRIVATE
   ${CMAKE_SOURCE_DIR}/library/cpp/messagebus/scheduler/scheduler.cpp

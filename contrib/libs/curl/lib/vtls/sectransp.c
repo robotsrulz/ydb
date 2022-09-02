@@ -19,6 +19,8 @@
  * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
  * KIND, either express or implied.
  *
+ * SPDX-License-Identifier: curl
+ *
  ***************************************************************************/
 
 /*
@@ -2045,8 +2047,9 @@ static CURLcode sectransp_connect_step1(struct Curl_easy *data,
     err = SSLSetPeerDomainName(backend->ssl_ctx, snihost, snilen);
 
     if(err != noErr) {
-      infof(data, "WARNING: SSL: SSLSetPeerDomainName() failed: OSStatus %d",
+      failf(data, "SSL: SSLSetPeerDomainName() failed: OSStatus %d",
             err);
+      return CURLE_SSL_CONNECT_ERROR;
     }
 
     if((Curl_inet_pton(AF_INET, hostname, &addr))
@@ -2963,7 +2966,7 @@ collect_server_cert(struct Curl_easy *data,
      private API and doesn't work as expected. So we have to look for
      a different symbol to make sure this code is only executed under
      Lion or later. */
-  if(SecTrustEvaluateAsync) {
+  if(SecTrustCopyPublicKey) {
 #pragma unused(server_certs)
     err = SSLCopyPeerTrust(backend->ssl_ctx, &trust);
     /* For some reason, SSLCopyPeerTrust() can return noErr and yet return

@@ -48,10 +48,8 @@ struct TDqComputeEvents {
         EvGetTaskStateResult,
         EvStateRequest,
         EvNewCheckpointCoordinatorAck,
-        EvNewSourceDataArrived,
-        EvSourceError,
-        EvTransformNewData,
-        EvTransformCompleted,
+        EvNewAsyncInputDataArrived,
+        EvAsyncInputError,
         // place all new events here
 
         EvEnd

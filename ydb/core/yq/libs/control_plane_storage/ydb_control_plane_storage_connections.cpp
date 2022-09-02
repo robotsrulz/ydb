@@ -108,6 +108,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateConne
     validators.push_back(validatorCountConnections);
 
     const auto query = queryBuilder.Build();
+
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
     TAsyncStatus result = Write(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo, validators);
     auto prepare = [response] { return *response; };
@@ -196,6 +197,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListConnect
             filters.push_back("`" CONNECTION_TYPE_COLUMN_NAME "` = $connection_type");
         }
 
+        if (request.filter().visibility() != YandexQuery::Acl::VISIBILITY_UNSPECIFIED) {
+            queryBuilder.AddInt64("visibility", request.filter().visibility());
+            filters.push_back("`" VISIBILITY_COLUMN_NAME "` = $visibility");
+        }
+
         filter = JoinSeq(" AND ", filters);
     }
 
@@ -212,7 +218,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListConnect
 
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
     auto prepare = [resultSets=resultSets, limit] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";
@@ -306,7 +312,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeCon
 
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
     auto prepare = [=, resultSets=resultSets] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";

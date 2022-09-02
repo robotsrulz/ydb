@@ -18,6 +18,8 @@
  * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
  * KIND, either express or implied.
  *
+ * SPDX-License-Identifier: curl
+ *
  ***************************************************************************/
 
 /*
@@ -215,11 +217,10 @@
  * OpenSSL: supported since 1.0.2, see
  *   https://www.openssl.org/docs/manmaster/man3/SSL_CTX_set1_groups.html
  * BoringSSL: supported since 5fd1807d95f7 (committed 2016-09-30)
- * LibreSSL: not tested.
+ * LibreSSL: since 2.5.3 (April 12, 2017)
  */
-#if ((OPENSSL_VERSION_NUMBER >= 0x10002000L) && \
-     !defined(LIBRESSL_VERSION_NUMBER)) || \
-    defined(OPENSSL_IS_BORINGSSL)
+#if (OPENSSL_VERSION_NUMBER >= 0x10002000L) ||  \
+  defined(OPENSSL_IS_BORINGSSL)
 #define HAVE_SSL_CTX_SET_EC_CURVES
 #endif
 
@@ -485,36 +486,19 @@ static CURLcode ossl_seed(struct Curl_easy *data)
   return CURLE_SSL_CONNECT_ERROR;
 #else
 
-#ifndef RANDOM_FILE
-  /* if RANDOM_FILE isn't defined, we only perform this if an option tells
-     us to! */
-  if(data->set.str[STRING_SSL_RANDOM_FILE])
-#define RANDOM_FILE "" /* doesn't matter won't be used */
+#ifdef RANDOM_FILE
+  RAND_load_file(RANDOM_FILE, RAND_LOAD_LENGTH);
+  if(rand_enough())
+    return CURLE_OK;
 #endif
-  {
-    /* let the option override the define */
-    RAND_load_file((data->set.str[STRING_SSL_RANDOM_FILE]?
-                    data->set.str[STRING_SSL_RANDOM_FILE]:
-                    RANDOM_FILE),
-                   RAND_LOAD_LENGTH);
-    if(rand_enough())
-      return CURLE_OK;
-  }
 
-#if defined(HAVE_RAND_EGD)
-  /* only available in OpenSSL 0.9.5 and later */
+#if defined(HAVE_RAND_EGD) && defined(EGD_SOCKET)
+  /* available in OpenSSL 0.9.5 and later */
   /* EGD_SOCKET is set at configure time or not at all */
-#ifndef EGD_SOCKET
-  /* If we don't have the define set, we only do this if the egd-option
-     is set */
-  if(data->set.str[STRING_SSL_EGDSOCKET])
-#define EGD_SOCKET "" /* doesn't matter won't be used */
-#endif
   {
     /* If there's an option and a define, the option overrides the
        define */
-    int ret = RAND_egd(data->set.str[STRING_SSL_EGDSOCKET]?
-                       data->set.str[STRING_SSL_EGDSOCKET]:EGD_SOCKET);
+    int ret = RAND_egd(EGD_SOCKET);
     if(-1 != ret) {
       if(rand_enough())
         return CURLE_OK;
@@ -2663,7 +2647,7 @@ static CURLcode ossl_connect_step1(struct Curl_easy *data,
 #endif
   const long int ssl_version = SSL_CONN_CONFIG(version);
 #ifdef USE_OPENSSL_SRP
-  const enum CURL_TLSAUTH ssl_authtype = SSL_SET_OPTION(authtype);
+  const enum CURL_TLSAUTH ssl_authtype = SSL_SET_OPTION(primary.authtype);
 #endif
   char * const ssl_cert = SSL_SET_OPTION(primary.clientcert);
   const struct curl_blob *ssl_cert_blob = SSL_SET_OPTION(primary.cert_blob);
@@ -2674,7 +2658,7 @@ static CURLcode ossl_connect_step1(struct Curl_easy *data,
     (ca_info_blob ? NULL : SSL_CONN_CONFIG(CAfile));
   const char * const ssl_capath = SSL_CONN_CONFIG(CApath);
   const bool verifypeer = SSL_CONN_CONFIG(verifypeer);
-  const char * const ssl_crlfile = SSL_SET_OPTION(CRLfile);
+  const char * const ssl_crlfile = SSL_SET_OPTION(primary.CRLfile);
   char error_buffer[256];
   struct ssl_backend_data *backend = connssl->backend;
   bool imported_native_ca = false;
@@ -2926,15 +2910,15 @@ static CURLcode ossl_connect_step1(struct Curl_easy *data,
 #ifdef USE_OPENSSL_SRP
   if((ssl_authtype == CURL_TLSAUTH_SRP) &&
      Curl_allow_auth_to_host(data)) {
-    char * const ssl_username = SSL_SET_OPTION(username);
-
+    char * const ssl_username = SSL_SET_OPTION(primary.username);
+    char * const ssl_password = SSL_SET_OPTION(primary.password);
     infof(data, "Using TLS-SRP username: %s", ssl_username);
 
     if(!SSL_CTX_set_srp_username(backend->ctx, ssl_username)) {
       failf(data, "Unable to set SRP user name");
       return CURLE_BAD_FUNCTION_ARGUMENT;
     }
-    if(!SSL_CTX_set_srp_password(backend->ctx, SSL_SET_OPTION(password))) {
+    if(!SSL_CTX_set_srp_password(backend->ctx, ssl_password)) {
       failf(data, "failed setting SRP password");
       return CURLE_BAD_FUNCTION_ARGUMENT;
     }

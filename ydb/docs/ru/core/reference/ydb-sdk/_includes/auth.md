@@ -1,10 +1,10 @@
 # Аутентификация в SDK
 
-Как описано в статье о [подключении к серверу {{ ydb-short-name }}](../../../concepts/connect.md), клиент с каждым в запросом должен отправить [аутентификационный токен](../../../concepts/connect.md#auth). Аутентификационный токен проверяется сервером и в случае успешной аутентификации запрос авторизуется и выполняется, иначе возвращается ошибка `Unauthenticated`.
+Как описано в статье о [подключении к серверу {{ ydb-short-name }}](../../../concepts/connect.md), клиент с каждым запросом должен отправить [аутентификационный токен](../../../concepts/auth.md). Аутентификационный токен проверяется сервером и, в случае успешной аутентификации, запрос авторизуется и выполняется, иначе возвращается ошибка `Unauthenticated`.
 
 {{ ydb-short-name }} SDK использует объект, отвечающий за генерацию таких токенов. SDK предоставляет встроенные cпособы получения такого объекта:
 
-1. Методы с явной передачей параметров, каждый из методов реализует один из [режимов аутентификации](../../../concepts/connect.md#auth-modes).
+1. Методы с явной передачей параметров, каждый из методов реализует один из [режимов аутентификации](../../../concepts/auth.md).
 2. Метод определения режима аутентификации и необходимых параметров из переменных окружения.
 
 Обычно объект генерации токенов создается перед инициализацией драйвера {{ ydb-short-name }} и передается параметром в его конструктор. C++ и Go SDK дополнительно позволяют через один драйвер работать с несколькими БД и объектами генерации токенов.
@@ -19,43 +19,60 @@
 
 - Python
 
-  [Режим](../../../concepts/connect.md#auth-modes) | Метод 
-  ----- | ----- 
-  Anonymous | [`ydb.AnonymousCredentials()`](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/anonymous-credentials)
-  Access Token | [`ydb.AccessTokenCredentials( token )`](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/access-token-credentials)
-  Metadata | [`ydb.iam.MetadataUrlCredentials()`](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/metadata-credentials)
-  Service Account Key | [`ydb.iam.ServiceAccountCredentials.from_file(`</br>&nbsp;&nbsp;&nbsp;&nbsp;`key_file, iam_endpoint=None, iam_channel_credentials=None )`](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/service-account-credentials)
+  Режим | Метод
+  ----- | -----
+  Anonymous | [ydb.AnonymousCredentials()](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/anonymous-credentials)
+  Access Token | [ydb.AccessTokenCredentials( token )](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/access-token-credentials)
+  Metadata | [ydb.iam.MetadataUrlCredentials()](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/metadata-credentials)
+  Service Account Key | [ydb.iam.ServiceAccountCredentials.from_file(</br>key_file, iam_endpoint=None, iam_channel_credentials=None )](https://github.com/yandex-cloud/ydb-python-sdk/tree/master/examples/service-account-credentials)
   Определяется по переменным окружения | `ydb.construct_credentials_from_environ()`
 
 - Go
 
-  [Режим](../../../concepts/connect.md#auth-modes) | Пакет | Метод
+  Режим | Пакет | Метод
   ----- | ----- | ----
-  Anonymous | [ydb-go-sdk/v3](https://github.com/ydb-platform/ydb-go-sdk/blob/master/go.mod) | [`ydb.WithAnonymousCredentials()`](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/anonymous_credentials)
-  Access Token | [ydb-go-sdk/v3](https://github.com/ydb-platform/ydb-go-sdk/blob/master/go.mod) | [`ydb.WithAccessTokenCredentials( token )`](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/access_token_credentials)
-  Metadata | [ydb-go-yc](https://github.com/ydb-platform/ydb-go-yc/blob/master/go.mod) | [`yc.WithMetadataCredentials( ctx )`](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/metadata_credentials)
-  Service Account Key | [ydb-go-yc](https://github.com/ydb-platform/ydb-go-yc/blob/master/go.mod) | [`yc.WithServiceAccountKeyFileCredentials( key_file )`](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/service_account_credentials)
-  Определяется по переменным окружения | [ydb-go-sdk-auth-environ](https://github.com/ydb-platform/ydb-go-sdk-auth-environ/blob/master/go.mod) | [`environ.WithEnvironCredentials(ctx)`](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/environ)
+  Anonymous | [ydb-go-sdk/v3](https://github.com/ydb-platform/ydb-go-sdk/blob/master/go.mod) | [ydb.WithAnonymousCredentials()](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/anonymous_credentials)
+  Access Token | [ydb-go-sdk/v3](https://github.com/ydb-platform/ydb-go-sdk/blob/master/go.mod) | [ydb.WithAccessTokenCredentials( token )](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/access_token_credentials)
+  Metadata | [ydb-go-yc](https://github.com/ydb-platform/ydb-go-yc/blob/master/go.mod) | [yc.WithMetadataCredentials( ctx )](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/metadata_credentials)
+  Service Account Key | [ydb-go-yc](https://github.com/ydb-platform/ydb-go-yc/blob/master/go.mod) | [yc.WithServiceAccountKeyFileCredentials( key_file )](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/service_account_credentials)
+  Определяется по переменным окружения | [ydb-go-sdk-auth-environ](https://github.com/ydb-platform/ydb-go-sdk-auth-environ/blob/master/go.mod) | [environ.WithEnvironCredentials(ctx)](https://github.com/ydb-platform/ydb-go-examples/tree/master/cmd/auth/environ)
 
 - Java
 
-  [Режим](../../../concepts/connect.md#auth-modes) | Метод
+  Режим | Метод
   ----- | -----
-  Anonymous | [`com.yandex.ydb.core.auth.NopAuthProvider.INSTANCE`](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/anonymous_credentials)
-  Access Token | [`com.yandex.ydb.auth.iam.CloudAuthProvider.newAuthProvider(`</br>&nbsp;&nbsp;&nbsp;&nbsp;`yandex.cloud.sdk.auth.provider.IamTokenCredentialProvider`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.builder()`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.token(accessToken)`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.build()`</br>`);`](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/access_token_credentials)
-  Metadata | [`com.yandex.ydb.auth.iam.CloudAuthProvider.newAuthProvider(`</br>&nbsp;&nbsp;&nbsp;&nbsp;`yandex.cloud.sdk.auth.provider.ComputeEngineCredentialProvider`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.builder()`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.build()`</br>`);`](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/metadata_credentials)
-  Service Account Key | [`com.yandex.ydb.auth.iam.CloudAuthProvider.newAuthProvider(`</br>&nbsp;&nbsp;&nbsp;&nbsp;`yandex.cloud.sdk.auth.provider.ApiKeyCredentialProvider`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.builder()`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.fromFile(Paths.get(saKeyFile))`</br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`.build()`</br>`);`](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/service_account_credentials)
-  Определяется по переменным окружения | [`com.yandex.ydb.auth.iam.CloudAuthHelper.getAuthProviderFromEnviron();`](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/environ/src/main/java/com/yandex/ydb/example)
+  Anonymous | [com.yandex.ydb.core.auth.NopAuthProvider.INSTANCE](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/anonymous_credentials)
+  Access Token | [com.yandex.ydb.auth.iam.CloudAuthProvider.newAuthProvider(</br>yandex.cloud.sdk.auth.provider.IamTokenCredentialProvider</br>.builder()</br>.token(accessToken)</br>.build()</br>);](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/access_token_credentials)
+  Metadata | [com.yandex.ydb.auth.iam.CloudAuthProvider.newAuthProvider(</br>yandex.cloud.sdk.auth.provider.ComputeEngineCredentialProvider</br>.builder()</br>.build()</br>);](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/metadata_credentials)
+  Service Account Key | [com.yandex.ydb.auth.iam.CloudAuthProvider.newAuthProvider(</br>yandex.cloud.sdk.auth.provider.ApiKeyCredentialProvider</br>.builder()</br>.fromFile(Paths.get(saKeyFile))</br>.build()</br>);](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/service_account_credentials)
+  Определяется по переменным окружения | [com.yandex.ydb.auth.iam.CloudAuthHelper.getAuthProviderFromEnviron();](https://github.com/yandex-cloud/ydb-java-sdk/tree/master/examples/auth/environ/src/main/java/com/yandex/ydb/example)
 
 - Node.js
 
-  [Режим](../../../concepts/connect.md#auth-modes) | Метод
+  ```js
+  import { AnonymousAuthService, TokenAuthService,
+    MetadataAuthService, getSACredentialsFromJson,
+    getCredentialsFromEnv } from 'ydb-sdk';
+  ```
+
+  Режим | Метод
   ----- | -----
-  Anonymous | [`new 'ydb-sdk'.AnonymousAuthService()`](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/anonymous-credentials)
-  Access Token | [`new 'ydb-sdk'.TokenAuthService( accessToken, database )`](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/access-token-credentials)
-  Metadata | [`new 'ydb-sdk'.MetadataAuthService( database )`](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/metadata-credentials)
-  Service Account Key | [`new 'ydb-sdk'.getSACredentialsFromJson( saKeyFile )`](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/service-account-credentials)
-  Определяется по переменным окружения | [`new 'ydb-sdk'.getCredentialsFromEnv( entryPoint, database, logger )`](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/environ)
+  Anonymous | [AnonymousAuthService()](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/anonymous-credentials)
+  Access Token | [TokenAuthService( accessToken, database )](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/access-token-credentials)
+  Metadata | [MetadataAuthService( database )](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/metadata-credentials)
+  Service Account Key | [getSACredentialsFromJson( saKeyFile )](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/service-account-credentials)
+  Определяется по переменным окружения | [getCredentialsFromEnv( entryPoint, database, logger )](https://github.com/ydb-platform/ydb-nodejs-sdk/tree/main/examples/auth/environ)
+
+- Rust
+
+  Режим | Метод
+  ----- | -----
+  Anonymous | ydb::StaticToken("")
+  Access Token | ydb::StaticToken(token)
+  Metadata | ydb::GCEMetadata, ydb::YandexMetadata
+  Service Account Key | не поддерживается
+  Определяется по переменным окружения | не поддерживается
+  Выполнение внешней команды | ydb.CommandLineYcToken (например, для авторизации с помощью [IAM-токена]{% if lang == "ru"%}(https://cloud.yandex.ru/docs/iam/concepts/authorization/iam-token){% endif %}{% if lang == "en" %}(https://cloud.yandex.com/en/docs/iam/concepts/authorization/iam-token){% endif %} {{ yandex-cloud }} с компьютера разработчика ```ydb::CommandLineYcToken.from_cmd("yc iam create-token")```)
 
 {% endlist %}
 

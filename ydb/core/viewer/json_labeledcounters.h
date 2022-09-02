@@ -33,9 +33,9 @@ public:
         return NKikimrServices::TActivity::VIEWER_HANDLER;
     }
 
-    TJsonLabeledCounters(IViewer* viewer, NMon::TEvHttpInfo::TPtr &ev)
+    TJsonLabeledCounters(IViewer* viewer, const TRequest& request)
         : Viewer(viewer)
-        , Event(ev)
+        , Event(request.Event)
     {}
 
     void Bootstrap(const TActorContext& ctx) {
@@ -66,7 +66,7 @@ public:
                 Groups = topic;
             }
         }
-        CreateClusterLabeledCountersAggregator(ctx.SelfID, TTabletTypes::PERSQUEUE, ctx, Version, Version >= 2 ? Groups : TString());
+        CreateClusterLabeledCountersAggregator(ctx.SelfID, TTabletTypes::PersQueue, ctx, Version, Version >= 2 ? Groups : TString());
         Become(&TThis::StateRequestedTopicInfo, ctx, TDuration::MilliSeconds(Timeout), new TEvents::TEvWakeup());
     }
 

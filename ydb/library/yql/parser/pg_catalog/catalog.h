@@ -45,10 +45,14 @@ struct TTypeDesc {
     ui32 ElementTypeId = 0;
     bool PassByValue = false;
     char Category = '\0';
+    char TypeAlign = '\0';
+    char TypeDelim = ',';
     ui32 InFuncId = 0;
     ui32 OutFuncId = 0;
     ui32 SendFuncId = 0;
     ui32 ReceiveFuncId = 0;
+    ui32 TypeModInFuncId = 0;
+    ui32 TypeModOutFuncId = 0;
     i32 TypeLen = 0;
     // from opclass
     ui32 LessProcId = 0;
@@ -141,6 +145,7 @@ bool HasReturnSetProc(const TStringBuf& name);
 bool HasType(const TStringBuf& name);
 const TTypeDesc& LookupType(const TString& name);
 const TTypeDesc& LookupType(ui32 typeId);
+void EnumTypes(std::function<void(ui32, const TTypeDesc&)> f);
 
 bool HasCast(ui32 sourceId, ui32 targetId);
 const TCastDesc& LookupCast(ui32 sourceId, ui32 targetId);

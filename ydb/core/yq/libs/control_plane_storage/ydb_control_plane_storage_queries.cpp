@@ -6,6 +6,7 @@
 #include <util/generic/yexception.h>
 #include <util/string/join.h>
 
+#include <ydb/core/yq/libs/common/compression.h>
 #include <ydb/core/yq/libs/common/entity_id.h>
 #include <ydb/core/yq/libs/control_plane_storage/events/events.h>
 #include <ydb/core/yq/libs/control_plane_storage/schema.h>
@@ -14,9 +15,13 @@
 #include <ydb/public/api/protos/yq.pb.h>
 #include <ydb/public/sdk/cpp/client/ydb_value/value.h>
 
+#include <ydb/core/yq/libs/shared_resources/db_exec.h>
+
 #include <util/digest/multi.h>
 
 namespace {
+
+constexpr ui64 GRPC_MESSAGE_SIZE_LIMIT = 64000000;
 
 YandexQuery::IamAuth::IdentityCase GetIamAuth(const YandexQuery::Connection& connection) {
     const auto& setting = connection.content().setting();
@@ -74,6 +79,23 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateQuery
     TInstant startTime = TInstant::Now();
     const TEvControlPlaneStorage::TEvCreateQueryRequest& event = *ev->Get();
     const TString cloudId = event.CloudId;
+    const YandexQuery::CreateQueryRequest& request = event.Request;
+    auto it = event.Quotas.find(QUOTA_QUERY_RESULT_LIMIT);
+    ui64 resultLimit = (it != event.Quotas.end()) ? it->second.Limit.Value : 0;
+    auto queryType = request.content().type();
+    ui64 executionLimitMills = 0;
+    if (queryType == YandexQuery::QueryContent::ANALYTICS) {
+        auto exec_ttl_it = event.Quotas.find(QUOTA_ANALYTICS_DURATION_LIMIT);
+        if (exec_ttl_it != event.Quotas.end()) {
+            executionLimitMills = exec_ttl_it->second.Limit.Value * 60 * 1000;
+        }
+    }
+    if (queryType == YandexQuery::QueryContent::STREAMING) {
+        auto exec_ttl_it = event.Quotas.find(QUOTA_STREAMING_DURATION_LIMIT);
+        if (exec_ttl_it != event.Quotas.end()) {
+            executionLimitMills = exec_ttl_it->second.Limit.Value * 60 * 1000;
+        }
+    }
     const TString scope = event.Scope;
     TRequestCountersPtr requestCounters = Counters.GetScopeCounters(cloudId, scope, RTS_CREATE_QUERY);
     requestCounters->InFly->Inc();
@@ -86,14 +108,9 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateQuery
     if (IsSuperUser(user)) {
         permissions.SetAll();
     }
-    const YandexQuery::CreateQueryRequest& request = event.Request;
     const size_t byteSize = request.ByteSizeLong();
     const TString queryId = GetEntityIdAsString(Config.IdsPrefix, EEntityType::QUERY);
-
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "CreateQueryRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("CreateQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateQuery(ev);
     if (request.execute_mode() != YandexQuery::SAVE && !permissions.Check(TPermissions::QUERY_INVOKE)) {
@@ -106,12 +123,31 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateQuery
     if (request.disposition().has_from_last_checkpoint()) {
         issues.AddIssue(MakeErrorIssue(TIssuesIds::BAD_REQUEST, "Streaming disposition \"from_last_checkpoint\" is not allowed in CreateQuery request"));
     }
+
+    {
+        TQuotaMap::const_iterator it = event.Quotas.end();
+        if (queryType == YandexQuery::QueryContent::ANALYTICS) {
+            it = event.Quotas.find(QUOTA_ANALYTICS_COUNT_LIMIT);
+        }
+        if (queryType == YandexQuery::QueryContent::STREAMING) {
+            it = event.Quotas.find(QUOTA_STREAMING_COUNT_LIMIT);
+        }
+        if (it != event.Quotas.end()) {
+            auto& quota = it->second;
+            if (!quota.Usage) {
+                issues.AddIssue(MakeErrorIssue(TIssuesIds::NOT_READY, "Control Plane is not ready yet. Please retry later."));
+            } else if (quota.Usage->Value >= quota.Limit.Value) {
+                issues.AddIssue(MakeErrorIssue(TIssuesIds::QUOTA_EXCEEDED, Sprintf("Too many queries (%lu of %lu). Please delete other queries or increase limits.", quota.Usage->Value, quota.Limit.Value)));
+            }
+        }
+    }
+
+    if (request.content().limits().vcpu_rate_limit() < 0) {
+        issues.AddIssue(MakeErrorIssue(TIssuesIds::BAD_REQUEST, "VCPU rate limit can't be less than zero"));
+    }
+
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "CreateQueryRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " "
-            << request.DebugString()
-            << " error: "<< issues.ToString());
+        CPS_LOG_W("CreateQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvCreateQueryResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(CreateQueryRequest, scope, user, delta, byteSize, false);
@@ -133,7 +169,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateQuery
         meta.set_last_job_query_revision(InitialRevision);
         meta.set_last_job_id(jobId);
         meta.set_started_by(user);
-
+        *meta.mutable_submitted_at() = NProtoInterop::CastToProto(startTime);
         *job.mutable_meta() = common;
         job.mutable_meta()->set_id(jobId);
         job.set_text(content.text());
@@ -189,9 +225,12 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateQuery
         if (!Config.Proto.GetDisableCurrentIam()) {
             queryInternal.set_token(token);
         }
+
         queryInternal.set_cloud_id(cloudId);
         queryInternal.set_state_load_mode(YandexQuery::StateLoadMode::EMPTY);
         queryInternal.mutable_disposition()->CopyFrom(request.disposition());
+        queryInternal.set_result_limit(resultLimit);
+        *queryInternal.mutable_execution_ttl() = NProtoInterop::CastToProto(TDuration::MilliSeconds(executionLimitMills));
 
         if (request.execute_mode() != YandexQuery::SAVE) {
             // TODO: move to run actor priority selection
@@ -236,11 +275,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateQuery
         }
 
         if (query.ByteSizeLong() > Config.Proto.GetMaxRequestSize()) {
-            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "Query data is not placed in the table. Please shorten your request";
+            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "Incoming request exceeded the size limit: " << query.ByteSizeLong() << " of " << Config.Proto.GetMaxRequestSize() <<  ". Please shorten your request";
         }
 
         if (queryInternal.ByteSizeLong() > Config.Proto.GetMaxRequestSize()) {
-            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "Query internal data is not placed in the table. Please reduce the number of connections and bindings";
+            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "The size of all connections and bindings in the project exceeded the limit: " << queryInternal.ByteSizeLong() << " of " << Config.Proto.GetMaxRequestSize() << ". Please reduce the number of connections and bindings";
         }
 
         response->second.After.ConstructInPlace().CopyFrom(query);
@@ -307,7 +346,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateQuery
     TAsyncStatus status = ReadModifyWrite(NActors::TActivationContext::ActorSystem(), read.Sql, read.Params, prepareParams, requestCounters, debugInfo);
     auto prepare = [response] { return *response; };
     auto success = SendAuditResponse<TEvControlPlaneStorage::TEvCreateQueryResponse, YandexQuery::CreateQueryResult, TAuditDetails<YandexQuery::Query>>(
-        MakeLogPrefix(scope, user, queryId) + "CreateQueryRequest",
+        "CreateQueryRequest - CreateQueryResult",
         NActors::TActivationContext::ActorSystem(),
         status,
         SelfId(),
@@ -346,19 +385,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListQueries
     const TString pageToken = request.page_token();
     const int byteSize = request.ByteSize();
     const int64_t limit = request.limit();
-
-    CPS_LOG_T(MakeLogPrefix(scope, user)
-        << "ListQueriesRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("ListQueriesRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user)
-            << "ListQueriesRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " "
-            << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("ListQueriesRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvListQueriesResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(ListQueriesRequest, scope, user, delta, byteSize, false);
@@ -448,7 +479,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListQueries
 
     const auto read = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(read.Sql, read.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), read.Sql, read.Params, requestCounters, debugInfo);
     auto prepare = [resultSets=resultSets, limit] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";
@@ -480,7 +511,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListQueries
     };
 
     auto success = SendResponse<TEvControlPlaneStorage::TEvListQueriesResponse, YandexQuery::ListQueriesResult>(
-        MakeLogPrefix(scope, user) + "ListQueriesRequest",
+        "ListQueriesRequest - ListQueriesResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -517,17 +548,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeQue
     const YandexQuery::DescribeQueryRequest& request = event.Request;
     const TString queryId = request.query_id();
     const int byteSize = request.ByteSize();
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "DescribeQueryRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("DescribeQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "DescribeQueryRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " " << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("DescribeQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvDescribeQueryResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(DescribeQueryRequest, scope, user, queryId, delta, byteSize, false);
@@ -539,12 +564,12 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeQue
     queryBuilder.AddString("query_id", queryId);
     queryBuilder.AddTimestamp("now", TInstant::Now());
     queryBuilder.AddText(
-        "SELECT `" QUERY_COLUMN_NAME "` FROM `" QUERIES_TABLE_NAME "`\n"
+        "SELECT `" QUERY_COLUMN_NAME "`, `" INTERNAL_COLUMN_NAME "` FROM `" QUERIES_TABLE_NAME "`\n"
         "WHERE `" SCOPE_COLUMN_NAME "` = $scope AND `" QUERY_ID_COLUMN_NAME "` = $query_id AND (`" EXPIRE_AT_COLUMN_NAME "` is NULL OR `" EXPIRE_AT_COLUMN_NAME "` > $now);"
     );
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
     auto prepare = [resultSets=resultSets, user,permissions] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";
@@ -552,7 +577,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeQue
 
         TResultSetParser parser(resultSets->front());
         if (!parser.TryNextRow()) {
-            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
         }
 
         YandexQuery::DescribeQueryResult result;
@@ -567,18 +592,49 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeQue
         const auto queryUser = result.query().meta().common().created_by();
         const bool hasViewAccess = HasViewAccess(permissions, queryVisibility, queryUser, user);
         if (!hasViewAccess) {
-            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
         }
 
+        YandexQuery::Internal::QueryInternal internal;
+        if (!internal.ParseFromString(*parser.ColumnParser(INTERNAL_COLUMN_NAME).GetOptionalString())) {
+            ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Error parsing proto message for query internal. Please contact internal support";
+        }
+
+        // decompress plan
+        if (internal.plan_compressed().data()) { // todo: remove this if after migration
+            TCompressor compressor(internal.plan_compressed().method());
+            result.mutable_query()->mutable_plan()->set_json(compressor.Decompress(internal.plan_compressed().data()));
+            if (result.query().ByteSizeLong() > GRPC_MESSAGE_SIZE_LIMIT) {
+                if (result.query().plan().json().size() > 1000) {
+                    // modifing plan this way should definitely reduce query msg size
+                    result.mutable_query()->mutable_plan()->set_json(TStringBuilder() << "Message is too big: " << result.query().ByteSizeLong() << " bytes, dropping plan of size " << result.query().plan().json().size() << " bytes");
+                }
+            }
+        }
         if (!permissions.Check(TPermissions::VIEW_AST)) {
             result.mutable_query()->clear_ast();
+        } else {
+            // decompress AST
+            if (internal.ast_compressed().data()) { // todo: remove this if after migration
+                TCompressor compressor(internal.ast_compressed().method());
+                result.mutable_query()->mutable_ast()->set_data(compressor.Decompress(internal.ast_compressed().data()));
+            }
+            if (result.query().ByteSizeLong() > GRPC_MESSAGE_SIZE_LIMIT) {
+                if (result.query().ast().data().size() > 1000) {
+                    // modifing AST this way should definitely reduce query msg size
+                    result.mutable_query()->mutable_ast()->set_data(TStringBuilder() << "Message is too big: " << result.query().ByteSizeLong() << " bytes, dropping AST of size " << result.query().ast().data().size() << " bytes");
+                }
+            }
         }
 
+        if (result.query().ByteSizeLong() > GRPC_MESSAGE_SIZE_LIMIT) {
+            ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Resulting query of size " << result.query().ByteSizeLong() << " bytes is too big";
+        }
         return result;
     };
 
     auto success = SendResponse<TEvControlPlaneStorage::TEvDescribeQueryResponse, YandexQuery::DescribeQueryResult>(
-        MakeLogPrefix(scope, user, queryId) + "DescribeQueryRequest",
+        "DescribeQueryRequest - DescribeQueryResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -614,17 +670,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetQuerySta
     const YandexQuery::GetQueryStatusRequest& request = event.Request;
     const TString queryId = request.query_id();
     const int byteSize = request.ByteSize();
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "GetQueryStatusRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("GetQueryStatusRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "GetQueryStatusRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " " << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("GetQueryStatusRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvGetQueryStatusResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(GetQueryStatusRequest, scope, user, queryId, delta, byteSize, false);
@@ -643,7 +693,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetQuerySta
 
     const auto read = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(read.Sql, read.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), read.Sql, read.Params, requestCounters, debugInfo);
     auto prepare = [resultSets=resultSets, user,permissions] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";
@@ -651,7 +701,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetQuerySta
 
         TResultSetParser parser(resultSets->front());
         if (!parser.TryNextRow()) {
-            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
         }
 
         YandexQuery::GetQueryStatusResult result;
@@ -662,14 +712,14 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetQuerySta
         const auto queryUser = *parser.ColumnParser(USER_COLUMN_NAME).GetOptionalString();
         const bool hasViewAccess = HasViewAccess(permissions, queryVisibility, queryUser, user);
         if (!hasViewAccess) {
-            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
         }
 
         return result;
     };
 
     auto success = SendResponse<TEvControlPlaneStorage::TEvGetQueryStatusResponse, YandexQuery::GetQueryStatusResult>(
-        MakeLogPrefix(scope, user, queryId) + "GetQueryStatusRequest",
+        "GetQueryStatusRequest - GetQueryStatusResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -706,11 +756,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
     const TString queryId = request.query_id();
     const int byteSize = request.ByteSize();
     const int64_t previousRevision = request.previous_revision();
-
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "ModifyQueryRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("ModifyQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     if (request.content().type() == YandexQuery::QueryContent::STREAMING && request.state_load_mode() == YandexQuery::STATE_LOAD_MODE_UNSPECIFIED) {
         request.set_state_load_mode(YandexQuery::EMPTY);
@@ -728,11 +774,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
         issues.AddIssue(MakeErrorIssue(TIssuesIds::UNSUPPORTED, "State load mode \"FROM_LAST_CHECKPOINT\" is not supported"));
     }
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "ModifyQueryRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " "
-            << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("ModifyQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvModifyQueryResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(ModifyQueryRequest, scope, user, queryId, delta, byteSize, false);
@@ -780,7 +822,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
         TResultSetParser parser(resultSets.back());
 
         if (!parser.TryNextRow()) {
-            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
         }
 
         YandexQuery::Query query;
@@ -799,7 +841,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
         const auto queryUser = query.meta().common().created_by();
         const bool hasManageAccess = HasManageAccess(permissions, queryVisibility, queryUser, user);
         if (!hasManageAccess) {
-            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+            ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
         }
 
         if (query.content().type() != request.content().type()) {
@@ -887,11 +929,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
         }
 
         if (query.ByteSizeLong() > Config.Proto.GetMaxRequestSize()) {
-            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "Query data is not placed in the table. Please shorten your request";
+            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "Incoming request exceeded the size limit: " << query.ByteSizeLong() << " of " << Config.Proto.GetMaxRequestSize() <<  ". Please shorten your request";
         }
 
         if (internal.ByteSizeLong() > Config.Proto.GetMaxRequestSize()) {
-            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "Internal data is not placed in the table. Please reduce the number of connections and bindings";
+            ythrow TControlPlaneStorageException(TIssuesIds::BAD_REQUEST) << "The size of all connections and bindings in the project exceeded the limit: " << internal.ByteSizeLong() << " of " << Config.Proto.GetMaxRequestSize() << ". Please reduce the number of connections and bindings";
         }
 
         YandexQuery::Job job;
@@ -912,7 +954,12 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
             query.mutable_meta()->clear_expire_at();
             query.mutable_meta()->clear_result_expire_at();
             query.mutable_meta()->set_started_by(user);
+            *query.mutable_meta()->mutable_submitted_at() = NProtoInterop::CastToProto(now);
             query.mutable_meta()->clear_action();
+
+            internal.clear_plan_compressed();
+            internal.clear_ast_compressed();
+            internal.clear_dq_graph_compressed();
 
             auto& jobMeta = *job.mutable_meta();
             jobMeta.set_id(jobId);
@@ -1023,7 +1070,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
         scope,
         queryId,
         user,
-        "Query does not exist or permission denied. Please check the id query or your access rights",
+        "Query does not exist or permission denied. Please check the id of the query or your access rights",
         permissions,
         YdbConnection->TablePathPrefix);
     validators.push_back(accessValidator);
@@ -1033,7 +1080,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
         QUERY_ID_COLUMN_NAME,
         scope,
         queryId,
-        "Query does not exist or permission denied. Please check the id query or your access rights",
+        "Query does not exist or permission denied. Please check the id of the query or your access rights",
         YdbConnection->TablePathPrefix);
     validators.push_back(ttlValidator);
 
@@ -1054,7 +1101,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyQuery
     auto result = ReadModifyWrite(NActors::TActivationContext::ActorSystem(), read.Sql, read.Params, prepareParams, requestCounters, debugInfo, validators);
     auto prepare = [response] { return *response; };
     auto success = SendAuditResponse<TEvControlPlaneStorage::TEvModifyQueryResponse, YandexQuery::ModifyQueryResult, TAuditDetails<YandexQuery::Query>>(
-        MakeLogPrefix(scope, user, queryId) + "ModifyQueryRequest",
+        "ModifyQueryRequest - ModifyQueryResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -1092,18 +1139,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDeleteQuery
     const int byteSize = request.ByteSize();
     const int64_t previousRevision = request.previous_revision();
     const TString idempotencyKey = request.idempotency_key();
+    CPS_LOG_T("DeleteQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "DeleteQueryRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "DeleteQueryRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " "
-            << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("DeleteQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvDeleteQueryResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(DeleteQueryRequest, scope, queryId, user, delta, byteSize, false);
@@ -1138,7 +1178,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDeleteQuery
         scope,
         queryId,
         user,
-        "Query does not exist or permission denied. Please check the id query or your access rights",
+        "Query does not exist or permission denied. Please check the id of the query or your access rights",
         permissions,
         YdbConnection->TablePathPrefix);
     validators.push_back(accessValidator);
@@ -1164,12 +1204,19 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDeleteQuery
         response,
         YdbConnection->TablePathPrefix));
 
+    validators.push_back(CreateQueryComputeStatusValidator(
+        { YandexQuery::QueryMeta::STARTING, YandexQuery::QueryMeta::ABORTED_BY_USER, YandexQuery::QueryMeta::ABORTED_BY_SYSTEM, YandexQuery::QueryMeta::COMPLETED, YandexQuery::QueryMeta::FAILED },
+        scope,
+        queryId,
+        "Can't delete running query",
+        YdbConnection->TablePathPrefix));
+
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
     auto result = Write(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo, validators);
     auto prepare = [response] { return *response; };
     auto success = SendAuditResponse<TEvControlPlaneStorage::TEvDeleteQueryResponse, YandexQuery::DeleteQueryResult, TAuditDetails<YandexQuery::Query>>(
-        MakeLogPrefix(scope, user, queryId) + "DeleteQueryRequest",
+        "DeleteQueryRequest - DeleteQueryResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -1208,18 +1255,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvControlQuer
     const int64_t previousRevision = request.previous_revision();
     const TString idempotencyKey = request.idempotency_key();
     const YandexQuery::QueryAction action = request.action();
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "ControlQueryRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("ControlQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "ControlQueryRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " "
-            << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("ControlQueryRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvControlQueryResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(ControlQueryRequest, scope, user, queryId, delta, byteSize, false);
@@ -1253,7 +1293,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvControlQuer
         {
             TResultSetParser parser(resultSets[0]);
             if (!parser.TryNextRow()) {
-                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
             }
 
             if (!query.ParseFromString(*parser.ColumnParser(QUERY_COLUMN_NAME).GetOptionalString())) {
@@ -1282,7 +1322,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvControlQuer
 
             const bool hasManageAccess = HasManageAccess(permissions, query.content().acl().visibility(), query.meta().common().created_by(), user);
             if (!hasManageAccess) {
-                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
             }
         }
 
@@ -1377,7 +1417,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvControlQuer
         scope,
         queryId,
         user,
-        "Query does not exist or permission denied. Please check the id query or your access rights",
+        "Query does not exist or permission denied. Please check the id of the query or your access rights",
         permissions,
         YdbConnection->TablePathPrefix);
     validators.push_back(accessValidator);
@@ -1399,7 +1439,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvControlQuer
     auto result = ReadModifyWrite(NActors::TActivationContext::ActorSystem(), readQuery.Sql, readQuery.Params, prepareParams, requestCounters, debugInfo, validators);
     auto prepare = [response] { return *response; };
     auto success = SendAuditResponse<TEvControlPlaneStorage::TEvControlQueryResponse, YandexQuery::ControlQueryResult, TAuditDetails<YandexQuery::Query>>(
-        MakeLogPrefix(scope, user, queryId) + "ControlQueryRequest",
+        "ControlQueryRequest - ControlQueryRequest",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -1424,6 +1464,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetResultDa
     TRequestCountersPtr requestCounters = Counters.GetScopeCounters(cloudId, scope, RTS_GET_RESULT_DATA);
     requestCounters->InFly->Inc();
     requestCounters->RequestBytes->Add(event.GetByteSize());
+
     const YandexQuery::GetResultDataRequest& request = event.Request;
     const TString user = event.User;
     const int32_t resultSetIndex = request.result_set_index();
@@ -1438,18 +1479,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetResultDa
         permissions.SetAll();
     }
     const int64_t limit = request.limit();
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "GetResultDataRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("GetResultDataRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "GetResultDataRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " "
-            << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("GetResultDataRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvGetResultDataResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(GetResultDataRequest, scope, user, queryId, resultSetIndex, offset, limit, delta, byteSize, false);
@@ -1478,7 +1512,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetResultDa
 
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
     auto prepare = [resultSets=resultSets, resultSetIndex, user, permissions] {
         if (resultSets->size() != 2) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 2 but equal " << resultSets->size() << ". Please contact internal support";
@@ -1490,7 +1524,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetResultDa
             const auto& resultSet = (*resultSets)[0];
             TResultSetParser parser(resultSet);
             if (!parser.TryNextRow()) {
-                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
             }
 
             YandexQuery::Query query;
@@ -1503,7 +1537,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetResultDa
 
             bool hasViewAccess = HasViewAccess(permissions, queryVisibility, queryUser, user);
             if (!hasViewAccess) {
-                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id query or your access rights";
+                ythrow TControlPlaneStorageException(TIssuesIds::ACCESS_DENIED) << "Query does not exist or permission denied. Please check the id of the query or your access rights";
             }
 
             if (resultSetIndex >= query.result_set_meta_size()) {
@@ -1539,7 +1573,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvGetResultDa
     };
 
     auto success = SendResponse<TEvControlPlaneStorage::TEvGetResultDataResponse, YandexQuery::GetResultDataResult>(
-        MakeLogPrefix(scope, user, queryId) + "GetResultDataRequest",
+        "GetResultDataRequest - GetResultDataResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -1584,18 +1618,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListJobsReq
         permissions.SetAll();
     }
     const int64_t limit = request.limit();
-    CPS_LOG_T(MakeLogPrefix(scope, user, queryId)
-        << "ListJobsRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("ListJobsRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, queryId)
-            << "ListJobsRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " "
-            << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("ListJobsRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvListJobsResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(ListJobsRequest, scope, user, queryId, delta, byteSize, false);
@@ -1643,7 +1670,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListJobsReq
 
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
     auto prepare = [resultSets=resultSets, limit] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";
@@ -1678,7 +1705,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListJobsReq
     };
 
     auto success = SendResponse<TEvControlPlaneStorage::TEvListJobsResponse, YandexQuery::ListJobsResult>(
-        MakeLogPrefix(scope, user, queryId) + "ListJobsRequest",
+        "ListJobsRequest - ListJobsResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),
@@ -1718,17 +1745,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeJob
     if (IsSuperUser(user)) {
         permissions.SetAll();
     }
-    CPS_LOG_T(MakeLogPrefix(scope, user, jobId)
-        << "DescribeJobRequest: "
-        << NKikimr::MaskTicket(token) << " "
-        << request.DebugString());
+    CPS_LOG_T("DescribeJobRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token));
 
     NYql::TIssues issues = ValidateEvent(ev);
     if (issues) {
-        CPS_LOG_D(MakeLogPrefix(scope, user, jobId)
-            << "DescribeJobRequest, validation failed: "
-            << NKikimr::MaskTicket(token) << " " << request.DebugString()
-            << " error: " << issues.ToString());
+        CPS_LOG_W("DescribeJobRequest: {" << request.DebugString() << "} " << MakeUserInfo(user, token) << "validation FAILED: " << issues.ToOneLineString());
         const TDuration delta = TInstant::Now() - startTime;
         SendResponseIssues<TEvControlPlaneStorage::TEvDescribeJobResponse>(ev->Sender, issues, ev->Cookie, delta, requestCounters);
         LWPROBE(DescribeJobRequest, scope, user, jobId, delta, byteSize, false);
@@ -1749,7 +1770,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeJob
 
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
 
     auto prepare = [=, id=request.job_id(), resultSets=resultSets] {
         if (resultSets->size() != 1) {
@@ -1775,7 +1796,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeJob
     };
 
     auto success = SendResponse<TEvControlPlaneStorage::TEvDescribeJobResponse, YandexQuery::DescribeJobResult>(
-        MakeLogPrefix(scope, user, jobId) + "DescribeJobRequest",
+        "DescribeJobRequest - DescribeJobResult",
         NActors::TActivationContext::ActorSystem(),
         result,
         SelfId(),

@@ -135,9 +135,10 @@ namespace NYql::NDqs {
         TExprBase expr(DqExprRoot);
         auto result = expr.Maybe<TDqCnResult>();
         auto query = expr.Maybe<TDqQuery>();
+        auto value = expr.Maybe<TDqPhyPrecompute>();
         const auto maxTasksPerOperation = settings->MaxTasksPerOperation.Get().GetOrElse(TDqSettings::TDefault::MaxTasksPerOperation);
 
-        YQL_LOG(DEBUG) << "Execution Plan " << NCommon::ExprToPrettyString(ExprContext, *DqExprRoot);
+        YQL_CLOG(DEBUG, ProviderDq) << "Execution Plan " << NCommon::ExprToPrettyString(ExprContext, *DqExprRoot);
 
         auto stages = GetStages(DqExprRoot);
         YQL_ENSURE(!stages.empty());
@@ -149,14 +150,18 @@ namespace NYql::NDqs {
         for (const auto& stage : stages) {
             const bool hasDqSource = HasDqSource(stage);
             if ((hasDqSource || HasReadWraps(stage.Program().Ptr())) && BuildReadStage(settings, stage, hasDqSource, canFallback)) {
-                YQL_LOG(DEBUG) << "Read stage " << NCommon::ExprToPrettyString(ExprContext, *stage.Ptr());
+                YQL_CLOG(TRACE, ProviderDq) << "Read stage " << NCommon::ExprToPrettyString(ExprContext, *stage.Ptr());
             } else {
-                YQL_LOG(DEBUG) << "Common stage " << NCommon::ExprToPrettyString(ExprContext, *stage.Ptr());
+                YQL_CLOG(TRACE, ProviderDq) << "Common stage " << NCommon::ExprToPrettyString(ExprContext, *stage.Ptr());
                 NDq::CommonBuildTasks(TasksGraph, stage);
             }
 
             // Sinks
             if (auto maybeDqOutputsList = stage.Outputs()) {
+                TScopedAlloc alloc;
+                TTypeEnvironment typeEnv(alloc);
+                TProgramBuilder pgmBuilder(typeEnv, *FunctionRegistry);
+
                 auto dqOutputsList = maybeDqOutputsList.Cast();
                 for (const auto& output : dqOutputsList) {
                     const ui64 index = FromString(output.Ptr()->Child(TDqOutputAnnotationBase::idx_Index)->Content());
@@ -178,12 +183,20 @@ namespace NYql::NDqs {
                         YQL_ENSURE(!sinkSettings.type_url().empty(), "Data sink provider \"" << dataSinkName << "\" did't fill dq sink settings for its dq sink node");
                         YQL_ENSURE(sinkType, "Data sink provider \"" << dataSinkName << "\" did't fill dq sink settings type for its dq sink node");
                     } else if (output.Maybe<NNodes::TDqTransform>()) {
+                        TStringStream errorStream;
+
                         auto transform = output.Cast<NNodes::TDqTransform>();
                         outputTransform.Type = transform.Type();
-                        const auto inputType = transform.InputType().Ref().GetTypeAnn()->Cast<TTypeExprType>()->GetType();
-                        outputTransform.InputType = NCommon::WriteTypeToYson(inputType);
-                        const auto outputType = transform.OutputType().Ref().GetTypeAnn()->Cast<TTypeExprType>()->GetType();
-                        outputTransform.OutputType = NCommon::WriteTypeToYson(outputType);
+                        const auto inputTypeAnnotation = transform.InputType().Ref().GetTypeAnn()->Cast<TTypeExprType>()->GetType();
+                        auto inputType = NCommon::BuildType(*inputTypeAnnotation, pgmBuilder, errorStream);
+                        Y_ENSURE(inputType, "Failed to build transform input type: " << errorStream.Str());
+                        outputTransform.InputType = NKikimr::NMiniKQL::SerializeNode(inputType, typeEnv);
+
+                        errorStream.clear();
+                        const auto outputTypeAnnotation = transform.OutputType().Ref().GetTypeAnn()->Cast<TTypeExprType>()->GetType();
+                        auto outputType = NCommon::BuildType(*outputTypeAnnotation, pgmBuilder, errorStream);
+                        Y_ENSURE(outputType, "Failed to build transform output type: " << errorStream.Str());
+                        outputTransform.OutputType = NKikimr::NMiniKQL::SerializeNode(outputType, typeEnv);
                         dqIntegration->FillTransformSettings(transform.Ref(), outputTransform.Settings);
                     } else {
                         YQL_ENSURE(false, "Unknown stage output type");
@@ -205,7 +218,7 @@ namespace NYql::NDqs {
                             transform->Type = outputTransform.Type;
                             transform->InputType = outputTransform.InputType;
                             transform->OutputType = outputTransform.OutputType;
-                            //transform->Settings = outputTransform.Settings;
+                            transform->Settings = outputTransform.Settings;
                         }
                     }
                 }
@@ -223,8 +236,15 @@ namespace NYql::NDqs {
             YQL_ENSURE(!stageInfo.Tasks.empty());
         }
 
+        TMaybeNode<TDqPhyStage> finalStage;
         if (result) {
-            auto& resultStageInfo = TasksGraph.GetStageInfo(result.Cast().Output().Stage().Cast<TDqPhyStage>());
+            finalStage = result.Cast().Output().Stage().Maybe<TDqPhyStage>();
+        } else if (value) {
+            finalStage = value.Cast().Connection().Output().Stage().Maybe<TDqPhyStage>();
+        }
+
+        if (finalStage) {
+            auto& resultStageInfo = TasksGraph.GetStageInfo(finalStage.Cast());
             YQL_ENSURE(resultStageInfo.Tasks.size() == 1);
             auto& resultTask = TasksGraph.GetTask(resultStageInfo.Tasks[0]);
             YQL_ENSURE(resultTask.Outputs.size() == 1);

@@ -11,12 +11,24 @@
 #include <library/cpp/monlib/metrics/metric_registry.h>
 #include <util/generic/variant.h>
 #include "http.h"
+#include "http_proxy_sock64.h"
 #include "http_proxy_ssl.h"
 
 namespace NHttp {
 
 struct TSocketDescriptor : NActors::TSharedDescriptor, THttpConfig {
     SocketType Socket;
+
+    TSocketDescriptor() = default;
+
+    TSocketDescriptor(int af)
+        : Socket(af)
+    {
+    }
+
+    TSocketDescriptor(SocketType&& s)
+        : Socket(std::move(s))
+    {}
 
     int GetDescriptor() override {
         return static_cast<SOCKET>(Socket);
@@ -44,12 +56,16 @@ struct TEvHttpProxy {
     static_assert(EvEnd < EventSpaceEnd(NActors::TEvents::ES_HTTP), "ES_HTTP event space is too small.");
 
     struct TEvAddListeningPort : NActors::TEventLocal<TEvAddListeningPort, EvAddListeningPort> {
+        TString Address;
         TIpPort Port;
         TString WorkerName;
         bool Secure = false;
         TString CertificateFile;
         TString PrivateKeyFile;
         TString SslCertificatePem;
+        std::vector<TString> CompressContentTypes;
+
+        TEvAddListeningPort() = default;
 
         TEvAddListeningPort(TIpPort port)
             : Port(port)
@@ -63,9 +79,11 @@ struct TEvHttpProxy {
 
     struct TEvConfirmListen : NActors::TEventLocal<TEvConfirmListen, EvConfirmListen> {
         THttpConfig::SocketAddressType Address;
+        std::shared_ptr<THttpEndpointInfo> Endpoint;
 
-        TEvConfirmListen(const THttpConfig::SocketAddressType& address)
+        TEvConfirmListen(const THttpConfig::SocketAddressType& address, std::shared_ptr<THttpEndpointInfo> endpoint)
             : Address(address)
+            , Endpoint(std::move(endpoint))
         {}
     };
 
@@ -182,10 +200,10 @@ struct TEvHttpProxy {
 
     struct TEvResolveHostResponse : NActors::TEventLocal<TEvResolveHostResponse, EvResolveHostResponse> {
         TString Host;
-        TSockAddrInet6 Address;
+        THttpConfig::SocketAddressType Address;
         TString Error;
 
-        TEvResolveHostResponse(const TString& host, const TSockAddrInet6& address)
+        TEvResolveHostResponse(const TString& host, THttpConfig::SocketAddressType address)
             : Host(host)
             , Address(address)
         {}
@@ -195,41 +213,30 @@ struct TEvHttpProxy {
         {}
     };
 
-    struct TEvReportSensors : NActors::TEventLocal<TEvReportSensors, EvReportSensors> {
-        TString Direction;
-        TString Host;
-        TString Url;
-        TString Status;
-        TDuration Time;
+    struct TEvReportSensors : TSensors, NActors::TEventLocal<TEvReportSensors, EvReportSensors> {
+        using TSensors::TSensors;
 
-        TEvReportSensors(
-                TStringBuf direction,
-                TStringBuf host,
-                TStringBuf url,
-                TStringBuf status,
-                TDuration time)
-            : Direction(direction)
-            , Host(host)
-            , Url(url)
-            , Status(status)
-            , Time(time)
+        TEvReportSensors(const TSensors& sensors)
+            : TSensors(sensors)
         {}
     };
 };
 
-struct TEndpointInfo {
+struct TPrivateEndpointInfo : THttpEndpointInfo {
     TActorId Proxy;
     TActorId Owner;
-    TString WorkerName;
-    bool Secure;
     TSslHelpers::TSslHolder<SSL_CTX> SecureContext;
+
+    TPrivateEndpointInfo(const std::vector<TString>& compressContentTypes)
+        : THttpEndpointInfo(compressContentTypes)
+    {}
 };
 
 NActors::IActor* CreateHttpProxy(std::weak_ptr<NMonitoring::TMetricRegistry> registry = NMonitoring::TMetricRegistry::SharedInstance());
 NActors::IActor* CreateHttpAcceptorActor(const TActorId& owner, const TActorId& poller);
 NActors::IActor* CreateOutgoingConnectionActor(const TActorId& owner, const TString& host, bool secure, const TActorId& poller);
 NActors::IActor* CreateIncomingConnectionActor(
-        const TEndpointInfo& endpoint,
+        std::shared_ptr<TPrivateEndpointInfo> endpoint,
         TIntrusivePtr<TSocketDescriptor> socket,
         THttpConfig::SocketAddressType address,
         THttpIncomingRequestPtr recycledRequest = nullptr);

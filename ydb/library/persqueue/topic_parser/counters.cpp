@@ -2,7 +2,7 @@
 
 namespace NPersQueue {
 
-NMonitoring::TDynamicCounterPtr GetCounters(NMonitoring::TDynamicCounterPtr counters,
+::NMonitoring::TDynamicCounterPtr GetCounters(::NMonitoring::TDynamicCounterPtr counters,
                                             const TString& subsystem, const TTopicConverterPtr& topic)
 {
     TString cluster = topic->GetCluster();
@@ -15,7 +15,7 @@ NMonitoring::TDynamicCounterPtr GetCounters(NMonitoring::TDynamicCounterPtr coun
             ->GetSubgroup("Topic", topic->GetShortClientsideName());
 }
 
-NMonitoring::TDynamicCounterPtr GetCountersForStream(NMonitoring::TDynamicCounterPtr counters)
+::NMonitoring::TDynamicCounterPtr GetCountersForStream(::NMonitoring::TDynamicCounterPtr counters)
 {
     return counters->GetSubgroup("counters", "datastreams");
 }
@@ -40,9 +40,9 @@ TVector<TPQLabelsInfo> GetLabels(const TTopicConverterPtr& topic)
 TVector<TPQLabelsInfo> GetLabelsForStream(const TTopicConverterPtr& topic, const TString& cloudId,
                                         const TString& dbId, const TString& folderId) {
     TVector<TPQLabelsInfo> res = {
-            {{{"database", dbId}}, {dbId}},
             {{{"cloud", cloudId}}, {cloudId}},
             {{{"folder", folderId}}, {folderId}},
+            {{{"database", dbId}}, {dbId}},
             {{{"stream", topic->GetClientsideName()}}, {topic->GetClientsideName()}}};
     return res;
 }

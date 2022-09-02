@@ -6,6 +6,30 @@
 # original buildsystem will not be accepted.
 
 
-if (UNIX)
-  include(CMakeLists.linux.txt)
-endif()
+
+add_library(abseil-cpp-absl-synchronization)
+target_compile_options(abseil-cpp-absl-synchronization PRIVATE
+  -DNOMINMAX
+  -Wno-everything
+)
+target_include_directories(abseil-cpp-absl-synchronization PUBLIC
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp
+)
+target_link_libraries(abseil-cpp-absl-synchronization PUBLIC
+  contrib-libs-cxxsupp
+  abseil-cpp-absl-base
+  abseil-cpp-absl-debugging
+  abseil-cpp-absl-numeric
+  abseil-cpp-absl-strings
+  abseil-cpp-absl-time
+)
+target_sources(abseil-cpp-absl-synchronization PRIVATE
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/barrier.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/blocking_counter.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/internal/create_thread_identity.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/internal/graphcycles.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/internal/per_thread_sem.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/internal/waiter.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/mutex.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/synchronization/notification.cc
+)

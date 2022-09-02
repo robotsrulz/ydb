@@ -34,8 +34,8 @@ struct TTaskRunnerEvents {
         // ES_CONTINUE_RUN -> TaskRunner->Run() -> TEvTaskRunFinished
         ES_RUN_FINISHED,
 
-        ES_SOURCE_PUSH,
-        ES_SOURCE_PUSH_FINISHED,
+        ES_ASYNC_INPUT_PUSH,
+        ES_ASYNC_INPUT_PUSH_FINISHED,
 
         ES_SINK_POP,
         ES_SINK_POP_FINISHED,
@@ -56,12 +56,6 @@ struct TTaskRunnerActorSensorEntry {
     i64 Min = 0;
     i64 Avg = 0;
     i64 Count = 0;
-};
-
-struct TTaskRunnerActorRusage {
-    i64 Utime = 0;
-    i64 Stime = 0;
-    i64 MajorPageFaults = 0;
 };
 
 using TTaskRunnerActorSensors = TVector<TTaskRunnerActorSensorEntry>;
@@ -202,25 +196,24 @@ struct TEvTaskRunFinished
         THashMap<ui32, ui64>&& inputMap,
         THashMap<ui32,  ui64>&& sourcesMap,
         const TTaskRunnerActorSensors& sensors = {},
-        const TTaskRunnerActorRusage& rusage = {},
         const TDqMemoryQuota::TProfileStats& profileStats = {},
         ui64 mkqlMemoryLimit = 0,
         THolder<NDqProto::TMiniKqlProgramState>&& programState = nullptr,
-        bool checkpointRequestedFromTaskRunner = false)
+        bool checkpointRequestedFromTaskRunner = false,
+        TDuration computeTime = TDuration::Zero())
         : RunStatus(runStatus)
         , Sensors(sensors)
-        , Rusage(rusage)
         , InputChannelFreeSpace(std::move(inputMap))
         , SourcesFreeSpace(std::move(sourcesMap))
         , ProfileStats(profileStats)
         , MkqlMemoryLimit(mkqlMemoryLimit)
         , ProgramState(std::move(programState))
         , CheckpointRequestedFromTaskRunner(checkpointRequestedFromTaskRunner)
+        , ComputeTime(computeTime)
     { }
 
     NDq::ERunStatus RunStatus;
     TTaskRunnerActorSensors Sensors;
-    TTaskRunnerActorRusage Rusage;
 
     THashMap<ui32, ui64> InputChannelFreeSpace;
     THashMap<ui32, ui64> SourcesFreeSpace;
@@ -228,6 +221,7 @@ struct TEvTaskRunFinished
     ui64 MkqlMemoryLimit = 0;
     THolder<NDqProto::TMiniKqlProgramState> ProgramState;
     bool CheckpointRequestedFromTaskRunner = false;
+    TDuration ComputeTime;
 };
 
 struct TEvChannelPopFinished
@@ -264,7 +258,7 @@ struct TEvChannelPopFinished
 struct TCheckpointRequest {
     TCheckpointRequest(TVector<ui32>&& channelIds, TVector<ui32>&& sinkIds, const NDqProto::TCheckpoint& checkpoint)
         : ChannelIds(std::move(channelIds))
-        , SinkIds(std::move(sinkIds)) 
+        , SinkIds(std::move(sinkIds))
         , Checkpoint(checkpoint) {
     }
 
@@ -278,13 +272,13 @@ struct TEvContinueRun
 
     TEvContinueRun() = default;
 
-    explicit TEvContinueRun(TMaybe<TCheckpointRequest>&& checkpointRequest, bool checkpointOnly) 
+    explicit TEvContinueRun(TMaybe<TCheckpointRequest>&& checkpointRequest, bool checkpointOnly)
         : ChannelId(0)
         , MemLimit(0)
         , FreeSpace(0)
-        , CheckpointRequest(std::move(checkpointRequest)) 
+        , CheckpointRequest(std::move(checkpointRequest))
         , CheckpointOnly(checkpointOnly)
-    { } 
+    { }
 
     TEvContinueRun(ui32 channelId, ui64 freeSpace)
         : ChannelId(channelId)
@@ -309,11 +303,11 @@ struct TEvContinueRun
     bool CheckpointOnly = false;
 };
 
-struct TEvSourcePushFinished
-    : NActors::TEventLocal<TEvSourcePushFinished, TTaskRunnerEvents::ES_SOURCE_PUSH_FINISHED>
+struct TEvAsyncInputPushFinished
+    : NActors::TEventLocal<TEvAsyncInputPushFinished, TTaskRunnerEvents::ES_ASYNC_INPUT_PUSH_FINISHED>
 {
-    TEvSourcePushFinished() = default;
-    TEvSourcePushFinished(ui64 index)
+    TEvAsyncInputPushFinished() = default;
+    TEvAsyncInputPushFinished(ui64 index)
         : Index(index)
     { }
 

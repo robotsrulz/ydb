@@ -166,12 +166,13 @@ public:
 
         ++parentPath->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentPath);
-
         context.SS->ClearDescribePathCaches(parentPath);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentPath->PathId);
-
         context.SS->ClearDescribePathCaches(path);
-        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentPath->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        }
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
         return true;
@@ -300,6 +301,10 @@ public:
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxDropReplication, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         Y_VERIFY(context.SS->Replications.contains(path->PathId));
         auto replication = context.SS->Replications.at(path->PathId);
@@ -327,12 +332,13 @@ public:
 
         ++parentPath->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentPath.Base());
-
         context.SS->ClearDescribePathCaches(parentPath.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentPath->PathId);
-
         context.SS->ClearDescribePathCaches(path.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, path->PathId);
+
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentPath->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, path->PathId);
+        }
 
         context.OnComplete.ActivateTx(OperationId);
 

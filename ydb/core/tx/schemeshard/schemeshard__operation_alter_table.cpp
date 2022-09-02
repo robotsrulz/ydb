@@ -595,10 +595,14 @@ public:
         TBindingsRoomsChanges bindingChanges;
 
         if (context.SS->IsStorageConfigLogic(table)) {
-            if (!context.SS->GetBindingsRoomsChanges(path.DomainId(), table->GetPartitions(), alterData->PartitionConfigFull(), bindingChanges, errStr)) {
+            if (!context.SS->GetBindingsRoomsChanges(path.GetPathIdForDomain(), table->GetPartitions(), alterData->PartitionConfigFull(), bindingChanges, errStr)) {
                 result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
                 return result;
             }
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxAlterTable, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
         }
 
         table->PrepareAlter(alterData);

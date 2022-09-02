@@ -8,7 +8,7 @@
 #include <library/cpp/actors/core/events.h>
 #include <library/cpp/actors/interconnect/events_local.h>
 
-#include <ydb/core/yq/libs/protos/yq_private.pb.h>
+#include <ydb/core/yq/libs/protos/fq_private.pb.h>
 #include <ydb/public/api/protos/yq.pb.h>
 #include <ydb/public/sdk/cpp/client/ydb_params/params.h>
 
@@ -16,6 +16,7 @@
 
 #include <ydb/core/yq/libs/control_plane_storage/proto/yq_internal.pb.h>
 #include <ydb/core/yq/libs/events/event_subspace.h>
+#include <ydb/core/yq/libs/quota_manager/events/events.h>
 #include <ydb/public/sdk/cpp/client/ydb_proto/accessor.h>
 
 namespace NYq {
@@ -195,6 +196,10 @@ struct TEvControlPlaneStorage {
         EvNodesHealthCheckResponse,
         EvGetHealthNodesRequest,
         EvGetHealthNodesResponse,
+        EvCreateRateLimiterResourceRequest,
+        EvCreateRateLimiterResourceResponse,
+        EvDeleteRateLimiterResourceRequest,
+        EvDeleteRateLimiterResourceResponse,
         EvEnd,
     };
 
@@ -202,18 +207,21 @@ struct TEvControlPlaneStorage {
 
     template<typename ProtoMessage, ui32 EventType>
     struct TControlPlaneRequest : NActors::TEventLocal<TControlPlaneRequest<ProtoMessage, EventType>, EventType> {
+        using ProtoRequestType = ProtoMessage;
         explicit TControlPlaneRequest(const TString& scope,
                                              const ProtoMessage& request,
                                              const TString& user,
                                              const TString& token,
                                              const TString& cloudId,
-                                             TPermissions permissions)
+                                             TPermissions permissions,
+                                             const TQuotaMap& quotas)
             : Scope(scope)
             , Request(request)
             , User(user)
             , Token(token)
             , CloudId(cloudId)
             , Permissions(permissions)
+            , Quotas(quotas)
         {
         }
 
@@ -232,10 +240,12 @@ struct TEvControlPlaneStorage {
         TString Token;
         TString CloudId;
         TPermissions Permissions;
+        TQuotaMap Quotas;
     };
 
     template<typename TDerived, typename ProtoMessage, ui32 EventType>
     struct TControlPlaneResponse : NActors::TEventLocal<TDerived, EventType> {
+        using ProtoResultType = ProtoMessage;
         explicit TControlPlaneResponse(const ProtoMessage& result)
             : Result(result)
         {
@@ -243,6 +253,11 @@ struct TEvControlPlaneStorage {
 
         explicit TControlPlaneResponse(const NYql::TIssues& issues)
             : Issues(issues)
+        {
+        }
+
+        explicit TControlPlaneResponse(const ProtoMessage& result, const NYql::TIssues& issues)
+            : Result(result), Issues(issues)
         {
         }
 
@@ -269,6 +284,11 @@ struct TEvControlPlaneStorage {
             : TControlPlaneResponse<TControlPlaneNonAuditableResponse<ProtoMessage, EventType>, ProtoMessage, EventType>(issues)
         {
         }
+
+        explicit TControlPlaneNonAuditableResponse(const ProtoMessage& result, const NYql::TIssues& issues)
+            : TControlPlaneResponse<TControlPlaneNonAuditableResponse<ProtoMessage, EventType>, ProtoMessage, EventType>(result, issues)
+        {
+        }
     };
 
     template<typename ProtoMessage, typename AuditMessage, ui32 EventType>
@@ -282,6 +302,12 @@ struct TEvControlPlaneStorage {
 
         explicit TControlPlaneAuditableResponse(const NYql::TIssues& issues)
             : TControlPlaneResponse<TControlPlaneAuditableResponse<ProtoMessage, AuditMessage, EventType>, ProtoMessage, EventType>(issues)
+        {
+        }
+
+        explicit TControlPlaneAuditableResponse(const ProtoMessage& result, const NYql::TIssues& issues, const TAuditDetails<AuditMessage>& auditDetails)
+            : TControlPlaneResponse<TControlPlaneAuditableResponse<ProtoMessage, AuditMessage, EventType>, ProtoMessage, EventType>(result, issues)
+            , AuditDetails(auditDetails)
         {
         }
 
@@ -336,129 +362,84 @@ struct TEvControlPlaneStorage {
 
     // internal messages
     struct TEvWriteResultDataRequest : NActors::TEventLocal<TEvWriteResultDataRequest, EvWriteResultDataRequest> {
-        explicit TEvWriteResultDataRequest(const TString& resultId,
-                                           const int32_t resultSetId,
-                                           const int64_t startRowId,
-                                           const TInstant& deadline,
-                                           const Ydb::ResultSet& resultSet)
-            : ResultId(resultId)
-            , ResultSetId(resultSetId)
-            , StartRowId(startRowId)
-            , Deadline(deadline)
-            , ResultSet(resultSet)
-        {
-        }
+
+        TEvWriteResultDataRequest() = default;
+
+        explicit TEvWriteResultDataRequest(
+            Fq::Private::WriteTaskResultRequest&& request)
+            : Request(std::move(request))
+        {}
 
         size_t GetByteSize() const {
             return sizeof(*this)
-                    + ResultId.Size()
-                    + ResultSet.ByteSizeLong();
+                    + Request.ByteSizeLong();
         }
 
-        TString ResultId;
-        int32_t ResultSetId = 0;
-        int64_t StartRowId = 0;
-        TInstant Deadline;
-        Ydb::ResultSet ResultSet;
+        Fq::Private::WriteTaskResultRequest Request;
     };
 
     struct TEvWriteResultDataResponse : NActors::TEventLocal<TEvWriteResultDataResponse, EvWriteResultDataResponse> {
-        explicit TEvWriteResultDataResponse(const NYql::TIssues& issues)
-            : Issues(issues)
-        {
-        }
 
         explicit TEvWriteResultDataResponse(
-            const NYql::TIssues& issues,
-            const ui64 requestId)
+            const Fq::Private::WriteTaskResultResult& record)
+            : Record(record)
+        {}
+
+        explicit TEvWriteResultDataResponse(
+            const NYql::TIssues& issues)
             : Issues(issues)
-            , RequestId(requestId)
-        {
-        }
+        {}
 
         size_t GetByteSize() const {
             return sizeof(*this)
+                    + Record.ByteSizeLong()
                     + GetIssuesByteSize(Issues)
                     + GetDebugInfoByteSize(DebugInfo);
         }
 
+        Fq::Private::WriteTaskResultResult Record;
         NYql::TIssues Issues;
-        const ui64 RequestId = 0;
         TDebugInfoPtr DebugInfo;
     };
 
     struct TEvGetTaskRequest : NActors::TEventLocal<TEvGetTaskRequest, EvGetTaskRequest> {
+
+        TEvGetTaskRequest() = default;
+
         explicit TEvGetTaskRequest(
-            const TString& owner,
-            const TString& hostName,
-            const TString& tenantName)
-            : Owner(owner)
-            , HostName(hostName)
-            , TenantName(tenantName)
-        {
-        }
+            Fq::Private::GetTaskRequest&& request)
+            : Request(std::move(request))
+        {}
 
         size_t GetByteSize() const {
             return sizeof(*this)
-                    + Owner.Size()
-                    + HostName.Size()
-                    + TenantName.Size();
+                    + Request.ByteSizeLong();
         }
 
-        TString Owner;
-        TString HostName;
-        TString TenantName;
-    };
-
-    struct TTask {
-        TString Scope;
-        TString QueryId;
-        YandexQuery::Query Query;
-        YandexQuery::Internal::QueryInternal Internal;
-        ui64 Generation = 0;
-        TInstant Deadline;
-
-        size_t GetByteSize() const {
-            return sizeof(*this)
-                    + Scope.Size()
-                    + QueryId.Size()
-                    + Query.ByteSizeLong()
-                    + Internal.ByteSizeLong();
-        }
+        Fq::Private::GetTaskRequest Request;
     };
 
     struct TEvGetTaskResponse : NActors::TEventLocal<TEvGetTaskResponse, EvGetTaskResponse> {
-        explicit TEvGetTaskResponse(const TVector<TTask>& tasks, const TString& owner)
-            : Tasks(tasks)
-            , Owner(owner)
-        {
-        }
 
-        explicit TEvGetTaskResponse(const NYql::TIssues& issues)
+        explicit TEvGetTaskResponse(
+            const Fq::Private::GetTaskResult& record)
+            : Record(record)
+        {}
+
+        explicit TEvGetTaskResponse(
+            const NYql::TIssues& issues)
             : Issues(issues)
-        {
-        }
+        {}
 
         size_t GetByteSize() const {
             return sizeof(*this)
-                    + TasksByteSizeLong()
+                    + Record.ByteSizeLong()
                     + GetIssuesByteSize(Issues)
-                    + Owner.Size()
                     + GetDebugInfoByteSize(DebugInfo);
         }
 
-        size_t TasksByteSizeLong() const {
-            size_t size = 0;
-            for (const auto& task: Tasks) {
-                size += task.GetByteSize();
-            }
-            size += Tasks.size() * sizeof(TTask);
-            return size;
-        }
-
+        Fq::Private::GetTaskResult Record;
         NYql::TIssues Issues;
-        TVector<TTask> Tasks;
-        TString Owner;
         TDebugInfoPtr DebugInfo;
     };
 
@@ -485,119 +466,11 @@ struct TEvControlPlaneStorage {
     };
 
     struct TEvPingTaskRequest : NActors::TEventLocal<TEvPingTaskRequest, EvPingTaskRequest> {
-        explicit TEvPingTaskRequest(const TString& tenantName, const TString& cloudId, const TString& scope, const TString& queryId, const TString& owner, const TInstant& deadline, const TString& resultId = "")
-            : TenantName(tenantName)
-            , CloudId(cloudId)
-            , Scope(scope)
-            , QueryId(queryId)
-            , Owner(owner)
-            , Deadline(deadline)
-            , ResultId(resultId)
-        {
-        }
 
-        size_t GetByteSize() const {
-            return sizeof(*this)
-                    + TenantName.Size()
-                    + CloudId.Size()
-                    + Scope.Size()
-                    + QueryId.Size()
-                    + Owner.Size()
-                    + ResultId.Size()
-                    + Status.Empty() ? 0 : sizeof(*Status)
-                    + GetIssuesByteSize(Issues)
-                    + GetIssuesByteSize(TransientIssues)
-                    + Statistics.Empty() ? 0 : Statistics->Size()
-                    + ResultSetMetasByteSizeLong()
-                    + Ast.Empty() ? 0 : Ast->Size()
-                    + Plan.Empty() ? 0 : Plan->Size()
-                    + StartedAt.Empty() ? 0 : sizeof(*StartedAt)
-                    + FinishedAt.Empty() ? 0 : sizeof(*FinishedAt)
-                    + CreatedTopicConsumersByteSizeLong()
-                    + DqGraphByteSizeLong()
-                    + StreamingDisposition.Empty() ? 0 : StreamingDisposition->ByteSizeLong();
-        }
+        TEvPingTaskRequest() = default;
 
-        size_t ResultSetMetasByteSizeLong() const {
-            if (ResultSetMetas.Empty()) {
-                return 0;
-            }
-            size_t size = 0;
-            for (const auto& resultSet: *ResultSetMetas) {
-                size += resultSet.ByteSizeLong();
-            }
-            size += ResultSetMetas->size() * sizeof(YandexQuery::ResultSetMeta);
-            return size;
-        }
-
-        size_t CreatedTopicConsumersByteSizeLong() const {
-            size_t size = 0;
-            for (const auto& topic: CreatedTopicConsumers) {
-                size += topic.GetByteSize();
-            }
-            size += CreatedTopicConsumers.size() * sizeof(YandexQuery::ResultSetMeta);
-            return size;
-        }
-
-        size_t DqGraphByteSizeLong() const {
-            size_t size = 0;
-            for (const auto& graph: DqGraphs) {
-                size += graph.Size();
-            }
-            size += DqGraphs.size() * sizeof(TString);
-            return size;
-        }
-
-        const TString TenantName;
-        const TString CloudId;
-        const TString Scope;
-        const TString QueryId;
-        const TString Owner;
-        const TInstant Deadline;
-        TString ResultId;
-        TMaybe<YandexQuery::QueryMeta::ComputeStatus> Status;
-        TMaybe<NYql::TIssues> Issues;
-        TMaybe<NYql::TIssues> TransientIssues;
-        TMaybe<TString> Statistics;
-        TMaybe<TVector<YandexQuery::ResultSetMeta>> ResultSetMetas;
-        TMaybe<TString> Ast;
-        TMaybe<TString> Plan;
-        TMaybe<TInstant> StartedAt;
-        TMaybe<TInstant> FinishedAt;
-        bool ResignQuery = false;
-        ui64 StatusCode = 0;
-        TVector<TTopicConsumer> CreatedTopicConsumers;
-        TVector<TString> DqGraphs;
-        i32 DqGraphIndex = 0;
-        YandexQuery::StateLoadMode StateLoadMode = YandexQuery::STATE_LOAD_MODE_UNSPECIFIED;
-        TMaybe<YandexQuery::StreamingDisposition> StreamingDisposition;
-    };
-
-    struct TEvPingTaskResponse : NActors::TEventLocal<TEvPingTaskResponse, EvPingTaskResponse> {
-        explicit TEvPingTaskResponse(const YandexQuery::QueryAction& action)
-            : Action(action)
-        {
-        }
-
-        explicit TEvPingTaskResponse(const NYql::TIssues& issues)
-            : Issues(issues)
-        {
-        }
-
-        size_t GetByteSize() const {
-            return sizeof(*this)
-                    + GetIssuesByteSize(Issues)
-                    + GetDebugInfoByteSize(DebugInfo);
-        }
-
-        YandexQuery::QueryAction Action = YandexQuery::QUERY_ACTION_UNSPECIFIED;
-        NYql::TIssues Issues;
-        TDebugInfoPtr DebugInfo;
-    };
-
-    struct TEvNodesHealthCheckRequest : NActors::TEventLocal<TEvNodesHealthCheckRequest, EvNodesHealthCheckRequest> {
-        explicit TEvNodesHealthCheckRequest(
-            Yq::Private::NodesHealthCheckRequest&& request)
+        explicit TEvPingTaskRequest(
+            Fq::Private::PingTaskRequest&& request)
             : Request(std::move(request))
         {}
 
@@ -606,13 +479,54 @@ struct TEvControlPlaneStorage {
                     + Request.ByteSizeLong();
         }
 
-        Yq::Private::NodesHealthCheckRequest Request;
+        Fq::Private::PingTaskRequest Request;
+    };
+
+    struct TEvPingTaskResponse : NActors::TEventLocal<TEvPingTaskResponse, EvPingTaskResponse> {
+
+        explicit TEvPingTaskResponse(
+            const Fq::Private::PingTaskResult& record)
+            : Record(record)
+        {}
+
+        explicit TEvPingTaskResponse(
+            const NYql::TIssues& issues)
+            : Issues(issues)
+        {}
+
+        size_t GetByteSize() const {
+            return sizeof(*this)
+                    + Record.ByteSizeLong()
+                    + GetIssuesByteSize(Issues)
+                    + GetDebugInfoByteSize(DebugInfo);
+        }
+
+        Fq::Private::PingTaskResult Record;
+        NYql::TIssues Issues;
+        TDebugInfoPtr DebugInfo;
+    };
+
+    struct TEvNodesHealthCheckRequest : NActors::TEventLocal<TEvNodesHealthCheckRequest, EvNodesHealthCheckRequest> {
+
+        TEvNodesHealthCheckRequest() = default;
+
+        explicit TEvNodesHealthCheckRequest(
+            Fq::Private::NodesHealthCheckRequest&& request)
+            : Request(std::move(request))
+        {}
+
+        size_t GetByteSize() const {
+            return sizeof(*this)
+                    + Request.ByteSizeLong();
+        }
+
+        Fq::Private::NodesHealthCheckRequest Request;
     };
 
     struct TEvNodesHealthCheckResponse : NActors::TEventLocal<TEvNodesHealthCheckResponse, EvNodesHealthCheckResponse> {
 
         explicit TEvNodesHealthCheckResponse(
-            const Yq::Private::NodesHealthCheckResult& record)
+            const Fq::Private::NodesHealthCheckResult& record)
             : Record(record)
         {}
 
@@ -628,11 +542,90 @@ struct TEvControlPlaneStorage {
                     + GetDebugInfoByteSize(DebugInfo);
         }
 
-        Yq::Private::NodesHealthCheckResult Record;
+        Fq::Private::NodesHealthCheckResult Record;
         NYql::TIssues Issues;
         TDebugInfoPtr DebugInfo;
     };
 
+    struct TEvCreateRateLimiterResourceRequest : NActors::TEventLocal<TEvCreateRateLimiterResourceRequest, EvCreateRateLimiterResourceRequest> {
+        TEvCreateRateLimiterResourceRequest() = default;
+
+        explicit TEvCreateRateLimiterResourceRequest(
+            Fq::Private::CreateRateLimiterResourceRequest&& request)
+            : Request(std::move(request))
+        {}
+
+        size_t GetByteSize() const {
+            return sizeof(*this)
+                    + Request.ByteSizeLong();
+        }
+
+        Fq::Private::CreateRateLimiterResourceRequest Request;
+    };
+
+    struct TEvCreateRateLimiterResourceResponse : NActors::TEventLocal<TEvCreateRateLimiterResourceResponse, EvCreateRateLimiterResourceResponse> {
+        explicit TEvCreateRateLimiterResourceResponse(
+            const Fq::Private::CreateRateLimiterResourceResult& record)
+            : Record(record)
+        {}
+
+        explicit TEvCreateRateLimiterResourceResponse(
+            const NYql::TIssues& issues)
+            : Issues(issues)
+        {}
+
+        size_t GetByteSize() const {
+            return sizeof(*this)
+                    + Record.ByteSizeLong()
+                    + GetIssuesByteSize(Issues)
+                    + GetDebugInfoByteSize(DebugInfo);
+        }
+
+        using TProto = Fq::Private::CreateRateLimiterResourceResult;
+        TProto Record;
+        NYql::TIssues Issues;
+        TDebugInfoPtr DebugInfo;
+    };
+
+    struct TEvDeleteRateLimiterResourceRequest : NActors::TEventLocal<TEvDeleteRateLimiterResourceRequest, EvDeleteRateLimiterResourceRequest> {
+        TEvDeleteRateLimiterResourceRequest() = default;
+
+        explicit TEvDeleteRateLimiterResourceRequest(
+            Fq::Private::DeleteRateLimiterResourceRequest&& request)
+            : Request(std::move(request))
+        {}
+
+        size_t GetByteSize() const {
+            return sizeof(*this)
+                    + Request.ByteSizeLong();
+        }
+
+        Fq::Private::DeleteRateLimiterResourceRequest Request;
+    };
+
+    struct TEvDeleteRateLimiterResourceResponse : NActors::TEventLocal<TEvDeleteRateLimiterResourceResponse, EvDeleteRateLimiterResourceResponse> {
+        explicit TEvDeleteRateLimiterResourceResponse(
+            const Fq::Private::DeleteRateLimiterResourceResult& record)
+            : Record(record)
+        {}
+
+        explicit TEvDeleteRateLimiterResourceResponse(
+            const NYql::TIssues& issues)
+            : Issues(issues)
+        {}
+
+        size_t GetByteSize() const {
+            return sizeof(*this)
+                    + Record.ByteSizeLong()
+                    + GetIssuesByteSize(Issues)
+                    + GetDebugInfoByteSize(DebugInfo);
+        }
+
+        using TProto = Fq::Private::DeleteRateLimiterResourceResult;
+        TProto Record;
+        NYql::TIssues Issues;
+        TDebugInfoPtr DebugInfo;
+    };
 };
 
 }

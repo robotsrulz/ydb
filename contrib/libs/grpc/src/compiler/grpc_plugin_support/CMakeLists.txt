@@ -10,12 +10,12 @@
 add_library(src-compiler-grpc_plugin_support)
 target_compile_options(src-compiler-grpc_plugin_support PRIVATE
   -DGRPC_POSIX_FORK_ALLOW_PTHREAD_ATFORK=1
+  -Wno-everything
 )
 target_include_directories(src-compiler-grpc_plugin_support PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
 )
 target_include_directories(src-compiler-grpc_plugin_support PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
   ${CMAKE_BINARY_DIR}/contrib/libs/grpc
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc
 )

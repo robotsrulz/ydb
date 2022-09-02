@@ -22,7 +22,6 @@
 #include <library/cpp/actors/core/event_pb.h>
 #include <library/cpp/actors/core/hfunc.h>
 #include <library/cpp/actors/core/log.h>
-#include <library/cpp/json/json_reader.h>
 
 #include <util/string/escape.h>
 
@@ -77,30 +76,33 @@ struct TKqpQueryState {
     TMaybe<NKikimrKqp::TRlPath> RlPath;
 };
 
-
 struct TKqpCleanupState {
     bool Final = false;
     TInstant Start;
     TIntrusivePtr<IKqpHost::IAsyncQueryResult> AsyncResult;
 };
 
-enum ETableReadType {
-    Other = 0,
-    Scan = 1,
-    FullScan = 2,
-};
-
 EKikimrStatsMode GetStatsMode(const NKikimrKqp::TQueryRequest& queryRequest, EKikimrStatsMode minMode) {
-    if (queryRequest.GetProfile()) {
-        // TODO: Deprecate, StatsMode is the new way to enable stats.
-        return EKikimrStatsMode::Profile;
+    if (queryRequest.HasCollectStats()) {
+        switch (queryRequest.GetCollectStats()) {
+            case Ydb::Table::QueryStatsCollection::STATS_COLLECTION_NONE:
+                return EKikimrStatsMode::None;
+            case Ydb::Table::QueryStatsCollection::STATS_COLLECTION_BASIC:
+                return EKikimrStatsMode::Basic;
+            case Ydb::Table::QueryStatsCollection::STATS_COLLECTION_FULL:
+                return EKikimrStatsMode::Full;
+            case Ydb::Table::QueryStatsCollection::STATS_COLLECTION_PROFILE:
+                return EKikimrStatsMode::Profile;
+            default:
+                return EKikimrStatsMode::None;
+        }
     }
 
     switch (queryRequest.GetStatsMode()) {
         case NYql::NDqProto::DQ_STATS_MODE_BASIC:
             return EKikimrStatsMode::Basic;
         case NYql::NDqProto::DQ_STATS_MODE_PROFILE:
-            return EKikimrStatsMode::Profile;
+            return EKikimrStatsMode::Full;
         default:
             return std::max(EKikimrStatsMode::None, minMode);
     }
@@ -334,6 +336,14 @@ public:
             QueryState->OldEngineFallback = true;
         }
 
+        auto replyError = [this, &ctx] (NYql::EYqlIssueCode status, const TString& info) {
+            QueryState->AsyncQueryResult = MakeKikimrResultHolder(NCommon::ResultFromError<TQueryResult>(
+                YqlIssue(TPosition(), status, info)));
+
+            ContinueQueryProcess(ctx);
+            Become(&TKqpWorkerActor::PerformQueryState);
+        };
+
         if (queryRequest.HasTxControl()) {
             const auto& txControl = queryRequest.GetTxControl();
 
@@ -343,12 +353,7 @@ public:
 
                     auto txInfo = KqpHost->GetTransactionInfo(QueryState->TxId);
                     if (!txInfo) {
-                        QueryState->AsyncQueryResult = MakeKikimrResultHolder(NCommon::ResultFromError<TQueryResult>(
-                            YqlIssue(TPosition(), TIssuesIds::KIKIMR_TRANSACTION_NOT_FOUND, TStringBuilder()
-                                << "Transaction not found: " << QueryState->TxId)));
-
-                        ContinueQueryProcess(ctx);
-                        Become(&TKqpWorkerActor::PerformQueryState);
+                        replyError(TIssuesIds::KIKIMR_TRANSACTION_NOT_FOUND, TStringBuilder() << "Transaction not found: " << QueryState->TxId);
                         return;
                     }
 
@@ -368,7 +373,8 @@ public:
                 }
 
                 case Ydb::Table::TransactionControl::TX_SELECTOR_NOT_SET: {
-                    Y_VERIFY(false);
+                    replyError(TIssuesIds::KIKIMR_BAD_REQUEST, TStringBuilder() << "wrong TxControl: tx_selector must be set");
+                    return;
                 }
             }
         } else {
@@ -677,61 +683,77 @@ public:
     }
 
     STFUNC(ReadyState) {
-        switch (ev->GetTypeRewrite()) {
-            HFunc(TEvKqp::TEvQueryRequest, HandleReady);
-            HFunc(TEvKqp::TEvCompileResponse, HandleReady);
-            HFunc(TEvKqp::TEvCloseSessionRequest, HandleReady);
-            HFunc(TEvKqp::TEvPingSessionRequest, HandleReady);
-            HFunc(TEvKqp::TEvContinueProcess, HandleReady);
-            HFunc(TEvKqp::TEvIdleTimeout, HandleReady);
-            HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
-            HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
-        default:
-            Y_FAIL("TKqpWorkerActor, ReadyState: unexpected event 0x%08" PRIx32, ev->GetTypeRewrite());
+        try {
+            switch (ev->GetTypeRewrite()) {
+                HFunc(TEvKqp::TEvQueryRequest, HandleReady);
+                HFunc(TEvKqp::TEvCompileResponse, HandleReady);
+                HFunc(TEvKqp::TEvCloseSessionRequest, HandleReady);
+                HFunc(TEvKqp::TEvPingSessionRequest, HandleReady);
+                HFunc(TEvKqp::TEvContinueProcess, HandleReady);
+                HFunc(TEvKqp::TEvIdleTimeout, HandleReady);
+                HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
+                HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
+            default:
+                UnexpectedEvent("ReadyState", ev, ctx);
+            }
+        } catch (const yexception& ex) {
+            InternalError(ex.what(), ctx);
         }
     }
 
     STFUNC(CompileQueryState) {
-        switch (ev->GetTypeRewrite()) {
-            HFunc(TEvKqp::TEvQueryRequest, HandleCompileQuery);
-            HFunc(TEvKqp::TEvCompileResponse, HandleCompileQuery);
-            HFunc(TEvKqp::TEvCloseSessionRequest, HandleCompileQuery);
-            HFunc(TEvKqp::TEvPingSessionRequest, HandleCompileQuery);
-            HFunc(TEvKqp::TEvIdleTimeout, HandleCompileQuery);
-            HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
-            HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
-        default:
-            Y_FAIL("TKqpWorkerActor, CompileQueryState: unexpected event 0x%08" PRIx32, ev->GetTypeRewrite());
+        try {
+            switch (ev->GetTypeRewrite()) {
+                HFunc(TEvKqp::TEvQueryRequest, HandleCompileQuery);
+                HFunc(TEvKqp::TEvCompileResponse, HandleCompileQuery);
+                HFunc(TEvKqp::TEvCloseSessionRequest, HandleCompileQuery);
+                HFunc(TEvKqp::TEvPingSessionRequest, HandleCompileQuery);
+                HFunc(TEvKqp::TEvIdleTimeout, HandleCompileQuery);
+                HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
+                HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
+            default:
+                UnexpectedEvent("CompileQueryState", ev, ctx);
+            }
+        } catch (const yexception& ex) {
+            InternalError(ex.what(), ctx);
         }
     }
 
     STFUNC(PerformQueryState) {
-        switch (ev->GetTypeRewrite()) {
-            HFunc(TEvKqp::TEvQueryRequest, HandlePerformQuery);
-            HFunc(TEvKqp::TEvCompileResponse, HandlePerformQuery);
-            HFunc(TEvKqp::TEvCloseSessionRequest, HandlePerformQuery);
-            HFunc(TEvKqp::TEvPingSessionRequest, HandlePerformQuery);
-            HFunc(TEvKqp::TEvContinueProcess, HandlePerformQuery);
-            HFunc(TEvKqp::TEvIdleTimeout, HandlePerformQuery);
-            HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
-            HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
-        default:
-            Y_FAIL("TKqpWorkerActor, PerformQueryState: unexpected event 0x%08" PRIx32, ev->GetTypeRewrite());
+        try {
+            switch (ev->GetTypeRewrite()) {
+                HFunc(TEvKqp::TEvQueryRequest, HandlePerformQuery);
+                HFunc(TEvKqp::TEvCompileResponse, HandlePerformQuery);
+                HFunc(TEvKqp::TEvCloseSessionRequest, HandlePerformQuery);
+                HFunc(TEvKqp::TEvPingSessionRequest, HandlePerformQuery);
+                HFunc(TEvKqp::TEvContinueProcess, HandlePerformQuery);
+                HFunc(TEvKqp::TEvIdleTimeout, HandlePerformQuery);
+                HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
+                HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
+            default:
+                UnexpectedEvent("PerformQueryState", ev, ctx);
+            }
+        } catch (const yexception& ex) {
+            InternalError(ex.what(), ctx);
         }
     }
 
     STFUNC(PerformCleanupState) {
-        switch (ev->GetTypeRewrite()) {
-            HFunc(TEvKqp::TEvQueryRequest, HandlePerformCleanup);
-            HFunc(TEvKqp::TEvCompileResponse, HandlePerformCleanup);
-            HFunc(TEvKqp::TEvCloseSessionRequest, HandlePerformCleanup);
-            HFunc(TEvKqp::TEvPingSessionRequest, HandlePerformCleanup);
-            HFunc(TEvKqp::TEvContinueProcess, HandlePerformCleanup);
-            HFunc(TEvKqp::TEvIdleTimeout, HandlePerformCleanup);
-            HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
-            HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
-        default:
-            Y_FAIL("TKqpWorkerActor, PerformCleanupState: unexpected event 0x%08" PRIx32, ev->GetTypeRewrite());
+        try {
+            switch (ev->GetTypeRewrite()) {
+                HFunc(TEvKqp::TEvQueryRequest, HandlePerformCleanup);
+                HFunc(TEvKqp::TEvCompileResponse, HandlePerformCleanup);
+                HFunc(TEvKqp::TEvCloseSessionRequest, HandlePerformCleanup);
+                HFunc(TEvKqp::TEvPingSessionRequest, HandlePerformCleanup);
+                HFunc(TEvKqp::TEvContinueProcess, HandlePerformCleanup);
+                HFunc(TEvKqp::TEvIdleTimeout, HandlePerformCleanup);
+                HFunc(TEvKqp::TEvInitiateSessionShutdown, HandleInitiateShutdown);
+                HFunc(TEvKqp::TEvContinueShutdown, HandleContinueShutdown);
+            default:
+                UnexpectedEvent("PerformCleanupState", ev, ctx);
+            }
+        } catch (const yexception& ex) {
+            InternalError(ex.what(), ctx);
         }
     }
 
@@ -786,6 +808,12 @@ private:
 
             case Ydb::Table::TransactionSettings::kStaleReadOnly:
                 isolation = NKikimrKqp::ISOLATION_LEVEL_READ_STALE;
+                readonly = true;
+                break;
+
+            case Ydb::Table::TransactionSettings::kSnapshotReadOnly:
+                // TODO: (KIKIMR-3374) Use separate isolation mode to avoid optimistic locks.
+                isolation = NKikimrKqp::ISOLATION_LEVEL_SERIALIZABLE;
                 readonly = true;
                 break;
 
@@ -1542,38 +1570,6 @@ private:
         return Reply(std::move(responseEv), ctx);
     }
 
-    ETableReadType ExtractMostHeavyReadType(const TString& queryPlan) {
-        ETableReadType maxReadType = ETableReadType::Other;
-
-        if (queryPlan.empty()) {
-            return maxReadType;
-        }
-
-        NJson::TJsonValue root;
-        NJson::ReadJsonTree(queryPlan, &root, false);
-
-        if (root.Has("tables")) {
-            for (const auto& table : root["tables"].GetArray()) {
-                if (!table.Has("reads")) {
-                    continue;
-                }
-
-                for (const auto& read : table["reads"].GetArray()) {
-                    Y_VERIFY(read.Has("type"));
-                    const auto& type = read["type"].GetString();
-
-                    if (type == "Scan") {
-                        maxReadType = Max(maxReadType, ETableReadType::Scan);
-                    } else if (type == "FullScan") {
-                        return ETableReadType::FullScan;
-                    }
-                }
-            }
-        }
-
-        return maxReadType;
-    }
-
     bool ReplyQueryResult(const TActorContext& ctx) {
         Y_VERIFY(QueryState);
         auto& queryRequest = QueryState->Request;
@@ -1692,11 +1688,7 @@ private:
         }
 
         bool reportStats = (GetStatsMode(queryRequest, EKikimrStatsMode::None) != EKikimrStatsMode::None);
-
         if (reportStats) {
-            // TODO: For compatibility with old rpc handlers, deprecate.
-            FillQueryProfile(stats, *record.MutableResponse());
-
             record.MutableResponse()->MutableQueryStats()->Swap(&stats);
             record.MutableResponse()->SetQueryPlan(queryResult.QueryPlan);
         }
@@ -2122,6 +2114,37 @@ private:
         phaseLimits.TotalReadSizeLimitBytes = phaseLimitsProto.GetTotalReadSizeLimitBytes();
 
         return queryLimits;
+    }
+
+private:
+    void UnexpectedEvent(const TString& state, TAutoPtr<NActors::IEventHandle>& ev, const TActorContext& ctx) {
+        TString message = TStringBuilder() << "TKqpWorkerActor in state "
+            << state << " received unexpected event "
+            << TypeName(*ev.Get()->GetBase()) << Sprintf("(0x%08" PRIx32 ")", ev->GetTypeRewrite());
+
+        InternalError(message, ctx);
+    }
+
+    void InternalError(const TString& message, const TActorContext& ctx) {
+        LOG_ERROR_S(ctx, NKikimrServices::KQP_WORKER, "Internal error, SelfId: "
+            << SelfId() << ", message: " << message);
+
+        if (QueryState) {
+            auto requestInfo = TKqpRequestInfo(QueryState->TraceId, SessionId);
+            ReplyProcessError(QueryState->Sender, QueryState->ProxyRequestId, requestInfo,
+                Ydb::StatusIds::INTERNAL_ERROR, message, ctx);
+        }
+
+        auto lifeSpan = TInstant::Now() - CreationTime;
+        Counters->ReportWorkerFinished(Settings.DbCounters, lifeSpan);
+
+        auto closeEv = MakeHolder<TEvKqp::TEvCloseSessionResponse>();
+        closeEv->Record.SetStatus(Ydb::StatusIds::SUCCESS);
+        closeEv->Record.MutableResponse()->SetSessionId(SessionId);
+        closeEv->Record.MutableResponse()->SetClosed(true);
+        ctx.Send(Owner, closeEv.Release());
+
+        Die(ctx);
     }
 
 private:

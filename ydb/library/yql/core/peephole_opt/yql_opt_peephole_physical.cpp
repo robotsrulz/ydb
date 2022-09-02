@@ -31,8 +31,8 @@ using namespace NNodes;
 using TPeepHoleOptimizerPtr = TExprNode::TPtr (*const)(const TExprNode::TPtr&, TExprContext&);
 using TPeepHoleOptimizerMap = std::unordered_map<std::string_view, TPeepHoleOptimizerPtr>;
 
-using TNonDeterministicOptimizerPtr = TExprNode::TPtr (*const)(const TExprNode::TPtr&, TExprContext&, TTypeAnnotationContext& types);
-using TNonDeterministicOptimizerMap = std::unordered_map<std::string_view, TNonDeterministicOptimizerPtr>;
+using TExtPeepHoleOptimizerPtr = TExprNode::TPtr (*const)(const TExprNode::TPtr&, TExprContext&, TTypeAnnotationContext& types);
+using TExtPeepHoleOptimizerMap = std::unordered_map<std::string_view, TExtPeepHoleOptimizerPtr>;
 
 TExprNode::TPtr MakeNothing(TPositionHandle pos, const TTypeAnnotationNode& type, TExprContext& ctx) {
     return ctx.NewCallable(pos, "Nothing", {ExpandType(pos, *ctx.MakeType<TOptionalExprType>(&type), ctx)});
@@ -1638,48 +1638,6 @@ TExprNode::TPtr BuildDictOverTuple(TExprNode::TPtr&& collection, const TTypeAnno
     return ctx.NewCallable(pos, "DictFromKeys", {ExpandType(pos, *dictKeyType, ctx), std::move(collection)});
 }
 
-TExprNode::TPtr ExpandPgOr(const TExprNode::TPtr& input, TExprContext& ctx) {
-    return ctx.Builder(input->Pos())
-        .Callable("ToPg")
-            .Callable(0, "Or")
-                .Callable(0, "FromPg")
-                    .Add(0, input->ChildPtr(0))
-                .Seal()
-                .Callable(1, "FromPg")
-                    .Add(0, input->ChildPtr(1))
-                .Seal()
-            .Seal()
-        .Seal()
-        .Build();
-}
-
-TExprNode::TPtr ExpandPgAnd(const TExprNode::TPtr& input, TExprContext& ctx) {
-    return ctx.Builder(input->Pos())
-        .Callable("ToPg")
-            .Callable(0, "And")
-                .Callable(0, "FromPg")
-                    .Add(0, input->ChildPtr(0))
-                .Seal()
-                .Callable(1, "FromPg")
-                    .Add(0, input->ChildPtr(1))
-                .Seal()
-            .Seal()
-        .Seal()
-        .Build();
-}
-
-TExprNode::TPtr ExpandPgNot(const TExprNode::TPtr& input, TExprContext& ctx) {
-    return ctx.Builder(input->Pos())
-        .Callable("ToPg")
-            .Callable(0, "Not")
-                .Callable(0, "FromPg")
-                    .Add(0, input->ChildPtr(0))
-                .Seal()
-            .Seal()
-        .Seal()
-        .Build();
-}
-
 TExprNode::TPtr ExpandSqlIn(const TExprNode::TPtr& input, TExprContext& ctx) {
     auto collection = input->HeadPtr();
     auto lookup = input->ChildPtr(1);
@@ -1926,14 +1884,18 @@ TExprNode::TPtr ExpandFilter(const TExprNode::TPtr& input, TExprContext& ctx) {
 }
 
 IGraphTransformer::TStatus PeepHoleCommonStage(const TExprNode::TPtr& input, TExprNode::TPtr& output,
-                                               TExprContext& ctx, TTypeAnnotationContext& types, const TPeepHoleOptimizerMap& optimizers)
+                                               TExprContext& ctx, TTypeAnnotationContext& types,
+                                               const TPeepHoleOptimizerMap& optimizers, const TExtPeepHoleOptimizerMap& extOptimizers)
 {
     TOptimizeExprSettings settings(&types);
     settings.CustomInstantTypeTransformer = types.CustomInstantTypeTransformer.Get();
 
-    return OptimizeExpr(input, output, [&optimizers](const TExprNode::TPtr& node, TExprContext& ctx) -> TExprNode::TPtr {
+    return OptimizeExpr(input, output, [&optimizers, &extOptimizers, &types](const TExprNode::TPtr& node, TExprContext& ctx) -> TExprNode::TPtr {
         if (const auto rule = optimizers.find(node->Content()); optimizers.cend() != rule)
             return (rule->second)(node, ctx);
+
+        if (const auto rule = extOptimizers.find(node->Content()); extOptimizers.cend() != rule)
+            return (rule->second)(node, ctx, types);
 
         return node;
     }, ctx, settings);
@@ -1941,7 +1903,7 @@ IGraphTransformer::TStatus PeepHoleCommonStage(const TExprNode::TPtr& input, TEx
 
 IGraphTransformer::TStatus PeepHoleFinalStage(const TExprNode::TPtr& input, TExprNode::TPtr& output,
     TExprContext& ctx, TTypeAnnotationContext& types, bool* hasNonDeterministicFunctions,
-    const TPeepHoleOptimizerMap& optimizers, const TNonDeterministicOptimizerMap& nonDetOptimizers)
+    const TPeepHoleOptimizerMap& optimizers, const TExtPeepHoleOptimizerMap& nonDetOptimizers)
 {
     TOptimizeExprSettings settings(&types);
     settings.CustomInstantTypeTransformer = types.CustomInstantTypeTransformer.Get();
@@ -2108,7 +2070,7 @@ TExprNode::TPtr OptimizeMultiMap(const TExprNode::TPtr& node, TExprContext& ctx)
     return node;
 }
 
-TExprNode::TPtr LikelyExclude(const TExprNode::TPtr& node, TExprContext&) {
+TExprNode::TPtr ReplaceWithFirstArg(const TExprNode::TPtr& node, TExprContext&) {
     YQL_CLOG(DEBUG, CorePeepHole) << "Exclude " << node->Content();
     return node->HeadPtr();
 }
@@ -5154,6 +5116,20 @@ TExprNode::TPtr AggrEqualLists(const TExprNode& node, TExprContext& ctx) {
 }
 
 template <bool Asc, bool Equals>
+TExprNode::TPtr SqlComparePg(const TExprNode& node, TExprContext& ctx) {
+    YQL_CLOG(DEBUG, CorePeepHole) << "Expand '" << node.Content() << "' over Pg.";
+    return ctx.Builder(node.Pos())
+        .Callable("FromPg")
+            .Callable(0, "PgOp")
+                .Atom(0, Asc ? (Equals ? "<=" : "<") : (Equals ? ">=" : ">"))
+                .Add(1, node.ChildPtr(0))
+                .Add(2, node.ChildPtr(1))
+            .Seal()
+        .Seal()
+        .Build();
+}
+
+template <bool Asc, bool Equals>
 TExprNode::TPtr SqlCompareLists(const TExprNode& node, TExprContext& ctx) {
     YQL_CLOG(DEBUG, CorePeepHole) << "Expand '" << node.Content() << "' over Lists.";
     auto lenCompare = JustIf(ETypeAnnotationKind::Optional == node.GetTypeAnn()->GetKind(),
@@ -5255,6 +5231,45 @@ TExprNode::TPtr AggrCompareLists(const TExprNode& node, TExprContext& ctx) {
 template <bool Equals>
 TExprNode::TPtr CheckHasItems(const TExprNode::TPtr& node, TExprContext& ctx) {
     return ctx.WrapByCallableIf(Equals, "Not", ctx.NewCallable(node->Pos(), "HasItems", {node}));
+}
+
+template <bool Equals, bool IsDistinct>
+TExprNode::TPtr SqlEqualPg(const TExprNode& node, TExprContext& ctx) {
+    YQL_CLOG(DEBUG, CorePeepHole) << "Expand '" << node.Content() << "' over Pg.";
+    if constexpr (IsDistinct) {
+        return ctx.Builder(node.Pos())
+            .Callable("IfPresent")
+                .Callable(0, "FromPg")
+                    .Callable(0, "PgOp")
+                        .Atom(0, Equals ? "=" : "<>")
+                        .Add(1, node.ChildPtr(0))
+                        .Add(2, node.ChildPtr(1))
+                    .Seal()
+                .Seal()
+                .Lambda(1)
+                    .Param("unpacked")
+                    .Arg("unpacked")
+                .Seal()
+                .Callable(2, Equals ? "==" : "!=")
+                    .Callable(0, "Exists")
+                        .Add(0, node.ChildPtr(0))
+                    .Seal()
+                    .Callable(1, "Exists")
+                        .Add(0, node.ChildPtr(1))
+                    .Seal()
+                .Seal()
+            .Build();
+    } else {
+        return ctx.Builder(node.Pos())
+            .Callable("FromPg")
+                .Callable(0, "PgOp")
+                    .Atom(0, Equals ? "=" : "<>")
+                    .Add(1, node.ChildPtr(0))
+                    .Add(2, node.ChildPtr(1))
+                .Seal()
+            .Seal()
+            .Build();
+    }
 }
 
 template <bool Equals, bool IsDistinct>
@@ -5624,6 +5639,8 @@ TExprNode::TPtr ExpandSqlEqual(const TExprNode::TPtr& node, TExprContext& ctx) {
                 return SqlEqualLists<Equals>(*node, ctx);
             case ETypeAnnotationKind::Dict:
                 return SqlEqualDicts<Equals, IsDistinct>(*node, ctx);
+            case ETypeAnnotationKind::Pg:
+                return SqlEqualPg<Equals, IsDistinct>(*node, ctx);
             case ETypeAnnotationKind::Variant:
                 return SqlCompareVariants<true, !Equals, IsDistinct>(*node, ctx);
             case ETypeAnnotationKind::Tagged:
@@ -5673,6 +5690,8 @@ TExprNode::TPtr ExpandSqlCompare(const TExprNode::TPtr& node, TExprContext& ctx)
                 return CompareTagged(*node, ctx);
             case ETypeAnnotationKind::Optional:
                 return ReduceBothArgs<false>(*node, ctx);
+            case ETypeAnnotationKind::Pg:
+                return SqlComparePg<Asc, Equals>(*node, ctx);
             default:
                 break;
         }
@@ -5808,7 +5827,6 @@ struct TPeepHoleRules {
         {"OptionalReduce", &ExpandOptionalReduce},
         {"AggrMin", &ExpandAggrMinMax<true>},
         {"AggrMax", &ExpandAggrMinMax<false>},
-        {"Aggregate", &ExpandAggregatePeephole},
         {"And", &OptimizeLogicalDups<true>},
         {"Or", &OptimizeLogicalDups<false>},
         {"CombineByKey", &ExpandCombineByKey},
@@ -5833,9 +5851,10 @@ struct TPeepHoleRules {
         {"AsRange", &ExpandAsRange},
         {"RangeFor", &ExpandRangeFor},
         {"ToFlow", &DropToFlowDeps},
-        {"PgOr", &ExpandPgOr},
-        {"PgAnd", &ExpandPgAnd},
-        {"PgNot", &ExpandPgNot},
+    };
+
+    static constexpr std::initializer_list<TExtPeepHoleOptimizerMap::value_type> CommonStageExtRulesInit = {
+        {"Aggregate", &ExpandAggregatePeephole},
     };
 
     static constexpr std::initializer_list<TPeepHoleOptimizerMap::value_type> SimplifyStageRulesInit = {
@@ -5853,7 +5872,8 @@ struct TPeepHoleRules {
     static constexpr std::initializer_list<TPeepHoleOptimizerMap::value_type> FinalStageRulesInit = {
         {"Take", &OptimizeTake<EnableNewOptimizers>},
         {"Skip", &OptimizeSkip},
-        {"Likely", &LikelyExclude},
+        {"Likely", &ReplaceWithFirstArg},
+        {"AssumeStrict", &ReplaceWithFirstArg},
         {"GroupByKey", &PeepHoleConvertGroupBySingleKey},
         {"PartitionByKey", &PeepHolePlainKeyForPartitionByKey},
         {"ExtractMembers", &PeepHoleExpandExtractItems},
@@ -5861,6 +5881,8 @@ struct TPeepHoleRules {
         {"AddMember", &ExpandAddMember},
         {"ReplaceMember", &ExpandReplaceMember},
         {"RemoveMember", &ExpandRemoveMember},
+        {"RemoveMembers", &ExpandRemoveMembers},
+        {"ForceRemoveMembers", &ExpandRemoveMembers},
         {"RemovePrefixMembers", &ExpandRemovePrefixMembers},
         {"AsSet", &ExpandAsSet},
         {"ForceRemoveMember", &ExpandRemoveMember},
@@ -5897,7 +5919,7 @@ struct TPeepHoleRules {
         {"SqueezeToDict", &OptimizeSqueezeToDict}
     };
 
-    static constexpr std::initializer_list<TNonDeterministicOptimizerMap::value_type> FinalStageNonDetRulesInit = {
+    static constexpr std::initializer_list<TExtPeepHoleOptimizerMap::value_type> FinalStageNonDetRulesInit = {
         {"Random", &Random0Arg<double>},
         {"RandomNumber", &Random0Arg<ui64>},
         {"RandomUuid", &Random0Arg<TGUID>},
@@ -5909,6 +5931,7 @@ struct TPeepHoleRules {
 
     TPeepHoleRules()
         : CommonStageRules(CommonStageRulesInit)
+        , CommonStageExtRules(CommonStageExtRulesInit)
         , FinalStageRules(FinalStageRulesInit)
         , SimplifyStageRules(SimplifyStageRulesInit)
         , FinalStageNonDetRules(FinalStageNonDetRulesInit)
@@ -5919,9 +5942,10 @@ struct TPeepHoleRules {
     }
 
     const TPeepHoleOptimizerMap CommonStageRules;
+    const TExtPeepHoleOptimizerMap CommonStageExtRules;
     const TPeepHoleOptimizerMap FinalStageRules;
     const TPeepHoleOptimizerMap SimplifyStageRules;
-    const TNonDeterministicOptimizerMap FinalStageNonDetRules;
+    const TExtPeepHoleOptimizerMap FinalStageNonDetRules;
 };
 
 template <bool EnableNewOptimizers>
@@ -5943,7 +5967,9 @@ THolder<IGraphTransformer> CreatePeepHoleCommonStageTransformer(TTypeAnnotationC
     pipeline.AddCommonOptimization(issueCode);
     pipeline.Add(CreateFunctorTransformer(
             [&types](const TExprNode::TPtr& input, TExprNode::TPtr& output, TExprContext& ctx) {
-                return PeepHoleCommonStage(input, output, ctx, types, TPeepHoleRules<EnableNewOptimizers>::Instance().CommonStageRules);
+                return PeepHoleCommonStage(input, output, ctx, types,
+                    TPeepHoleRules<EnableNewOptimizers>::Instance().CommonStageRules,
+                    TPeepHoleRules<EnableNewOptimizers>::Instance().CommonStageExtRules);
             }
         ),
         "PeepHoleCommon",
@@ -5985,7 +6011,7 @@ THolder<IGraphTransformer> CreatePeepHoleFinalStageTransformer(TTypeAnnotationCo
                 }
 
                 const auto& nonDetStageRules = withNonDeterministicRules ?
-                    TPeepHoleRules<EnableNewOptimizers>::Instance().FinalStageNonDetRules : TNonDeterministicOptimizerMap{};
+                    TPeepHoleRules<EnableNewOptimizers>::Instance().FinalStageNonDetRules : TExtPeepHoleOptimizerMap{};
 
                 return PeepHoleFinalStage(input, output, ctx, types, hasNonDeterministicFunctions, stageRules, nonDetStageRules);
             }

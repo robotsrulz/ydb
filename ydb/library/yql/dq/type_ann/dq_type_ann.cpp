@@ -188,14 +188,6 @@ TStatus AnnotateStage(const TExprNode::TPtr& stage, TExprContext& ctx) {
             }
         }
 
-        if (!transforms.empty() && !sinks.empty()
-            && transforms.size() != sinks.size()) {
-
-            ctx.AddError(TIssue(ctx.GetPosition(stage->Pos()), TStringBuilder()
-                << "Not every transform has a corresponding sink"));
-            return TStatus::Error;
-        }
-
         if (!sinks.empty()) {
             for (auto sink : sinks) {
                 sink->SetTypeAnn(resultType);
@@ -204,18 +196,9 @@ TStatus AnnotateStage(const TExprNode::TPtr& stage, TExprContext& ctx) {
         } else {
             for (auto transform : transforms) {
                 auto* type = transform->GetTypeAnn();
-                if (type->GetKind() != ETypeAnnotationKind::List) {
-
-                    ctx.AddError(TIssue(ctx.GetPosition(transform->Pos()), TStringBuilder()
-                        << "Expected List type, but got: " << *type));
+                if (!EnsureListType(transform->Pos(), *type, ctx)) {
                     return TStatus::Error;
                 }
-                /* auto* itemType = sinkType->Cast<TListExprType>()->GetItemType();
-                if (itemType->GetKind() != ETypeAnnotationKind::Struct) {
-                    ctx.AddError(TIssue(ctx.GetPosition(sink->Pos()), TStringBuilder()
-                        << "Expected List<Struct<...>> type, but got: List<" << *itemType << ">"));
-                    return TStatus::Error;
-                } */
                 stageResultTypes.emplace_back(type);
             }
         }
@@ -339,7 +322,7 @@ const TStructExprType* GetDqJoinResultType(TPositionHandle pos, const TStructExp
         for (const auto& it : type) {
             for (const auto& it2 : it.second) {
                 auto memberName = FullColumnName(it.first, it2.first);
-                if (makeOptional && it2.second->GetKind() != ETypeAnnotationKind::Optional) {
+                if (makeOptional && !it2.second->IsOptionalOrNull()) {
                     result->emplace_back(ctx.MakeType<TItemExprType>(memberName, ctx.MakeType<TOptionalExprType>(it2.second)));
                 } else {
                     result->emplace_back(ctx.MakeType<TItemExprType>(memberName, it2.second));
@@ -604,6 +587,11 @@ TStatus AnnotateDqCnHashShuffle(const TExprNode::TPtr& input, TExprContext& ctx)
                 TStringBuilder() << "Missing key column: " << column->Content()));
             return TStatus::Error;
         }
+        if (const auto ty = structType->FindItemType(column->Content()); !ty->IsHashable()) {
+            ctx.AddError(TIssue(ctx.GetPosition(column->Pos()),
+                TStringBuilder() << "Non-hashable key column: " << column->Content()));
+            return TStatus::Error;
+        }
     }
 
     input->SetTypeAnn(outputType);
@@ -700,10 +688,10 @@ TStatus AnnotateDqReplicate(const TExprNode::TPtr& input, TExprContext& ctx) {
         if (!lambda->GetTypeAnn()) {
             return TStatus::Repeat;
         }
-        if (!EnsureFlowType(lambda->Pos(), *lambda->GetTypeAnn(), ctx)) {
+        const TTypeAnnotationNode* lambdaItemType = nullptr;
+        if (!EnsureNewSeqType<false, false>(*lambda, ctx, &lambdaItemType)) {
             return TStatus::Error;
         }
-        auto lambdaItemType = lambda->GetTypeAnn()->Cast<TFlowExprType>()->GetItemType();
         if (!EnsurePersistableType(lambda->Pos(), *lambdaItemType, ctx)) {
             return TStatus::Error;
         }
@@ -854,6 +842,21 @@ TStatus AnnotateDqPhyPrecompute(const TExprNode::TPtr& node, TExprContext& ctx) 
     return TStatus::Ok;
 }
 
+TStatus AnnotateDqPhyLength(const TExprNode::TPtr& node, TExprContext& ctx) {
+    if (!EnsureArgsCount(*node, 2, ctx)) {
+        return TStatus::Error;
+    }
+    auto* input = node->Child(TDqPhyLength::idx_Input);
+    auto* aggName = node->Child(TDqPhyLength::idx_Name);
+
+    TVector<const TItemExprType*> aggTypes;
+    if (!EnsureAtom(*aggName, ctx)) {
+        return TStatus::Error;
+    }
+    node->SetTypeAnn(MakeSequenceType(input->GetTypeAnn()->GetKind(), *ctx.MakeType<TDataExprType>(EDataSlot::Uint64), ctx));
+    return TStatus::Ok;
+}
+
 THolder<IGraphTransformer> CreateDqTypeAnnotationTransformer(TTypeAnnotationContext& typesCtx) {
     auto coreTransformer = CreateExtCallableTypeAnnotationTransformer(typesCtx);
 
@@ -947,6 +950,10 @@ THolder<IGraphTransformer> CreateDqTypeAnnotationTransformer(TTypeAnnotationCont
 
             if (TDqPhyPrecompute::Match(input.Get())) {
                 return AnnotateDqPhyPrecompute(input, ctx);
+            }
+
+            if (TDqPhyLength::Match(input.Get())) {
+                return AnnotateDqPhyLength(input, ctx);
             }
 
             return coreTransformer->Transform(input, output, ctx);

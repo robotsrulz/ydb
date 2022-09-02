@@ -11,12 +11,12 @@ find_package(OpenSSL REQUIRED)
 add_library(libs-grpc-grpc++)
 target_compile_options(libs-grpc-grpc++ PRIVATE
   -DGRPC_POSIX_FORK_ALLOW_PTHREAD_ATFORK=1
+  -Wno-everything
 )
 target_include_directories(libs-grpc-grpc++ PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
 )
 target_include_directories(libs-grpc-grpc++ PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
   ${CMAKE_BINARY_DIR}/contrib/libs/grpc
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/src/core/ext/upb-generated
@@ -30,13 +30,12 @@ target_link_libraries(libs-grpc-grpc++ PUBLIC
   grpc-third_party-address_sorting
   grpc-third_party-upb
   OpenSSL::OpenSSL
-  ycontainer-internal-raw_hash_set
-  yabseil-cpp-tstring-y_absl-hash
-  yabseil-cpp-tstring-y_absl-status
-  yabsl-status-statusor
-  yabseil-cpp-tstring-y_absl-strings
-  yabseil-cpp-tstring-y_absl-synchronization
-  yabseil-cpp-tstring-y_absl-time
+  abseil-cpp-tstring-y_absl-container
+  abseil-cpp-tstring-y_absl-hash
+  abseil-cpp-tstring-y_absl-status
+  abseil-cpp-tstring-y_absl-strings
+  abseil-cpp-tstring-y_absl-synchronization
+  abseil-cpp-tstring-y_absl-time
 )
 target_sources(libs-grpc-grpc++ PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/src/core/ext/transport/binder/client/binder_connector.cc

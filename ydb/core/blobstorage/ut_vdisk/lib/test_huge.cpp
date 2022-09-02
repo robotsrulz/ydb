@@ -60,7 +60,7 @@ public:
                          new TEvHullWriteHugeBlob(TActorId(), 0, logoBlobId, TIngress(),
                                 TRope(abcdefghkj),
                                 false, NKikimrBlobStorage::EPutHandleClass::AsyncBlob,
-                                std::make_unique<TEvBlobStorage::TEvVPutResult>()));
+                                std::make_unique<TEvBlobStorage::TEvVPutResult>(), nullptr));
                 State = 1;
                 return false;
             }
@@ -92,7 +92,7 @@ public:
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 struct THugeModuleContext {
     TConfiguration *Conf;
-    TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters;
     TIntrusivePtr<TLsnMngr> LsnMngr;
     TIntrusivePtr<NKikimr::TVDiskConfig> Config;
     TVDiskContextPtr VCtx;
@@ -104,7 +104,7 @@ struct THugeModuleContext {
 
     THugeModuleContext(TConfiguration *conf)
         : Conf(conf)
-        , Counters(new NMonitoring::TDynamicCounters)
+        , Counters(new ::NMonitoring::TDynamicCounters)
     {}
 };
 
@@ -125,7 +125,7 @@ class THugeModuleRecoveryActor : public TActorBootstrapped<THugeModuleRecoveryAc
         auto &vDiskInstance = HmCtx->Conf->VDisks->Get(0);
         HmCtx->Config = vDiskInstance.Cfg;
         HmCtx->VCtx.Reset(new TVDiskContext(ctx.SelfID, HmCtx->Conf->GroupInfo->PickTopology(), HmCtx->Counters,
-                vDiskInstance.VDiskID, ctx.ExecutorThread.ActorSystem, TPDiskCategory::DEVICE_TYPE_UNKNOWN));
+                vDiskInstance.VDiskID, ctx.ExecutorThread.ActorSystem, NPDisk::DEVICE_TYPE_UNKNOWN));
 
         TVDiskID selfVDiskID = HmCtx->Conf->GroupInfo->GetVDiskId(HmCtx->VCtx->ShortSelfVDisk);
         ctx.Send(HmCtx->Config->BaseInfo.PDiskActorID,

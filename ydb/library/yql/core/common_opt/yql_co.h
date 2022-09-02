@@ -72,13 +72,14 @@ struct TOptimizeContext {
 
 using TCallableOptimizerExt = std::function<TExprNode::TPtr (const TExprNode::TPtr&, TExprContext&, TOptimizeContext&)>;
 using TCallableOptimizerMap = std::unordered_map<std::string_view, TCallableOptimizerExt>;
-using TFinalizingOptimizerExt = std::function<void (const TExprNode::TPtr&, TNodeOnNodeOwnedMap&, TExprContext&, TOptimizeContext&)>;
+using TFinalizingOptimizerExt = std::function<bool (const TExprNode::TPtr&, TNodeOnNodeOwnedMap&, TExprContext&, TOptimizeContext&)>;
 using TFinalizingOptimizerMap = std::unordered_map<std::string_view, TFinalizingOptimizerExt>;
 
 struct TCoCallableRules {
     enum {
         SIMPLE_STEP_1,
         SIMPLE_STEP_2,
+        SIMPLE_STEP_3,
         SIMPLE_STEPS
     };
 
@@ -104,6 +105,7 @@ struct TCoCallableRules {
 
 void RegisterCoSimpleCallables1(TCallableOptimizerMap& map);
 void RegisterCoSimpleCallables2(TCallableOptimizerMap& map);
+void RegisterCoSimpleCallables3(TCallableOptimizerMap& map);
 void RegisterCoFlowCallables1(TCallableOptimizerMap& map);
 void RegisterCoFlowCallables2(TCallableOptimizerMap& map);
 void RegisterCoFinalizers(TFinalizingOptimizerMap& map);

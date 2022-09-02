@@ -57,6 +57,7 @@ bool UpdateStructMembers(TExprContext& ctx, const TExprNode::TPtr& node, const T
 
 TExprNode::TPtr MakeSingleGroupRow(const TExprNode& aggregateNode, TExprNode::TPtr reduced, TExprContext& ctx);
 TExprNode::TPtr ExpandRemoveMember(const TExprNode::TPtr& node, TExprContext& ctx);
+TExprNode::TPtr ExpandRemoveMembers(const TExprNode::TPtr& node, TExprContext& ctx);
 TExprNode::TPtr ExpandRemovePrefixMembers(const TExprNode::TPtr& node, TExprContext& ctx);
 TExprNode::TPtr ExpandFlattenMembers(const TExprNode::TPtr& node, TExprContext& ctx);
 TExprNode::TPtr ExpandFlattenStructs(const TExprNode::TPtr& node, TExprContext& ctx);
@@ -99,5 +100,14 @@ TExprNode::TPtr OptimizeExists(const TExprNode::TPtr& node, TExprContext& ctx);
 bool WarnUnroderedSubquery(const TExprNode& unourderedSubquery, TExprContext& ctx);
 IGraphTransformer::TStatus LocalUnorderedOptimize(TExprNode::TPtr input, TExprNode::TPtr& output,
     const std::function<bool(const TExprNode*)>& stopTraverse, TExprContext& ctx, TTypeAnnotationContext* typeCtx);
+
+std::pair<TExprNode::TPtr, TExprNode::TPtr> ReplaceDependsOn(TExprNode::TPtr lambda, TExprContext& ctx, TTypeAnnotationContext* typeCtx);
+
+TStringBuf GetEmptyCollectionName(ETypeAnnotationKind kind);
+inline TStringBuf GetEmptyCollectionName(const TTypeAnnotationNode* type) {
+    return GetEmptyCollectionName(type->GetKind());
+}
+
+const TItemExprType* GetLightColumn(const TStructExprType& type);
 
 }

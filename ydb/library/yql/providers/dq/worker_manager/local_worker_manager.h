@@ -1,8 +1,7 @@
 #pragma once
 
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_sources.h>
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_output.h>
-
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io.h>
+#include <ydb/library/yql/minikql/mkql_function_registry.h>
 #include <ydb/library/yql/providers/dq/worker_manager/interface/events.h>
 #include <ydb/library/yql/providers/dq/worker_manager/interface/counters.h>
 
@@ -10,6 +9,8 @@
 #include <ydb/library/yql/providers/dq/task_runner/task_runner_invoker.h>
 
 #include <ydb/library/yql/providers/dq/task_runner_actor/task_runner_actor.h>
+
+#include <library/cpp/actors/core/actorid.h>
 
 namespace NYql {
 
@@ -21,9 +22,10 @@ namespace NYql::NDqs {
 
     struct TLocalWorkerManagerOptions {
         TWorkerManagerCounters Counters;
+        ::NMonitoring::TDynamicCounterPtr DqTaskCounters;
         NTaskRunnerProxy::IProxyFactory::TPtr Factory;
-        NDq::IDqSourceActorFactory::TPtr SourceActorFactory;
-        NDq::IDqSinkFactory::TPtr SinkFactory;
+        NDq::IDqAsyncIoFactory::TPtr AsyncIoFactory;
+        const NKikimr::NMiniKQL::IFunctionRegistry* FunctionRegistry = nullptr;
         TWorkerRuntimeData* RuntimeData = nullptr;
         TTaskRunnerInvokerFactory::TPtr TaskRunnerInvokerFactory;
         NDq::NTaskRunnerActor::ITaskRunnerActorFactory::TPtr TaskRunnerActorFactory;
@@ -34,6 +36,7 @@ namespace NYql::NDqs {
         ui64 MkqlMinAllocSize = 30_MB;
 
         bool CanUseComputeActor = true;
+        NActors::TActorId QuoterServiceActorId;
     };
 
     NActors::IActor* CreateLocalWorkerManager(const TLocalWorkerManagerOptions& options);

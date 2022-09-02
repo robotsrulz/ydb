@@ -19,6 +19,7 @@ TRunActorParams::TRunActorParams(
     const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
     const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
     const ::NYq::NConfig::TPingerConfig& pingerConfig,
+    const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
     const TString& sql,
     const TScope& scope,
     const TString& authToken,
@@ -41,13 +42,16 @@ TRunActorParams::TRunActorParams(
     TVector<YandexQuery::ResultSetMeta> resultSetMetas,
     TVector<TString> dqGraphs,
     int32_t dqGraphIndex,
-    TVector<Yq::Private::TopicConsumer> createdTopicConsumers,
+    TVector<Fq::Private::TopicConsumer> createdTopicConsumers,
     bool automatic,
     const TString& queryName,
     const TInstant& deadline,
-    const NMonitoring::TDynamicCounterPtr& clientCounters,
+    const ::NMonitoring::TDynamicCounterPtr& clientCounters,
     TInstant createdAt,
-    const TString& tenantName
+    const TString& tenantName,
+    uint64_t resultBytesLimit,
+    TDuration executionTtl,
+    TInstant requestStartedAt
     )
     : YqSharedResources(yqSharedResources)
     , CredentialsProviderFactory(credentialsProviderFactory)
@@ -63,6 +67,7 @@ TRunActorParams::TRunActorParams(
     , PrivateApiConfig(privateApiConfig)
     , GatewaysConfig(gatewaysConfig)
     , PingerConfig(pingerConfig)
+    , RateLimiterConfig(rateLimiterConfig)
     , Sql(sql)
     , Scope(scope)
     , AuthToken(authToken)
@@ -92,6 +97,9 @@ TRunActorParams::TRunActorParams(
     , ClientCounters(clientCounters)
     , CreatedAt(createdAt)
     , TenantName(tenantName)
+    , ResultBytesLimit(resultBytesLimit)
+    , ExecutionTtl(executionTtl)
+    , RequestStartedAt(requestStartedAt)
     {
     }
 

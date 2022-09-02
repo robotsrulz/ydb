@@ -16,11 +16,14 @@ namespace NKikimr {
         TVDiskID VDiskId;
         NKikimrBlobStorage::EVDiskQueueId QueueId;
         bool IsConnected;
+        bool ExtraBlockChecksSupport;
 
-        TEvProxyQueueState(const TVDiskID &vDiskId, NKikimrBlobStorage::EVDiskQueueId queueId, bool isConnected)
+        TEvProxyQueueState(const TVDiskID &vDiskId, NKikimrBlobStorage::EVDiskQueueId queueId, bool isConnected,
+                bool extraBlockChecksSupport)
             : VDiskId(vDiskId)
             , QueueId(queueId)
             , IsConnected(isConnected)
+            , ExtraBlockChecksSupport(extraBlockChecksSupport)
         {}
 
         TString ToString() const {
@@ -28,6 +31,7 @@ namespace NKikimr {
             str << "{VDiskId# " << VDiskId.ToString();
             str << " QueueId# " << static_cast<ui32>(QueueId);
             str << " IsConnected# " << (IsConnected ? "true" : "false");
+            str << " ExtraBlockChecksSupport# " << (ExtraBlockChecksSupport ? "true" : "false");
             str << "}";
             return str.Str();
         }
@@ -38,7 +42,7 @@ namespace NKikimr {
     {};
 
     IActor* CreateVDiskBackpressureClient(const TIntrusivePtr<TBlobStorageGroupInfo>& info, TVDiskIdShort vdiskId,
-        NKikimrBlobStorage::EVDiskQueueId queueId,const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters,
+        NKikimrBlobStorage::EVDiskQueueId queueId,const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
         const TBSProxyContextPtr& bspctx, const NBackpressure::TQueueClientId& clientId, const TString& queueName,
         ui32 interconnectChannel, bool local, TDuration watchdogTimeout,
         TIntrusivePtr<NBackpressure::TFlowRecord> &flowRecord, NMonitoring::TCountableBase::EVisibility visibility);

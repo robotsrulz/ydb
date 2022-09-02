@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(global)
 
 add_library(library-cpp-logger)
 target_link_libraries(library-cpp-logger PUBLIC
@@ -13,6 +14,7 @@ target_link_libraries(library-cpp-logger PUBLIC
   yutil
   tools-enum_parser-enum_serialization_runtime
   library-cpp-json
+  cpp-deprecated-atomic
 )
 target_sources(library-cpp-logger PRIVATE
   ${CMAKE_SOURCE_DIR}/library/cpp/logger/backend.cpp
@@ -43,6 +45,7 @@ target_link_libraries(library-cpp-logger.global PUBLIC
   yutil
   tools-enum_parser-enum_serialization_runtime
   library-cpp-json
+  cpp-deprecated-atomic
 )
 target_sources(library-cpp-logger.global PRIVATE
   ${CMAKE_SOURCE_DIR}/library/cpp/logger/composite_creator.cpp

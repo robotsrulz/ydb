@@ -6,14 +6,18 @@
 
 namespace NKikimr::NOlap {
 
-bool TInsertTable::Insert(IDbWrapper& dbTable, const TInsertedData& data) {
+bool TInsertTable::Insert(IDbWrapper& dbTable, TInsertedData&& data) {
     TWriteId writeId{data.WriteTxId};
     if (Inserted.count(writeId)) {
         return false;
     }
 
     dbTable.Insert(data);
-    Inserted[writeId] = data;
+    ui32 dataSize = data.BlobSize();
+    if (Inserted.emplace(writeId, std::move(data)).second) {
+        StatsPrepared.Rows = Inserted.size();
+        StatsPrepared.Bytes += dataSize;
+    }
     return true;
 }
 
@@ -39,8 +43,15 @@ TInsertTable::TCounters TInsertTable::Commit(IDbWrapper& dbTable, ui64 planStep,
         data->Commit(planStep, txId);
         dbTable.Commit(*data);
 
-        CommittedByPathId[data->PathId].emplace(std::move(*data));
-        Inserted.erase(writeId);
+        ui32 dataSize = data->BlobSize();
+        if (CommittedByPathId[data->PathId].emplace(std::move(*data)).second) {
+            ++StatsCommitted.Rows;
+            StatsCommitted.Bytes += dataSize;
+        }
+        if (Inserted.erase(writeId)) {
+            StatsPrepared.Rows = Inserted.size();
+            StatsPrepared.Bytes -= dataSize;
+        }
     }
 
     return counters;
@@ -51,18 +62,22 @@ void TInsertTable::Abort(IDbWrapper& dbTable, ui64 metaShard, const THashSet<TWr
     Y_UNUSED(metaShard);
 
     for (auto writeId : writeIds) {
-        auto* data = Inserted.FindPtr(writeId);
-        Y_VERIFY(data, "Abort writeId %" PRIu64 " not found", (ui64)writeId);
+        // There could be inconsistency with txs and writes in case of bugs. So we could find no record for writeId.
+        if (auto* data = Inserted.FindPtr(writeId)) {
+            dbTable.EraseInserted(*data);
+            dbTable.Abort(*data);
 
-        dbTable.EraseInserted(*data);
-        dbTable.Abort(*data);
-
-        Aborted[writeId] = std::move(Inserted[writeId]);
-        Inserted.erase(writeId);
+            ui32 dataSize = data->BlobSize();
+            Aborted.emplace(writeId, std::move(*data));
+            if (Inserted.erase(writeId)) {
+                StatsPrepared.Rows = Inserted.size();
+                StatsPrepared.Bytes -= dataSize;
+            }
+        }
     }
 }
 
-THashSet<TWriteId> TInsertTable::AbortOld(IDbWrapper& dbTable, const TInstant& now) {
+THashSet<TWriteId> TInsertTable::OldWritesToAbort(const TInstant& now) const {
     // TODO: This protection does not save us from real flooder activity.
     // This cleanup is for seldom aborts caused by rare reasons. So there's a temporary simple O(N) here
     // keeping in mind we need a smarter cleanup logic here not a better algo.
@@ -74,13 +89,9 @@ THashSet<TWriteId> TInsertTable::AbortOld(IDbWrapper& dbTable, const TInstant& n
     TInstant timeBorder = now - WaitCommitDelay;
     THashSet<TWriteId> toAbort;
     for (auto& [writeId, data] : Inserted) {
-        if (data.DirtyTime < timeBorder) {
+        if (data.DirtyTime && data.DirtyTime < timeBorder) {
             toAbort.insert(writeId);
         }
-    }
-
-    if (!toAbort.empty()) {
-        Abort(dbTable, 0, toAbort);
     }
     return toAbort;
 }
@@ -104,7 +115,10 @@ THashSet<TWriteId> TInsertTable::DropPath(IDbWrapper& dbTable, ui64 pathId) {
     TSet<TInsertedData> committed = std::move(CommittedByPathId[pathId]);
     CommittedByPathId.erase(pathId);
 
+    StatsCommitted.Rows -= committed.size();
     for (auto& data : committed) {
+        StatsCommitted.Bytes -= data.BlobSize();
+
         dbTable.EraseCommitted(data);
 
         TInsertedData copy = data;
@@ -118,23 +132,16 @@ THashSet<TWriteId> TInsertTable::DropPath(IDbWrapper& dbTable, ui64 pathId) {
     return toAbort;
 }
 
-void TInsertTable::EraseInserted(IDbWrapper& dbTable, const TInsertedData& data) {
-    TWriteId writeId{data.WriteTxId};
-    if (!Inserted.count(writeId)) {
-        return;
-    }
-
-    dbTable.EraseInserted(data);
-    Inserted.erase(writeId);
-}
-
 void TInsertTable::EraseCommitted(IDbWrapper& dbTable, const TInsertedData& data) {
     if (!CommittedByPathId.count(data.PathId)) {
         return;
     }
 
     dbTable.EraseCommitted(data);
-    CommittedByPathId[data.PathId].erase(data);
+    if (CommittedByPathId[data.PathId].erase(data)) {
+        --StatsCommitted.Rows;
+        StatsCommitted.Bytes -= data.BlobSize();
+    }
 }
 
 void TInsertTable::EraseAborted(IDbWrapper& dbTable, const TInsertedData& data) {
@@ -152,22 +159,42 @@ bool TInsertTable::Load(IDbWrapper& dbTable, const TInstant& loadTime) {
     CommittedByPathId.clear();
     Aborted.clear();
 
-    return dbTable.Load(Inserted, CommittedByPathId, Aborted, loadTime);
+    if (!dbTable.Load(Inserted, CommittedByPathId, Aborted, loadTime)) {
+        return false;
+    }
+
+    // update stats
+
+    StatsPrepared = {};
+    StatsCommitted = {};
+
+    StatsPrepared.Rows = Inserted.size();
+    for (auto& [_, data] : Inserted) {
+        StatsPrepared.Bytes += data.BlobSize();
+    }
+
+    for (auto& [_, set] : CommittedByPathId) {
+        StatsCommitted.Rows += set.size();
+        for (auto& data : set) {
+            StatsCommitted.Bytes += data.BlobSize();
+        }
+    }
+
+    return true;
 }
 
-/// @note It must be stable
-TVector<TUnifiedBlobId> TInsertTable::Read(ui64 pathId, ui64 plan, ui64 txId) const {
+std::vector<TCommittedBlob> TInsertTable::Read(ui64 pathId, ui64 plan, ui64 txId) const {
     const auto* committed = CommittedByPathId.FindPtr(pathId);
-
-    if (!committed)
+    if (!committed) {
         return {};
+    }
 
-    TVector<TUnifiedBlobId> ret;
-    ret.reserve(committed->size() / 2);
+    std::vector<TCommittedBlob> ret;
+    ret.reserve(committed->size());
 
     for (auto& data : *committed) {
         if (snapLessOrEqual(data.ShardOrPlan, data.WriteTxId, plan, txId)) {
-            ret.push_back(data.BlobId);
+            ret.emplace_back(TCommittedBlob{data.BlobId, data.ShardOrPlan, data.WriteTxId});
         }
     }
 
@@ -179,22 +206,6 @@ void TInsertTable::SetOverloaded(ui64 pathId, bool overload) {
         PathsOverloaded.insert(pathId);
     } else {
         PathsOverloaded.erase(pathId);
-    }
-}
-
-void TInsertTable::GetCounters(TCounters& prepared, TCounters& committed) const {
-    prepared = TCounters();
-    prepared.Rows = Inserted.size();
-    for (auto& [_, data] : Inserted) {
-        prepared.Bytes += data.BlobSize();
-    }
-
-    committed = TCounters();
-    for (auto& [_, set] : CommittedByPathId) {
-        committed.Rows += set.size();
-        for (auto& data : set) {
-            committed.Bytes += data.BlobSize();
-        }
     }
 }
 

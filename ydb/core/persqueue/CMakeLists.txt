@@ -6,6 +6,13 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(codecs)
+add_subdirectory(config)
+add_subdirectory(events)
+add_subdirectory(partition_key_range)
+add_subdirectory(ut)
+add_subdirectory(ut_slow)
+add_subdirectory(writer)
 
 add_library(ydb-core-persqueue)
 target_link_libraries(ydb-core-persqueue PUBLIC
@@ -32,21 +39,22 @@ target_link_libraries(ydb-core-persqueue PUBLIC
   cpp-client-ydb_persqueue_core
 )
 target_sources(ydb-core-persqueue PRIVATE
-  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/cluster_tracker.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/blob.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/cluster_tracker.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/event_helpers.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/header.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/metering_sink.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/mirrorer.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/ownerinfo.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/partition.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/percentile_counter.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/pq.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/pq_database.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/pq_impl.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/sourceid.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/mirrorer.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/ownerinfo.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/partition.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/pq_l2_cache.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/read_balancer.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/read_speed_limiter.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/sourceid.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/subscriber.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/type_codecs_defs.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/persqueue/user_info.cpp

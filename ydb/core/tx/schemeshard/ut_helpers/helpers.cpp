@@ -21,6 +21,19 @@
 namespace NSchemeShardUT_Private {
     using namespace NKikimr;
 
+    void SetConfig(
+    TTestActorRuntime &runtime,
+    ui64 schemeShard,
+    THolder<NConsole::TEvConsole::TEvConfigNotificationRequest> request)
+    {
+        auto sender = runtime.AllocateEdgeActor();
+
+        runtime.SendToPipe(schemeShard, sender, request.Release(), 0, GetPipeConfigWithRetries());
+
+        TAutoPtr<IEventHandle> handle;
+        runtime.GrabEdgeEventRethrow<NConsole::TEvConsole::TEvConfigNotificationResponse>(handle);
+    }
+
     template <typename TEvResponse, typename TEvRequest, typename TStatus>
     static ui32 ReliableProposeImpl(
         NActors::TTestActorRuntime& runtime, const TActorId& proposer,
@@ -294,6 +307,33 @@ namespace NSchemeShardUT_Private {
         return record.DebugString();
     }
 
+    THolder<NSchemeCache::TSchemeCacheNavigate> Navigate(TTestActorRuntime& runtime, const TString& path,
+            NSchemeCache::TSchemeCacheNavigate::EOp op)
+    {
+        using TNavigate = NSchemeCache::TSchemeCacheNavigate;
+        using TEvRequest = TEvTxProxySchemeCache::TEvNavigateKeySet;
+        using TEvResponse = TEvTxProxySchemeCache::TEvNavigateKeySetResult;
+
+        const auto sender = runtime.AllocateEdgeActor();
+        auto request = MakeHolder<TNavigate>();
+        auto& entry = request->ResultSet.emplace_back();
+        entry.Path = SplitPath(path);
+        entry.RequestType = TNavigate::TEntry::ERequestType::ByPath;
+        entry.Operation = op;
+        entry.ShowPrivatePath = true;
+        runtime.Send(new IEventHandle(MakeSchemeCacheID(), sender, new TEvRequest(request.Release())));
+
+        auto ev = runtime.GrabEdgeEventRethrow<TEvResponse>(sender);
+        UNIT_ASSERT(ev);
+        UNIT_ASSERT(ev->Get());
+
+        auto* response = ev->Get()->Request.Release();
+        UNIT_ASSERT(response);
+        UNIT_ASSERT_VALUES_EQUAL(response->ResultSet.size(), 1);
+
+        return THolder(response);
+    }
+
     TEvSchemeShard::TEvModifySchemeTransaction* CopyTableRequest(ui64 txId, const TString& dstPath, const TString& dstName, const TString& srcFullName, TApplyIf applyIf) {
         auto evTx = new TEvSchemeShard::TEvModifySchemeTransaction(txId, TTestTxConfig::SchemeShard);
         auto transaction = evTx->Record.AddTransaction();
@@ -364,6 +404,34 @@ namespace NSchemeShardUT_Private {
         TestModificationResults(runtime, txId, expectedResults);
     }
 
+    TEvSchemeShard::TEvModifySchemeTransaction* MoveIndexRequest(ui64 txId, const TString& tablePath, const TString& srcPath, const TString& dstPath, bool allowOverwrite, ui64 schemeShard, const TApplyIf& applyIf) {
+        THolder<TEvSchemeShard::TEvModifySchemeTransaction> evTx = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>(txId, schemeShard);
+        auto transaction = evTx->Record.AddTransaction();
+        transaction->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpMoveIndex);
+        SetApplyIf(*transaction, applyIf);
+
+        auto descr = transaction->MutableMoveIndex();
+        descr->SetTablePath(tablePath);
+        descr->SetSrcPath(srcPath);
+        descr->SetDstPath(dstPath);
+        descr->SetAllowOverwrite(allowOverwrite);
+
+        return evTx.Release();
+    }
+
+    void AsyncMoveIndex(TTestActorRuntime& runtime, ui64 txId, const TString& tablePath, const TString& srcPath, const TString& dstPath, bool allowOverwrite, ui64 schemeShard) {
+        TActorId sender = runtime.AllocateEdgeActor();
+        ForwardToTablet(runtime, schemeShard, sender, MoveIndexRequest(txId, tablePath, srcPath, dstPath, allowOverwrite, schemeShard));
+    }
+
+    void TestMoveIndex(TTestActorRuntime& runtime, ui64 txId, const TString& tablePath, const TString& src, const TString& dst, bool allowOverwrite, const TVector<TEvSchemeShard::EStatus>& expectedResults) {
+        TestMoveIndex(runtime, TTestTxConfig::SchemeShard, txId, tablePath, src, dst, allowOverwrite, expectedResults);
+    }
+
+    void TestMoveIndex(TTestActorRuntime& runtime, ui64 schemeShard, ui64 txId, const TString& tablePath, const TString& src, const TString& dst, bool allowOverwrite, const TVector<TEvSchemeShard::EStatus>& expectedResults) {
+        AsyncMoveIndex(runtime, txId, tablePath, src, dst, allowOverwrite, schemeShard);
+        TestModificationResults(runtime, txId, expectedResults);
+    }
 
     TEvSchemeShard::TEvModifySchemeTransaction* LockRequest(ui64 txId, const TString &parentPath, const TString& name) {
         THolder<TEvSchemeShard::TEvModifySchemeTransaction> evTx = MakeHolder<TEvSchemeShard::TEvModifySchemeTransaction>(txId, TTestTxConfig::SchemeShard);
@@ -482,7 +550,7 @@ namespace NSchemeShardUT_Private {
 
     // Backup
     template <>
-    auto CreateTransaction(const TString& parentPath, const TString& tableName, const TApplyIf& applyIf,
+    auto CreateTransaction(const TString& parentPath, const TString& scheme, const TApplyIf& applyIf,
             NKikimrSchemeOp::EOperationType type, TModifySchemeFunc<NKikimrSchemeOp::TBackupTask> func)
     {
         NKikimrSchemeOp::TModifyScheme tx;
@@ -492,17 +560,28 @@ namespace NSchemeShardUT_Private {
         SetApplyIf(tx, applyIf);
 
         auto task = std::apply(func, std::tie(tx));
+        const bool ok = google::protobuf::TextFormat::ParseFromString(scheme, task);
 
-        task->SetTableName(tableName);
-        auto& settings = *task->MutableYTSettings();
+        if (!ok || task->HasYTSettings()) {
+            const auto ytProxy = GetEnv("YT_PROXY");
+            UNIT_ASSERT(ytProxy);
 
-        TString ytHost;
-        TMaybe<ui16> ytPort;
-        Split(GetEnv("YT_PROXY"), ':', ytHost, ytPort);
+            if (!task->HasTableName()) {
+                task->SetTableName(scheme);
+            }
 
-        settings.SetHost(ytHost);
-        settings.SetPort(ytPort.GetOrElse(80));
-        settings.SetTablePattern("<append=true>//tmp/table");
+            TString ytHost;
+            TMaybe<ui16> ytPort;
+            Split(ytProxy, ':', ytHost, ytPort);
+
+            auto& settings = *task->MutableYTSettings();
+            settings.SetHost(ytHost);
+            settings.SetPort(ytPort.GetOrElse(80));
+
+            if (!settings.HasTablePattern()) {
+                settings.SetTablePattern("<append=true>//tmp/table");
+            }
+        }
 
         return tx;
     }
@@ -722,7 +801,8 @@ namespace NSchemeShardUT_Private {
     GENERIC_HELPERS(DropTableIndex, NKikimrSchemeOp::EOperationType::ESchemeOpDropIndex, &NKikimrSchemeOp::TModifyScheme::MutableDropIndex)
 
     // backup & restore
-    GENERIC_HELPERS(BackupTable, NKikimrSchemeOp::EOperationType::ESchemeOpBackup, &NKikimrSchemeOp::TModifyScheme::MutableBackup)
+    GENERIC_HELPERS(Backup, NKikimrSchemeOp::EOperationType::ESchemeOpBackup, &NKikimrSchemeOp::TModifyScheme::MutableBackup)
+    GENERIC_HELPERS(BackupToYt, NKikimrSchemeOp::EOperationType::ESchemeOpBackup, &NKikimrSchemeOp::TModifyScheme::MutableBackup)
     GENERIC_HELPERS(Restore, NKikimrSchemeOp::EOperationType::ESchemeOpRestore, &NKikimrSchemeOp::TModifyScheme::MutableRestore)
 
     // cdc stream
@@ -737,10 +817,10 @@ namespace NSchemeShardUT_Private {
     DROP_BY_PATH_ID_HELPERS(DropOlapStore, NKikimrSchemeOp::EOperationType::ESchemeOpDropColumnStore)
 
     // olap table
-    GENERIC_HELPERS(CreateOlapTable, NKikimrSchemeOp::EOperationType::ESchemeOpCreateColumnTable, &NKikimrSchemeOp::TModifyScheme::MutableCreateColumnTable)
-    GENERIC_HELPERS(AlterOlapTable, NKikimrSchemeOp::EOperationType::ESchemeOpAlterColumnTable, &NKikimrSchemeOp::TModifyScheme::MutableAlterColumnTable)
-    GENERIC_HELPERS(DropOlapTable, NKikimrSchemeOp::EOperationType::ESchemeOpDropColumnTable, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
-    DROP_BY_PATH_ID_HELPERS(DropOlapTable, NKikimrSchemeOp::EOperationType::ESchemeOpDropColumnTable)
+    GENERIC_HELPERS(CreateColumnTable, NKikimrSchemeOp::EOperationType::ESchemeOpCreateColumnTable, &NKikimrSchemeOp::TModifyScheme::MutableCreateColumnTable)
+    GENERIC_HELPERS(AlterColumnTable, NKikimrSchemeOp::EOperationType::ESchemeOpAlterColumnTable, &NKikimrSchemeOp::TModifyScheme::MutableAlterColumnTable)
+    GENERIC_HELPERS(DropColumnTable, NKikimrSchemeOp::EOperationType::ESchemeOpDropColumnTable, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+    DROP_BY_PATH_ID_HELPERS(DropColumnTable, NKikimrSchemeOp::EOperationType::ESchemeOpDropColumnTable)
 
     // sequence
     GENERIC_HELPERS(CreateSequence, NKikimrSchemeOp::EOperationType::ESchemeOpCreateSequence, &NKikimrSchemeOp::TModifyScheme::MutableSequence)
@@ -1794,7 +1874,7 @@ namespace NSchemeShardUT_Private {
         for (auto& dbKey : dbKeys) {
             ResolveKey(*dbKey);
             UNIT_ASSERT(dbKey->Status == TKeyDesc::EStatus::Ok);
-            for (auto& partition : dbKey->Partitions) {
+            for (auto& partition : dbKey->GetPartitions()) {
                 resolvedShards.insert(partition.ShardId);
             }
         }
@@ -1939,7 +2019,8 @@ namespace NSchemeShardUT_Private {
                         keyIdx = ki;
                     }
                 }
-                table.Columns.insert(std::make_pair(c.GetName(), TColumn{c.GetId(), keyIdx, c.GetTypeId(), 0}));
+                table.Columns.insert(std::make_pair(c.GetName(), TColumn{c.GetId(), keyIdx, c.GetTypeId(), 0,
+                    EColumnTypeConstraint::Nullable}));
             }
             dbSchemeResolver.AddTable(table);
         };
@@ -1982,16 +2063,18 @@ namespace NSchemeShardUT_Private {
         TestLs(Runtime, Table, true, fnFillInfo);
     }
 
-    void TFakeDataReq::TTablePartitioningInfo::ResolveKey(const TTableRange &range, TVector<TKeyDesc::TPartitionInfo> &partitions) const {
+    std::shared_ptr<const TVector<TKeyDesc::TPartitionInfo>> TFakeDataReq::TTablePartitioningInfo::ResolveKey(
+        const TTableRange& range) const
+    {
         Y_VERIFY(!Partitioning.empty());
 
-        partitions.clear();
+        auto partitions = std::make_shared<TVector<TKeyDesc::TPartitionInfo>>();
 
         // Temporary fix: for an empty range we need to return some datashard so that it can handle readset logic (
         // send empty result to other tx participants etc.)
         if (range.IsEmptyRange(KeyColumnTypes)) {
-            partitions.push_back(TKeyDesc::TPartitionInfo(Partitioning.begin()->Datashard));
-            return;
+            partitions->push_back(TKeyDesc::TPartitionInfo(Partitioning.begin()->Datashard));
+            return partitions;
         }
 
         TVector<TBorder>::const_iterator low = LowerBound(Partitioning.begin(), Partitioning.end(), true,
@@ -2002,15 +2085,17 @@ namespace NSchemeShardUT_Private {
 
         Y_VERIFY(low != Partitioning.end(), "last key must be (inf)");
         do {
-            partitions.push_back(TKeyDesc::TPartitionInfo(low->Datashard));
+            partitions->push_back(TKeyDesc::TPartitionInfo(low->Datashard));
 
             if (range.Point)
-                return;
+                return partitions;
 
             int prevComp = CompareBorders<true, true>(low->KeyTuple.GetCells(), range.To, low->Point || low->Inclusive, range.InclusiveTo, KeyColumnTypes);
             if (prevComp >= 0)
-                return;
+                return partitions;
         } while (++low != Partitioning.end());
+
+        return partitions;
     }
 
     TEvSchemeShard::TEvModifySchemeTransaction* CombineSchemeTransactions(const TVector<TEvSchemeShard::TEvModifySchemeTransaction*>& transactions) {

@@ -93,13 +93,16 @@ struct TSchemeShard::TTxDeleteTabletReply : public TSchemeShard::TRwTxBase {
                 Self->TabletCounters->Simple()[COUNTER_SYS_VIEW_PROCESSOR_COUNT].Sub(1);
                 break;
             case ETabletType::ColumnShard:
-                Self->TabletCounters->Simple()[COUNTER_OLAP_COLUMN_SHARDS].Sub(-1);
+                Self->TabletCounters->Simple()[COUNTER_COLUMN_SHARDS].Sub(-1);
                 break;
             case ETabletType::SequenceShard:
                 Self->TabletCounters->Simple()[COUNTER_SEQUENCESHARD_COUNT].Sub(1);
                 break;
             case ETabletType::ReplicationController:
                 Self->TabletCounters->Simple()[COUNTER_REPLICATION_CONTROLLER_COUNT].Sub(1);
+                break;
+            case ETabletType::BlobDepot:
+                Self->TabletCounters->Simple()[COUNTER_BLOB_DEPOT_COUNT].Sub(1);
                 break;
             default:
                 Y_FAIL_S("Unknown TabletType"

@@ -10,6 +10,7 @@
 #include <ydb/core/persqueue/partition.h>
 #include <ydb/core/persqueue/write_meta.h>
 
+#include <ydb/public/api/protos/ydb_topic.pb.h>
 #include <ydb/services/lib/actors/pq_schema_actor.h>
 #include <ydb/services/lib/sharding/sharding.h>
 #include <ydb/services/persqueue_v1/actors/persqueue_utils.h>
@@ -26,6 +27,8 @@ using grpc::Status;
 
 namespace NKikimr::NDataStreams::V1 {
     const TString YDS_SERVICE_TYPE = "data-streams";
+    const i32 DEFAULT_STREAM_DAY_RETENTION = TDuration::Days(1).Hours();
+    const i32 DEFAULT_STREAM_WEEK_RETENTION = TDuration::Days(7).Hours();
 
     using namespace NGRpcService;
     using namespace NGRpcProxy::V1;
@@ -43,40 +46,10 @@ namespace NKikimr::NDataStreams::V1 {
             return speedInKbPerSec == 0 ? 1_MB : speedInKbPerSec * 1_KB;
         }
 
-        TDuration RetentionPeriod(ui32 retentionPeriodInHours) {
-            return retentionPeriodInHours == 0 ? TDuration::Hours(24) : TDuration::Hours(retentionPeriodInHours);
-        }
-
-        template<class TRequest>
-        bool ValidateRetentionPeriod(const TRequest& req, const NKikimrSchemeOp::TPersQueueGroupDescription& groupConfig,
-                                     TMaybe<bool> increase, TString& errorText)
-        {
-            if (req.retention_period_hours() > 24) {
-                errorText = TStringBuilder() << "Retention period is greater than 24 hours: "
-                                             << req.retention_period_hours();
-                return false;
-            }
-
-            if (increase.Defined()) {
-                auto currentLifetime = TDuration::Seconds(groupConfig.GetPQTabletConfig().GetPartitionConfig().GetLifetimeSeconds());
-                auto newLifetime = TDuration::Hours(req.retention_period_hours());
-                if (*increase) {
-                    if (newLifetime <= currentLifetime) {
-                        errorText = TStringBuilder() << "Retention period is not greater than provided: "
-                                                     << currentLifetime.Hours() << " <= " << newLifetime.Hours();
-                        return false;
-                    }
-                } else {
-                    if (newLifetime >= currentLifetime) {
-                        errorText = TStringBuilder() << "Retention period is not less than provided: "
-                                                     << currentLifetime.Hours() << " <= " << newLifetime.Hours();
-                        return false;
-                    }
-                }
-            }
-
-            return true;
-        }
+        template <typename T>
+        static constexpr bool has_storage_megabytes(...) { return false; }
+        template <typename T>
+        static constexpr bool has_storage_megabytes(bool, decltype((std::declval<T>().retention_storage_megabytes()))* = 0) { return true; }
 
         template<class TRequest>
         bool ValidateShardsCount(const TRequest& req, const NKikimrSchemeOp::TPersQueueGroupDescription& groupConfig, TString& errorText) {
@@ -88,25 +61,6 @@ namespace NKikimr::NDataStreams::V1 {
             }
             return true;
         }
-
-        template<class TRequest>
-        bool ValidateWriteSpeedLimit(const TRequest& req, TString& errorText, const TActorContext& ctx) {
-            THashSet<ui32> validLimits {0};
-            if (AppData(ctx)->PQConfig.ValidWriteSpeedLimitsKbPerSecSize() == 0) {
-                validLimits.insert(128);
-                validLimits.insert(1_KB);
-            } else {
-                const auto& limits = AppData(ctx)->PQConfig.GetValidWriteSpeedLimitsKbPerSec();
-                validLimits.insert(limits.begin(), limits.end());
-            }
-            if (validLimits.find(req.write_quota_kb_per_sec()) == validLimits.end()) {
-                errorText = TStringBuilder() << "write_quota_kb_per_sec must have values from set {" << JoinSeq(",", validLimits) << ", got " << req.write_quota_kb_per_sec();
-                return false;
-            }
-
-            return true;
-        }
-
     }
 
     class TCreateStreamActor : public TPQGrpcSchemaBase<TCreateStreamActor, NKikimr::NGRpcService::TEvDataStreamsCreateStreamRequest> {
@@ -148,31 +102,73 @@ namespace NKikimr::NDataStreams::V1 {
     {
         NKikimrSchemeOp::TModifyScheme& modifyScheme(*proposal.Record.MutableTransaction()->MutableModifyScheme());
 
-        Ydb::PersQueue::V1::TopicSettings topicSettings;
-        topicSettings.set_partitions_count(GetProtoRequest()->shard_count());
-        topicSettings.set_retention_period_ms(RetentionPeriod(GetProtoRequest()->retention_period_hours()).MilliSeconds());
-        topicSettings.set_supported_format(Ydb::PersQueue::V1::TopicSettings::FORMAT_BASE);
-        topicSettings.add_supported_codecs(Ydb::PersQueue::V1::CODEC_RAW);
-        topicSettings.set_max_partition_write_speed(PartitionWriteSpeedInBytesPerSec(GetProtoRequest()->write_quota_kb_per_sec()));
-        topicSettings.set_max_partition_write_burst(PartitionWriteSpeedInBytesPerSec(GetProtoRequest()->write_quota_kb_per_sec()));
+        Ydb::Topic::CreateTopicRequest topicRequest;
+        topicRequest.mutable_partitioning_settings()->set_min_active_partitions(GetProtoRequest()->shard_count());
+        switch (GetProtoRequest()->retention_case()) {
+            case Ydb::DataStreams::V1::CreateStreamRequest::RetentionCase::kRetentionPeriodHours:
+                topicRequest.mutable_retention_period()->set_seconds(
+                    TDuration::Hours(GetProtoRequest()->retention_period_hours()).Seconds());
+                break;
+            case Ydb::DataStreams::V1::CreateStreamRequest::RetentionCase::kRetentionStorageMegabytes:
+                topicRequest.set_retention_storage_mb(
+                    GetProtoRequest()->retention_storage_megabytes());
+                topicRequest.mutable_retention_period()->set_seconds(
+                    TDuration::Hours(DEFAULT_STREAM_WEEK_RETENTION).Seconds());
+                break;
+            default:
+                topicRequest.mutable_retention_period()->set_seconds(
+                    TDuration::Hours(DEFAULT_STREAM_DAY_RETENTION).Seconds());
+        }
+        topicRequest.mutable_supported_codecs()->add_codecs(Ydb::Topic::CODEC_RAW);
+        topicRequest.set_partition_write_speed_bytes_per_second(
+            PartitionWriteSpeedInBytesPerSec(GetProtoRequest()->write_quota_kb_per_sec()));
+        topicRequest.set_partition_write_burst_bytes(
+            PartitionWriteSpeedInBytesPerSec(GetProtoRequest()->write_quota_kb_per_sec()));
+
+        if (AppData(ctx)->PQConfig.GetBillingMeteringConfig().GetEnabled()) {
+            topicRequest.set_metering_mode(Ydb::Topic::METERING_MODE_RESERVED_CAPACITY);
+
+            if (GetProtoRequest()->has_stream_mode_details()) {
+                switch(GetProtoRequest()->stream_mode_details().stream_mode()) {
+                    case Ydb::DataStreams::V1::StreamMode::PROVISIONED:
+                        topicRequest.set_metering_mode(Ydb::Topic::METERING_MODE_RESERVED_CAPACITY);
+                        break;
+                    case Ydb::DataStreams::V1::StreamMode::ON_DEMAND:
+                        topicRequest.set_metering_mode(Ydb::Topic::METERING_MODE_REQUEST_UNITS);
+                        break;
+                    default:
+                        return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                                      "streams can't be created with unknown metering mode", ctx);
+                }
+            }
+        } else {
+            if (GetProtoRequest()->has_stream_mode_details()) {
+                return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                              "streams can't be created with metering mode", ctx);
+            }
+        }
 
         if (workingDir != proposal.Record.GetDatabaseName() && !proposal.Record.GetDatabaseName().empty()) {
-            return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST, "streams can be created only at database root", ctx);
+            return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                                  "streams can be created only at database root", ctx);
         }
-        TString error;
-        auto status = NKikimr::NGRpcProxy::V1::FillProposeRequestImpl(name, topicSettings, modifyScheme, ctx, false, error);
+
+        auto pqDescr = modifyScheme.MutableCreatePersQueueGroup();
+        if (GetProtoRequest()->retention_case() ==
+            Ydb::DataStreams::V1::CreateStreamRequest::RetentionCase::kRetentionStorageMegabytes) {
+            modifyScheme.MutableCreatePersQueueGroup()->MutablePQTabletConfig()->
+                MutablePartitionConfig()->SetLifetimeSeconds(TDuration::Days(7).Seconds());
+        }
+
         modifyScheme.SetWorkingDir(workingDir);
 
-        if (!error.Empty()) {
-            return ReplyWithError(status, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
-        }
-        auto pqDescr = modifyScheme.MutableCreatePersQueueGroup();
         pqDescr->SetPartitionPerTablet(1);
+        TString error;
+        auto status = NKikimr::NGRpcProxy::V1::FillProposeRequestImpl(name, topicRequest, modifyScheme, ctx, error,
+                                                                      workingDir, proposal.Record.GetDatabaseName());
 
-        if (!ValidateWriteSpeedLimit(*GetProtoRequest(), error, ctx)
-            || !ValidateRetentionPeriod(*GetProtoRequest(), *pqDescr, Nothing(), error))
-        {
-            return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
+        if (status != Ydb::StatusIds::SUCCESS) {
+            return ReplyWithError(status, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
         }
     }
 
@@ -302,6 +298,57 @@ namespace NKikimr::NDataStreams::V1 {
 
     //-----------------------------------------------------------------------------------------------------------
 
+    class TUpdateStreamModeActor : public TUpdateSchemeActor<TUpdateStreamModeActor, TEvDataStreamsUpdateStreamModeRequest> {
+        using TBase = TUpdateSchemeActor<TUpdateStreamModeActor, TEvDataStreamsUpdateStreamModeRequest>;
+        using TProtoRequest = typename TBase::TProtoRequest;
+    public:
+        TUpdateStreamModeActor(NKikimr::NGRpcService::IRequestOpCtx* request)
+            : TBase(request, GetRequest<TProtoRequest>(request)->stream_arn())
+        {
+        }
+
+        void Bootstrap(const TActorContext& ctx);
+        void ModifyPersqueueConfig(const TActorContext& ctx,
+                                   NKikimrSchemeOp::TPersQueueGroupDescription& groupConfig,
+                                   const NKikimrSchemeOp::TPersQueueGroupDescription& pqGroupDescription,
+                                   const NKikimrSchemeOp::TDirEntry& selfInfo);
+    };
+
+    void TUpdateStreamModeActor::Bootstrap(const TActorContext& ctx) {
+        TBase::Bootstrap(ctx);
+        SendDescribeProposeRequest(ctx);
+        Become(&TBase::StateWork);
+    }
+
+    void TUpdateStreamModeActor::ModifyPersqueueConfig(
+        const TActorContext& ctx,
+        NKikimrSchemeOp::TPersQueueGroupDescription& groupConfig,
+        const NKikimrSchemeOp::TPersQueueGroupDescription& pqGroupDescription,
+        const NKikimrSchemeOp::TDirEntry& selfInfo
+    ) {
+        Y_UNUSED(selfInfo);
+        Y_UNUSED(pqGroupDescription);
+        if (!AppData(ctx)->PQConfig.GetBillingMeteringConfig().GetEnabled()) {
+            return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                      "streams can't be created with metering mode", ctx);
+        }
+
+        switch(GetProtoRequest()->stream_mode_details().stream_mode()) {
+            case Ydb::DataStreams::V1::StreamMode::PROVISIONED:
+                groupConfig.MutablePQTabletConfig()->SetMeteringMode(NKikimrPQ::TPQTabletConfig::METERING_MODE_RESERVED_CAPACITY);
+                break;
+            case Ydb::DataStreams::V1::StreamMode::ON_DEMAND:
+                groupConfig.MutablePQTabletConfig()->SetMeteringMode(NKikimrPQ::TPQTabletConfig::METERING_MODE_REQUEST_UNITS);
+                break;
+            default:
+                return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                              "streams can't be created with unknown metering mode", ctx);
+        }
+    }
+
+
+    //-----------------------------------------------------------------------------------------------------------
+
     class TUpdateStreamActor : public TUpdateSchemeActor<TUpdateStreamActor, TEvDataStreamsUpdateStreamRequest> {
         using TBase = TUpdateSchemeActor<TUpdateStreamActor, TEvDataStreamsUpdateStreamRequest>;
         using TProtoRequest = typename TBase::TProtoRequest;
@@ -334,17 +381,53 @@ namespace NKikimr::NDataStreams::V1 {
         Y_UNUSED(selfInfo);
 
         TString error;
-        if (!ValidateShardsCount(*GetProtoRequest(), pqGroupDescription, error)
-            || !ValidateWriteSpeedLimit(*GetProtoRequest(), error, ctx)
-            || !ValidateRetentionPeriod(*GetProtoRequest(), groupConfig, Nothing(), error))
+        if (!ValidateShardsCount(*GetProtoRequest(), pqGroupDescription, error))
         {
             return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
         }
 
         groupConfig.SetTotalGroupCount(GetProtoRequest()->target_shard_count());
-        groupConfig.MutablePQTabletConfig()->MutablePartitionConfig()->SetWriteSpeedInBytesPerSecond(
-                PartitionWriteSpeedInBytesPerSec(GetProtoRequest()->write_quota_kb_per_sec()));
-        groupConfig.MutablePQTabletConfig()->MutablePartitionConfig()->SetLifetimeSeconds(TInstant::Hours(this->GetProtoRequest()->retention_period_hours()).Seconds());
+        switch (GetProtoRequest()->retention_case()) {
+            case Ydb::DataStreams::V1::UpdateStreamRequest::RetentionCase::kRetentionPeriodHours:
+                groupConfig.MutablePQTabletConfig()->MutablePartitionConfig()->SetLifetimeSeconds(
+                    TDuration::Hours(GetProtoRequest()->retention_period_hours()).Seconds());
+                break;
+            case Ydb::DataStreams::V1::UpdateStreamRequest::RetentionCase::kRetentionStorageMegabytes:
+                groupConfig.MutablePQTabletConfig()->MutablePartitionConfig()->SetStorageLimitBytes(
+                    GetProtoRequest()->retention_storage_megabytes() * 1_MB);
+                break;
+            default: {}
+        }
+
+        auto* pqConfig = groupConfig.MutablePQTabletConfig();
+
+        pqConfig->MutablePartitionConfig()->SetWriteSpeedInBytesPerSecond(
+                    PartitionWriteSpeedInBytesPerSec(GetProtoRequest()->write_quota_kb_per_sec()));
+
+        if (GetProtoRequest()->has_stream_mode_details()) {
+            if (!AppData(ctx)->PQConfig.GetBillingMeteringConfig().GetEnabled()) {
+                return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                      "streams can't be created with metering mode", ctx);
+            }
+
+            switch(GetProtoRequest()->stream_mode_details().stream_mode()) {
+                case Ydb::DataStreams::V1::StreamMode::PROVISIONED:
+                    groupConfig.MutablePQTabletConfig()->SetMeteringMode(NKikimrPQ::TPQTabletConfig::METERING_MODE_RESERVED_CAPACITY);
+                    break;
+                case Ydb::DataStreams::V1::StreamMode::ON_DEMAND:
+                    groupConfig.MutablePQTabletConfig()->SetMeteringMode(NKikimrPQ::TPQTabletConfig::METERING_MODE_REQUEST_UNITS);
+                    break;
+                default:
+                    return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                                  "streams can't be created with unknown metering mode", ctx);
+            }
+        }
+
+        auto serviceTypes = GetSupportedClientServiceTypes(ctx);
+        auto status = CheckConfig(*pqConfig, serviceTypes, error, ctx);
+        if (status != Ydb::StatusIds::SUCCESS) {
+            return ReplyWithError(status, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
+        }
     }
 
     //-----------------------------------------------------------------------------------------------------------
@@ -382,11 +465,18 @@ namespace NKikimr::NDataStreams::V1 {
         Y_UNUSED(selfInfo);
 
         TString error;
-        if (!ValidateWriteSpeedLimit(*GetProtoRequest(), error, ctx)) {
-            return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
+
+        auto* pqConfig = groupConfig.MutablePQTabletConfig();
+
+        pqConfig->MutablePartitionConfig()->SetWriteSpeedInBytesPerSecond(GetProtoRequest()->write_quota_kb_per_sec() * 1_KB);
+        pqConfig->MutablePartitionConfig()->SetBurstSize(GetProtoRequest()->write_quota_kb_per_sec() * 1_KB);
+
+        auto serviceTypes = GetSupportedClientServiceTypes(ctx);
+        auto status = CheckConfig(*pqConfig, serviceTypes, error, ctx);
+        if (status != Ydb::StatusIds::SUCCESS) {
+            return ReplyWithError(status, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
         }
-        groupConfig.MutablePQTabletConfig()->MutablePartitionConfig()->SetWriteSpeedInBytesPerSecond(GetProtoRequest()->write_quota_kb_per_sec() * 1_KB);
-        groupConfig.MutablePQTabletConfig()->MutablePartitionConfig()->SetBurstSize(GetProtoRequest()->write_quota_kb_per_sec() * 1_KB);
+
     }
 
     //-----------------------------------------------------------------------------------------------------------
@@ -419,10 +509,35 @@ namespace NKikimr::NDataStreams::V1 {
             Y_UNUSED(selfInfo);
 
             TString error;
-            if (!ValidateRetentionPeriod(*this->GetProtoRequest(), groupConfig, ShouldIncrease, error)) {
-                return this->ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
+            Ydb::StatusIds::StatusCode status = Ydb::StatusIds::SUCCESS;
+
+            auto* pqConfig = groupConfig.MutablePQTabletConfig();
+
+            ui32 currentLifetime = pqConfig->GetPartitionConfig().GetLifetimeSeconds();
+            ui32 newLifetime = TInstant::Hours(this->GetProtoRequest()->retention_period_hours()).Seconds();
+            if (ShouldIncrease) {
+                if (newLifetime <= currentLifetime) {
+                    error = TStringBuilder() << "Retention period is not greater than provided: "
+                                                 << currentLifetime << " <= " << newLifetime;
+                    status = Ydb::StatusIds::BAD_REQUEST;
+                }
+            } else {
+                if (newLifetime >= currentLifetime) {
+                    error = TStringBuilder() << "Retention period is not less than provided: "
+                                                 << currentLifetime << " <= " << newLifetime;
+                    status = Ydb::StatusIds::BAD_REQUEST;
+                }
             }
-            groupConfig.MutablePQTabletConfig()->MutablePartitionConfig()->SetLifetimeSeconds(TInstant::Hours(this->GetProtoRequest()->retention_period_hours()).Seconds());
+            if (status == Ydb::StatusIds::SUCCESS) {
+                pqConfig->MutablePartitionConfig()->SetLifetimeSeconds(newLifetime);
+
+                auto serviceTypes = GetSupportedClientServiceTypes(ctx);
+                status = CheckConfig(*pqConfig, serviceTypes, error, ctx);
+            }
+
+            if (status != Ydb::StatusIds::SUCCESS) {
+                return TBase::ReplyWithError(status, Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
+            }
         }
 
     private:
@@ -555,10 +670,21 @@ namespace NKikimr::NDataStreams::V1 {
         ui32 retentionPeriodHours = TInstant::Seconds(pqConfig.GetPartitionConfig().GetLifetimeSeconds()).Hours();
         description.set_retention_period_hours(retentionPeriodHours);
         description.set_write_quota_kb_per_sec(writeSpeed);
+        if (pqConfig.GetPartitionConfig().HasStorageLimitBytes()) {
+            ui32 storageLimitMb = pqConfig.GetPartitionConfig().GetStorageLimitBytes() / 1_MB;
+            description.set_storage_limit_mb(storageLimitMb);
+        }
         if (SelfInfo.GetCreateFinished()) {
             description.set_stream_status(Ydb::DataStreams::V1::StreamDescription::ACTIVE);
         } else {
             description.set_stream_status(Ydb::DataStreams::V1::StreamDescription::CREATING);
+        }
+
+        if (AppData(ctx)->PQConfig.GetBillingMeteringConfig().GetEnabled()) {
+            description.mutable_stream_mode_details()->set_stream_mode(
+                pqConfig.GetMeteringMode() == NKikimrPQ::TPQTabletConfig::METERING_MODE_RESERVED_CAPACITY ? Ydb::DataStreams::V1::StreamMode::PROVISIONED
+                                                                                                          : Ydb::DataStreams::V1::StreamMode::ON_DEMAND
+                );
         }
 
         bool startShardFound = GetProtoRequest()->exclusive_start_shard_id().empty();
@@ -620,7 +746,7 @@ namespace NKikimr::NDataStreams::V1 {
         void SendResponse(const TActorContext& ctx);
 
         void ReplyWithError(Ydb::StatusIds::StatusCode status, Ydb::PersQueue::ErrorCode::ErrorCode pqStatus,
-                                 const TString& messageText, const NActors::TActorContext& ctx) {
+                            const TString& messageText, const NActors::TActorContext& ctx) {
             this->Request_->RaiseIssue(FillIssue(messageText, pqStatus));
             this->Request_->ReplyWithYdbStatus(status);
             this->Die(ctx);
@@ -642,7 +768,7 @@ namespace NKikimr::NDataStreams::V1 {
     void TListStreamsActor::Bootstrap(const NActors::TActorContext& ctx) {
         TBase::Bootstrap(ctx);
         if (!Request_->GetDatabaseName()) {
-            return ReplyWithError(Ydb::StatusIds::BAD_REQUEST,Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+            return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, Ydb::PersQueue::ErrorCode::BAD_REQUEST,
                                           "Request without dabase is forbiden", ctx);
         }
 
@@ -931,14 +1057,14 @@ namespace NKikimr::NDataStreams::V1 {
         }
         auto serviceTypes = GetSupportedClientServiceTypes(ctx);
         TString error = AddReadRuleToConfig(pqConfig, readRule, serviceTypes, ctx);
-        bool hasDuplicates = false;
-        if (error.Empty()) {
-            hasDuplicates = CheckReadRulesConfig(*pqConfig, serviceTypes, error);
-        }
 
-        if (!error.Empty()) {
-            return ReplyWithError(hasDuplicates ? Ydb::StatusIds::ALREADY_EXISTS : Ydb::StatusIds::BAD_REQUEST,
-                                  hasDuplicates ? Ydb::PersQueue::ErrorCode::OK : Ydb::PersQueue::ErrorCode::BAD_REQUEST, error, ctx);
+        auto status = error.empty() ? CheckConfig(*pqConfig, serviceTypes, error, ctx, Ydb::StatusIds::ALREADY_EXISTS)
+                                    : Ydb::StatusIds::BAD_REQUEST;
+        if (status != Ydb::StatusIds::SUCCESS) {
+            return ReplyWithError(status,
+                              status == Ydb::StatusIds::ALREADY_EXISTS ? Ydb::PersQueue::ErrorCode::OK
+                                                                       : Ydb::PersQueue::ErrorCode::BAD_REQUEST,
+                              error, ctx);
         }
     }
 
@@ -1230,7 +1356,7 @@ namespace NKikimr::NDataStreams::V1 {
         ActorIdToProto(PipeClient, request.MutablePartitionRequest()->MutablePipeClient());
 
         auto cmdRead = request.MutablePartitionRequest()->MutableCmdRead();
-        cmdRead->SetClientId(NKikimr::NPQ::CLIENTID_TO_READ_INTERNALLY);
+        cmdRead->SetClientId(NKikimr::NPQ::CLIENTID_WITHOUT_CONSUMER);
         cmdRead->SetCount(Limit);
         cmdRead->SetOffset(ShardIterator.GetSequenceNumber());
         cmdRead->SetReadTimestampMs(ShardIterator.GetReadTimestamp());
@@ -1783,6 +1909,7 @@ DECLARE_RPC_NI(SubscribeToShard);
 DECLARE_RPC_NI(DescribeLimits);
 DECLARE_RPC(DescribeStreamSummary);
 DECLARE_RPC(UpdateShardCount);
+DECLARE_RPC(UpdateStreamMode);
 DECLARE_RPC(ListStreamConsumers);
 DECLARE_RPC_NI(AddTagsToStream);
 DECLARE_RPC_NI(DisableEnhancedMonitoring);

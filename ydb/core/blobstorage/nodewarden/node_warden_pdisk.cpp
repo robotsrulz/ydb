@@ -1,17 +1,17 @@
 #include "node_warden_impl.h"
 
 #include <ydb/core/blobstorage/crypto/default.h>
-#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_util_wcache.h>
 #include <ydb/library/pdisk_io/file_params.h>
+#include <ydb/library/pdisk_io/wcache.h>
 
 #include <util/string/split.h>
 
 namespace NKikimr::NStorage {
 
-    static const std::unordered_map<TPDiskCategory::EDeviceType, ui64> DefaultSpeedLimit{
-        {TPDiskCategory::DEVICE_TYPE_ROT, 100000000},
-        {TPDiskCategory::DEVICE_TYPE_SSD, 200000000},
-        {TPDiskCategory::DEVICE_TYPE_NVME, 300000000},
+    static const std::unordered_map<NPDisk::EDeviceType, ui64> DefaultSpeedLimit{
+        {NPDisk::DEVICE_TYPE_ROT, 100000000},
+        {NPDisk::DEVICE_TYPE_SSD, 200000000},
+        {NPDisk::DEVICE_TYPE_NVME, 300000000},
     };
 
     TIntrusivePtr<TPDiskConfig> TNodeWarden::CreatePDiskConfig(const NKikimrBlobStorage::TNodeWardenServiceSet::TPDisk& pdisk)  {
@@ -51,9 +51,15 @@ namespace NKikimr::NStorage {
                 if (splitted.size() >= 3) {
                     size = Max(size, FromStringWithDefault<ui64>(splitted[2], size) << 30);
                 }
+
+                auto diskMode = NPDisk::NSectorMap::DM_NONE;
+                if (splitted.size() >= 4) {
+                    diskMode = NPDisk::NSectorMap::DiskModeFromString(splitted[3]);
+                }
+
                 auto& maps = Cfg->SectorMaps;
                 if (auto it = maps.find(path); it == maps.end()) {
-                    maps[path] = new NPDisk::TSectorMap(size);
+                    maps[path] = new NPDisk::TSectorMap(size, diskMode);
                     maps[path]->ZeroInit(1000); // Format PDisk
                 }
 

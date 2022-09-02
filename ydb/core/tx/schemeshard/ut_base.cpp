@@ -1781,8 +1781,10 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             NLs::IndexType(NKikimrSchemeOp::EIndexTypeGlobal),
                             NLs::IndexState(NKikimrSchemeOp::EIndexStateReady),
                             NLs::IndexKeys({"value1"})});
-        TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/DirA/Table1/UserDefinedIndexByValue1/indexImplTable"),
-                           {NLs::Finished});
+        TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/DirA/Table1/UserDefinedIndexByValue1/indexImplTable", true, true),
+                           {NLs::Finished,
+                            NLs::MaxPartitionsCountEqual(5000),
+                            NLs::SizeToSplitEqual(2<<30)}); // 2G
         TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/DirA/Table1/UserDefinedIndexByValues"),
                            {NLs::Finished,
                             NLs::IndexType(NKikimrSchemeOp::EIndexTypeGlobal),
@@ -3086,6 +3088,11 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             Columns { Name: "Value"      Type: "Utf8"}
                             KeyColumnNames: ["key"]
                             UniformPartitionsCount: 3
+                            PartitionConfig {
+                                PartitioningPolicy {
+                                    MinPartitionsCount: 0
+                                }
+                            }
                         )");
         env.TestWaitNotification(runtime, txId);
 
@@ -3141,6 +3148,11 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             SplitBoundary { KeyPrefix {
                                 Tuple { Optional { Uint32 : 200 } }
                             }}
+                            PartitionConfig {
+                                PartitioningPolicy {
+                                    MinPartitionsCount: 0
+                                }
+                            }
                         )");
         env.TestWaitNotification(runtime, txId);
 
@@ -3476,6 +3488,25 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
         TTestEnv env(runtime);
         ui64 txId = 100;
 
+        // used to sanity check at the end of the test
+        THashSet<ui64> deletedShardIdxs;
+        runtime.SetObserverFunc([&](TTestActorRuntimeBase&, TAutoPtr<IEventHandle>& ev) {
+            if (ev->GetTypeRewrite() == TEvHive::EvDeleteTabletReply) {
+                for (const ui64 shardIdx : ev->Get<TEvHive::TEvDeleteTabletReply>()->Record.GetShardLocalIdx()) {
+                    deletedShardIdxs.insert(shardIdx);
+                }
+            }
+
+            return TTestActorRuntime::EEventAction::PROCESS;
+        });
+
+        // these limits should have no effect on backup tables
+        TSchemeLimits limits;
+        limits.MaxPaths = 4;
+        limits.MaxShards = 4;
+        limits.MaxChildrenInDir = 3;
+        SetSchemeshardSchemaLimits(runtime, limits);
+
         // create src table
         TestCreateTable(runtime, ++txId, "/MyRoot", R"(
             Name: "Table"
@@ -3514,6 +3545,70 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
         TestDescribeResult(DescribePath(runtime, "/MyRoot/ConsistentCopyTable", true), {
             NLs::IsBackupTable(true),
         });
+
+        // negative tests
+
+        // shards limit
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table2"
+            Columns { Name: "key" Type: "Uint32"}
+            Columns { Name: "value" Type: "Utf8"}
+            KeyColumnNames: ["key"]
+            UniformPartitionsCount: 4
+        )", {NKikimrScheme::StatusResourceExhausted});
+
+        // ok
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table2"
+            Columns { Name: "key" Type: "Uint32"}
+            Columns { Name: "value" Type: "Utf8"}
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestMkDir(runtime, ++txId, "/MyRoot", "Dir");
+        env.TestWaitNotification(runtime, txId);
+
+        // children limit
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table3"
+            Columns { Name: "key" Type: "Uint32"}
+            Columns { Name: "value" Type: "Utf8"}
+            KeyColumnNames: ["key"]
+        )", {NKikimrScheme::StatusResourceExhausted});
+
+        // ok
+        TestCreateTable(runtime, ++txId, "/MyRoot/Dir", R"(
+            Name: "Table3"
+            Columns { Name: "key" Type: "Uint32"}
+            Columns { Name: "value" Type: "Utf8"}
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // paths limit
+        TestCreateTable(runtime, ++txId, "/MyRoot/Dir", R"(
+            Name: "Table4"
+            Columns { Name: "key" Type: "Uint32"}
+            Columns { Name: "value" Type: "Utf8"}
+            KeyColumnNames: ["key"]
+        )", {NKikimrScheme::StatusResourceExhausted});
+
+        // free quota
+        TestDropTable(runtime, ++txId, "/MyRoot", "Table2");
+        env.TestWaitNotification(runtime, txId);
+
+        // ok
+        TestCreateTable(runtime, ++txId, "/MyRoot/Dir", R"(
+            Name: "Table4"
+            Columns { Name: "key" Type: "Uint32"}
+            Columns { Name: "value" Type: "Utf8"}
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // reset limits to default
+        SetSchemeshardSchemaLimits(runtime, TSchemeLimits());
 
         // cannot create new table with 'IsBackup'
         TestCreateTable(runtime, ++txId, "/MyRoot", R"(
@@ -3561,6 +3656,36 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
             IsBackup: false
             DropColumns { Name: "value" }
         )", {NKikimrScheme::StatusInvalidParameter});
+
+        // sanity check
+
+        // drop all tables
+        TVector<ui64> dropTxIds;
+        for (const auto& table : {"Table", "CopyTable", "ConsistentCopyTable"}) {
+            TestDropTable(runtime, dropTxIds.emplace_back(++txId), "/MyRoot", table);
+        }
+        for (const auto& table : {"Table3", "Table4"}) {
+            TestDropTable(runtime, dropTxIds.emplace_back(++txId), "/MyRoot/Dir", table);
+        }
+        // Table2 has already been dropped
+        env.TestWaitNotification(runtime, dropTxIds);
+
+        if (deletedShardIdxs.size() != 6) { // 6 tables with one shard each
+            TDispatchOptions opts;
+            opts.FinalEvents.emplace_back([&deletedShardIdxs](IEventHandle&) {
+                return deletedShardIdxs.size() == 6;
+            });
+            runtime.DispatchEvents(opts);
+        }
+
+        // ok
+        TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint32"}
+            Columns { Name: "value" Type: "Utf8"}
+            KeyColumnNames: ["key"]
+        )");
+        env.TestWaitNotification(runtime, txId);
     }
 
     Y_UNIT_TEST(AlterTableAndConcurrentSplit) { //+
@@ -3575,6 +3700,9 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             KeyColumnNames: ["key"]
                             UniformPartitionsCount: 3
                             PartitionConfig {
+                              PartitioningPolicy {
+                                MinPartitionsCount: 0
+                              }
                               CompactionPolicy {
                                 InMemSizeToSnapshot: 4194304
                                 InMemStepsToSnapshot: 300
@@ -3739,6 +3867,11 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             Columns { Name: "Value"      Type: "Utf8"}
                             KeyColumnNames: ["key"]
                             UniformPartitionsCount: 3
+                            PartitionConfig {
+                                PartitioningPolicy {
+                                    MinPartitionsCount: 0
+                                }
+                            }
                         )");
         env.TestWaitNotification(runtime, txId);
 
@@ -6239,6 +6372,74 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                 PartitionKeySchema { Name: "key2" TypeId: 2 }
             }
         )", {NKikimrScheme::StatusInvalidParameter});
+    }
+
+    Y_UNIT_TEST(TopicMeteringMode) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 1
+            PartitionPerTablet: 1
+            PQTabletConfig {
+                PartitionConfig { LifetimeSeconds: 10 }
+                MeteringMode: METERING_MODE_REQUEST_UNITS
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestDescribeResult(
+            DescribePath(runtime, "/MyRoot/Topic1"), {
+                NLs::PathExist,
+                NLs::Finished, [=] (const NKikimrScheme::TEvDescribeSchemeResult& record) {
+                    const auto& config = record.GetPathDescription().GetPersQueueGroup().GetPQTabletConfig();
+                    UNIT_ASSERT(config.HasMeteringMode());
+                    UNIT_ASSERT(config.GetMeteringMode() == NKikimrPQ::TPQTabletConfig::METERING_MODE_REQUEST_UNITS);
+                }
+            }
+        );
+
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            PQTabletConfig {
+                PartitionConfig { LifetimeSeconds: 10 }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestDescribeResult(
+            DescribePath(runtime, "/MyRoot/Topic1"), {
+                NLs::PathExist,
+                NLs::Finished, [=] (const NKikimrScheme::TEvDescribeSchemeResult& record) {
+                    const auto& config = record.GetPathDescription().GetPersQueueGroup().GetPQTabletConfig();
+                    UNIT_ASSERT(config.HasMeteringMode());
+                    UNIT_ASSERT(config.GetMeteringMode() == NKikimrPQ::TPQTabletConfig::METERING_MODE_RESERVED_CAPACITY);
+                }
+            }
+        );
+
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic2"
+            TotalGroupCount: 1
+            PartitionPerTablet: 1
+            PQTabletConfig {
+                PartitionConfig { LifetimeSeconds: 10 }
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestDescribeResult(
+            DescribePath(runtime, "/MyRoot/Topic2"), {
+                NLs::PathExist,
+                NLs::Finished, [=] (const NKikimrScheme::TEvDescribeSchemeResult& record) {
+                    const auto& config = record.GetPathDescription().GetPersQueueGroup().GetPQTabletConfig();
+                    UNIT_ASSERT(!config.HasMeteringMode());
+                }
+            }
+        );
     }
 
     Y_UNIT_TEST(DropTable) { //+
@@ -9946,8 +10147,8 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                            {NLs::PathExist,
                             NLs::PathVersionEqual(4),
                             NLs::PartitionCount(1),
-                            NLs::MinPartitionsCountEqual(0),
-                            NLs::MaxPartitionsCountEqual(100)});
+                            NLs::MinPartitionsCountEqual(1),
+                            NLs::MaxPartitionsCountEqual(5000)});
 
 
         TestSplitTable(runtime, ++txId, "/MyRoot/table/indexByValue/indexImplTable", R"(
@@ -9968,8 +10169,8 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                            {NLs::PathExist,
                             NLs::PathVersionEqual(5),
                             NLs::PartitionCount(3),
-                            NLs::MinPartitionsCountEqual(0),
-                            NLs::MaxPartitionsCountEqual(100)});
+                            NLs::MinPartitionsCountEqual(1),
+                            NLs::MaxPartitionsCountEqual(5000)});
 
         // request without token
         TestAlterTable(runtime, ++txId, "/MyRoot/table/indexByValue/", R"(
@@ -10070,9 +10271,157 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
 
         TestDescribeResult(DescribePath(runtime, "/MyRoot/table/indexByValue/indexImplTable", true, true, true),
                            {NLs::PathExist,
-                            NLs::PathVersionOneOf({8}),
                             NLs::PartitionCount(1),
                             NLs::MinPartitionsCountEqual(1),
-                            NLs::MaxPartitionsCountEqual(100)});
+                            NLs::MaxPartitionsCountEqual(5000),
+                            NLs::SizeToSplitEqual(100500)});
+    }
+
+    template <typename TCreateFn, typename TDropFn>
+    void DisablePublicationsOfDropping(NSchemeCache::TSchemeCacheNavigate::EOp op, TCreateFn&& createFn, TDropFn&& dropFn) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        // disable publications
+        {
+            TAtomic unused;
+            runtime.GetAppData().Icb->SetValue("SchemeShard_DisablePublicationsOfDropping", true, unused);
+        }
+
+        createFn(runtime, txId);
+        env.TestWaitNotification(runtime, txId);
+
+        {
+            auto nav = Navigate(runtime, "/MyRoot/Obj", op);
+            const auto& entry = nav->ResultSet.at(0);
+            UNIT_ASSERT_VALUES_EQUAL(entry.Status, NSchemeCache::TSchemeCacheNavigate::EStatus::Ok);
+        }
+
+        dropFn(runtime, txId);
+        env.TestWaitNotification(runtime, txId);
+
+        // still ok
+        {
+            auto nav = Navigate(runtime, "/MyRoot/Obj", op);
+            const auto& entry = nav->ResultSet.at(0);
+            UNIT_ASSERT_VALUES_EQUAL(entry.Status, NSchemeCache::TSchemeCacheNavigate::EStatus::Ok);
+        }
+
+        // check after reboot (should be removed in process of sync)
+        RebootTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor());
+
+        while (true) {
+            auto nav = Navigate(runtime, "/MyRoot/Obj", op);
+            const auto& entry = nav->ResultSet.at(0);
+            if ((entry.Status == NSchemeCache::TSchemeCacheNavigate::EStatus::PathErrorUnknown)) {
+                break;
+            }
+
+            env.SimulateSleep(runtime, TDuration::MilliSeconds(100));
+        }
+
+        // enable publications
+        {
+            TAtomic unused;
+            runtime.GetAppData().Icb->SetValue("SchemeShard_DisablePublicationsOfDropping", false, unused);
+        }
+
+        createFn(runtime, txId);
+        env.TestWaitNotification(runtime, txId);
+
+        {
+            auto nav = Navigate(runtime, "/MyRoot/Obj", op);
+            const auto& entry = nav->ResultSet.at(0);
+            UNIT_ASSERT_VALUES_EQUAL(entry.Status, NSchemeCache::TSchemeCacheNavigate::EStatus::Ok);
+        }
+
+        dropFn(runtime, txId);
+        env.TestWaitNotification(runtime, txId);
+
+        {
+            auto nav = Navigate(runtime, "/MyRoot/Obj", op);
+            const auto& entry = nav->ResultSet.at(0);
+            UNIT_ASSERT_VALUES_EQUAL(entry.Status, NSchemeCache::TSchemeCacheNavigate::EStatus::PathErrorUnknown);
+        }
+    }
+
+    Y_UNIT_TEST(DisablePublicationsOfDropping_Dir) {
+        DisablePublicationsOfDropping(NSchemeCache::TSchemeCacheNavigate::EOp::OpPath,
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestMkDir(runtime, ++txId, "/MyRoot", "Obj");
+            },
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestRmDir(runtime, ++txId, "/MyRoot", "Obj");
+            }
+        );
+    }
+
+    Y_UNIT_TEST(DisablePublicationsOfDropping_Table) {
+        DisablePublicationsOfDropping(NSchemeCache::TSchemeCacheNavigate::EOp::OpTable,
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestCreateTable(runtime, ++txId, "/MyRoot", R"(
+                    Name: "Obj"
+                    Columns { Name: "key"   Type: "Uint64" }
+                    Columns { Name: "value" Type: "Utf8" }
+                    KeyColumnNames: ["key"]
+                )");
+            },
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestDropTable(runtime, ++txId, "/MyRoot", "Obj");
+            }
+        );
+    }
+
+    Y_UNIT_TEST(DisablePublicationsOfDropping_IndexedTable) {
+        DisablePublicationsOfDropping(NSchemeCache::TSchemeCacheNavigate::EOp::OpTable,
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestCreateIndexedTable(runtime, ++txId, "/MyRoot", R"(
+                    TableDescription {
+                      Name: "Obj"
+                      Columns { Name: "key"   Type: "Uint64" }
+                      Columns { Name: "value" Type: "Utf8" }
+                      KeyColumnNames: ["key"]
+                    }
+                    IndexDescription {
+                      Name: "UserDefinedIndexByValue"
+                      KeyColumnNames: ["value"]
+                    }
+                )");
+            },
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestDropTable(runtime, ++txId, "/MyRoot", "Obj");
+            }
+        );
+    }
+
+    Y_UNIT_TEST(DisablePublicationsOfDropping_Pq) {
+        DisablePublicationsOfDropping(NSchemeCache::TSchemeCacheNavigate::EOp::OpTopic,
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestCreatePQGroup(runtime, ++txId, "/MyRoot", R"(
+                    Name: "Obj"
+                    TotalGroupCount: 1
+                    PartitionPerTablet: 1
+                    PQTabletConfig: { PartitionConfig { LifetimeSeconds: 10 } }
+                )");
+            },
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestDropPQGroup(runtime, ++txId, "/MyRoot", "Obj");
+            }
+        );
+    }
+
+    Y_UNIT_TEST(DisablePublicationsOfDropping_Solomon) {
+        DisablePublicationsOfDropping(NSchemeCache::TSchemeCacheNavigate::EOp::OpPath,
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestCreateSolomon(runtime, ++txId, "/MyRoot", R"(
+                    Name: "Obj"
+                    PartitionCount: 1
+                )");
+            },
+            [](TTestBasicRuntime& runtime, ui64& txId) {
+                return TestDropSolomon(runtime, ++txId, "/MyRoot", "Obj");
+            }
+        );
     }
 }

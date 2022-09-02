@@ -14,6 +14,8 @@ namespace NKikimr {
         static const ui32 MaxPartId = 15ul;
         static const ui32 MaxCrcMode = 3ul;
 
+        static constexpr size_t BinarySize = 3 * sizeof(ui64);
+
         TLogoBlobID()
         {
             Set(0, 0, 0, 0, 0, 0, 0, 0);
@@ -100,10 +102,42 @@ namespace NKikimr {
 
         const ui64* GetRaw() const { return Raw.X; }
 
+        void ToBinary(void *data) const {
+            ui64 *x = static_cast<ui64*>(data);
+            x[0] = HostToInet(Raw.X[0]);
+            x[1] = HostToInet(Raw.X[1]);
+            x[2] = HostToInet(Raw.X[2]);
+        }
+
+        TString AsBinaryString() const {
+            std::array<char, BinarySize> data;
+            ToBinary(data.data());
+            return TString(data.data(), data.size());
+        }
+
+        static TLogoBlobID FromBinary(const void *data) {
+            const ui64 *x = static_cast<const ui64*>(data);
+            ui64 arr[3] = {InetToHost(x[0]), InetToHost(x[1]), InetToHost(x[2])};
+            return TLogoBlobID(arr);
+        }
+
+        static TLogoBlobID FromBinary(const TString& data) {
+            Y_VERIFY(data.size() == BinarySize);
+            return FromBinary(data.data());
+        }
+
         TString ToString() const;
         void Out(IOutputStream &o) const;
         static bool Parse(TLogoBlobID &out, const TString &buf, TString &errorExplanation);
         static void Out(IOutputStream &o, const TVector<TLogoBlobID> &vec);
+
+        void Save(IOutputStream *out) const {
+            ::Save(out, Raw.X);
+        }
+
+        void Load(IInputStream *in) {
+            ::Load(in, Raw.X);
+        }
 
         // Returns -1 if *this < x, 0 if *this == x, 1 if *this > x
         int Compare(const TLogoBlobID &x) const {
@@ -320,3 +354,15 @@ struct THash<NKikimr::TLogoBlobID> {
         return x.Hash();
     }
 };
+
+template<>
+inline NKikimr::TLogoBlobID Min<NKikimr::TLogoBlobID>() noexcept {
+    return {};
+}
+
+template<>
+inline NKikimr::TLogoBlobID Max<NKikimr::TLogoBlobID>() noexcept {
+    return NKikimr::TLogoBlobID(Max<ui64>(), Max<ui32>(), Max<ui32>(), NKikimr::TLogoBlobID::MaxChannel,
+        NKikimr::TLogoBlobID::MaxBlobSize, NKikimr::TLogoBlobID::MaxCookie, NKikimr::TLogoBlobID::MaxPartId,
+        NKikimr::TLogoBlobID::MaxCrcMode);
+}

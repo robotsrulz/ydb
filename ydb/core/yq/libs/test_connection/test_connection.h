@@ -7,7 +7,7 @@
 #include <ydb/core/yq/libs/shared_resources/shared_resources.h>
 #include <ydb/core/yq/libs/signer/signer.h>
 #include <ydb/library/yql/providers/common/token_accessor/client/factory.h>
-#include <ydb/library/yql/providers/pq/cm_client/interface/client.h>
+#include <ydb/library/yql/providers/pq/cm_client/client.h>
 #include <ydb/public/api/protos/yq.pb.h>
 
 #include <library/cpp/actors/core/actor.h>
@@ -50,7 +50,7 @@ NActors::IActor* CreateTestConnectionActor(
         const NPq::NConfigurationManager::IConnections::TPtr& cmConnections,
         const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
         const NYql::IHTTPGateway::TPtr& httpGateway,
-        const NMonitoring::TDynamicCounterPtr& counters);
+        const ::NMonitoring::TDynamicCounterPtr& counters);
 
 NActors::IActor* CreateTestDataStreamsConnectionActor(
         const YandexQuery::DataStreams& ds,

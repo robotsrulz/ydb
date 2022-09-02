@@ -472,6 +472,7 @@ private:
         entry.Path = SplitPath(Settings.TablePath);
         entry.Operation = NSchemeCache::TSchemeCacheNavigate::OpTable;
         entry.ShowPrivatePath = true;
+        entry.SyncVersion = true;
 
         TXLOG_D("Sending TEvNagivateKeySet for table '" << Settings.TablePath << "'");
         ctx.Send(Services.SchemeCache, new TEvTxProxySchemeCache::TEvNavigateKeySet(request.Release()));
@@ -739,7 +740,7 @@ private:
 
         KeyDesc = std::move(request->ResultSet[0].KeyDescription);
 
-        if (KeyDesc->Partitions.empty()) {
+        if (KeyDesc->GetPartitions().empty()) {
             TString error = TStringBuilder() << "No partitions to read from '" << Settings.TablePath << "'";
             TXLOG_E(error);
             return ReplyAndDie(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::WrongRequest, NKikimrIssues::TStatusIds::BAD_REQUEST, ctx);
@@ -754,8 +755,8 @@ private:
         // Do we need to create a new snapshot?
         const bool needSnapshot = Settings.ReadVersion.IsMax();
 
-        for (size_t idx = 0; idx < KeyDesc->Partitions.size(); ++idx) {
-            const auto& partition = KeyDesc->Partitions[idx];
+        for (size_t idx = 0; idx < KeyDesc->GetPartitions().size(); ++idx) {
+            const auto& partition = KeyDesc->GetPartitions()[idx];
             const ui64 shardId = partition.ShardId;
 
             auto [it, inserted] = ShardMap.emplace(
@@ -772,12 +773,12 @@ private:
                 range.From = KeyFromValues;
                 range.FromInclusive = KeyDesc->Range.InclusiveFrom;
             } else {
-                const auto& prevRange = *KeyDesc->Partitions[idx - 1].Range;
+                const auto& prevRange = *KeyDesc->GetPartitions()[idx - 1].Range;
                 range.From = prevRange.EndKeyPrefix;
                 range.FromInclusive = !prevRange.IsInclusive; // N.B. always true for now
             }
 
-            if (idx == KeyDesc->Partitions.size() - 1) {
+            if (idx == KeyDesc->GetPartitions().size() - 1) {
                 // Last shard in range
                 range.To = KeyToValues;
                 range.ToInclusive = KeyDesc->Range.InclusiveTo;
@@ -2393,7 +2394,7 @@ private:
 
         KeyDesc = std::move(request->ResultSet[0].KeyDescription);
 
-        if (KeyDesc->Partitions.empty()) {
+        if (KeyDesc->GetPartitions().empty()) {
             TString error = TStringBuilder() << "No partitions to read from '" << Settings.TablePath << "'";
             TXLOG_E(error);
             return ReplyAndDie(TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::WrongRequest, NKikimrIssues::TStatusIds::BAD_REQUEST, ctx);
@@ -2421,8 +2422,8 @@ private:
 
         THashSet<TShardState*> removed;
 
-        for (size_t idx = 0; idx < KeyDesc->Partitions.size(); ++idx) {
-            const auto& partition = KeyDesc->Partitions[idx];
+        for (size_t idx = 0; idx < KeyDesc->GetPartitions().size(); ++idx) {
+            const auto& partition = KeyDesc->GetPartitions()[idx];
             const ui64 shardId = partition.ShardId;
 
             TXLOG_T("Processing resolved shard ShardId# " << shardId);
@@ -2452,12 +2453,12 @@ private:
                 shardRange.From = KeyFromValues;
                 shardRange.FromInclusive = KeyDesc->Range.InclusiveFrom;
             } else {
-                const auto& prevRange = *KeyDesc->Partitions[idx - 1].Range;
+                const auto& prevRange = *KeyDesc->GetPartitions()[idx - 1].Range;
                 shardRange.From = prevRange.EndKeyPrefix;
                 shardRange.FromInclusive = !prevRange.IsInclusive; // N.B. always true for now
             }
 
-            if (idx == KeyDesc->Partitions.size() - 1) {
+            if (idx == KeyDesc->GetPartitions().size() - 1) {
                 // Last shard in range
                 shardRange.To = KeyToValues;
                 shardRange.ToInclusive = KeyDesc->Range.InclusiveTo;

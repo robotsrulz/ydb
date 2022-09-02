@@ -57,9 +57,8 @@ namespace NKikimr {
             if (!SelfVDiskId.SameGroupAndGeneration(SourceVDisk) ||
                 !SelfVDiskId.SameDisk(TargetVDisk)) {
                 auto result = std::make_unique<TEvBlobStorage::TEvVSyncFullResult>(NKikimrProto::ERROR, SelfVDiskId,
-                    Record.GetCookie(), Now, IFaceMonGroup->SyncFullResMsgsPtr(), nullptr, std::move(Ev->TraceId),
-                    Ev->GetChannel());
-                SendVDiskResponse(ctx, recipient, result.release(), *this, cookie);
+                    Record.GetCookie(), Now, IFaceMonGroup->SyncFullResMsgsPtr(), nullptr, Ev->GetChannel());
+                SendVDiskResponse(ctx, recipient, result.release(), cookie);
                 Die(ctx);
                 return;
             }
@@ -73,8 +72,8 @@ namespace NKikimr {
                         << " Marker# BSVSFH02");
                 auto result = std::make_unique<TEvBlobStorage::TEvVSyncFullResult>(NKikimrProto::NODATA, SelfVDiskId,
                     TSyncState(Db->GetVDiskIncarnationGuid(), DbBirthLsn), Record.GetCookie(), Now,
-                    IFaceMonGroup->SyncFullResMsgsPtr(), nullptr, std::move(Ev->TraceId), Ev->GetChannel());
-                SendVDiskResponse(ctx, recipient, result.release(), *this, cookie);
+                    IFaceMonGroup->SyncFullResMsgsPtr(), nullptr, Ev->GetChannel());
+                SendVDiskResponse(ctx, recipient, result.release(), cookie);
                 Die(ctx);
                 return;
             }
@@ -106,7 +105,7 @@ namespace NKikimr {
             TSyncState newSyncState(Db->GetVDiskIncarnationGuid(), syncedLsn);
             auto result = std::make_unique<TEvBlobStorage::TEvVSyncFullResult>(NKikimrProto::OK, SelfVDiskId,
                 newSyncState, Record.GetCookie(), Now, IFaceMonGroup->SyncFullResMsgsPtr(), nullptr,
-                std::move(Ev->TraceId), Ev->GetChannel());
+                Ev->GetChannel());
 
             // snapshotLsn is _always_ the last confirmed lsn
             THullDsSnap fullSnap = Hull->GetIndexSnapshot();

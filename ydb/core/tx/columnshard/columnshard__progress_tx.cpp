@@ -119,7 +119,7 @@ public:
 
         Self->ProgressTxInFlight = false;
         if (Self->PlanQueue) {
-            Self->EnqueueProgressTx();
+            Self->EnqueueProgressTx(ctx);
         }
         return true;
     }
@@ -132,7 +132,7 @@ public:
         }
 
         Self->UpdateBlobMangerCounters();
-        if (Self->BlobManager->TryMoveGCBarrier()) {
+        if (Self->BlobManager->CanCollectGarbage()) {
             Self->Execute(Self->CreateTxRunGc(), ctx);
         }
 
@@ -146,10 +146,10 @@ private:
     bool StartBackgroundActivities{false};
 };
 
-void TColumnShard::EnqueueProgressTx() {
+void TColumnShard::EnqueueProgressTx(const TActorContext& ctx) {
     if (!ProgressTxInFlight) {
         ProgressTxInFlight = true;
-        Execute(new TTxProgressTx(this), TlsActivationContext->AsActorContext());
+        Execute(new TTxProgressTx(this), ctx);
     }
 }
 

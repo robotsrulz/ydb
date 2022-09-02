@@ -7,7 +7,8 @@
 #include <ydb/core/grpc_services/grpc_request_proxy.h>
 #include <ydb/services/auth/grpc_service.h>
 #include <ydb/services/yq/grpc_service.h>
-#include <ydb/services/yq/private_grpc.h>
+#include <ydb/services/fq/grpc_service.h>
+#include <ydb/services/fq/private_grpc.h>
 #include <ydb/services/cms/grpc_service.h>
 #include <ydb/services/datastreams/grpc_service.h>
 #include <ydb/services/kesus/grpc_service.h>
@@ -28,7 +29,9 @@
 #include <ydb/services/rate_limiter/grpc_service.h>
 #include <ydb/services/persqueue_cluster_discovery/grpc_service.h>
 #include <ydb/services/persqueue_v1/persqueue.h>
+#include <ydb/services/persqueue_v1/topic.h>
 #include <ydb/services/persqueue_v1/grpc_pq_write.h>
+#include <ydb/services/monitoring/grpc_service.h>
 #include <ydb/services/yq/grpc_service.h>
 #include <ydb/core/yq/libs/control_plane_proxy/control_plane_proxy.h>
 #include <ydb/core/yq/libs/control_plane_storage/control_plane_storage.h>
@@ -218,6 +221,7 @@ namespace Tests {
             Runtime->GetAppData(nodeIdx).DomainsConfig.MergeFrom(Settings->AppConfig.GetDomainsConfig());
             Runtime->GetAppData(nodeIdx).PersQueueGetReadSessionsInfoWorkerFactory = Settings->PersQueueGetReadSessionsInfoWorkerFactory.get();
             Runtime->GetAppData(nodeIdx).DataStreamsAuthFactory = Settings->DataStreamsAuthFactory.get();
+            Runtime->GetAppData(nodeIdx).PersQueueMirrorReaderFactory = Settings->PersQueueMirrorReaderFactory.get();
 
             SetupConfigurators(nodeIdx);
             SetupProxies(nodeIdx);
@@ -258,7 +262,7 @@ namespace Tests {
         auto grpcMon = system->Register(NGRpcService::CreateGrpcMonService(), TMailboxType::ReadAsFilled);
         system->RegisterLocalService(NGRpcService::GrpcMonServiceId(), grpcMon);
 
-        GRpcServerRootCounters = MakeIntrusive<NMonitoring::TDynamicCounters>();
+        GRpcServerRootCounters = MakeIntrusive<::NMonitoring::TDynamicCounters>();
         auto& counters = GRpcServerRootCounters;
 
         auto& appData = Runtime->GetAppData();
@@ -303,26 +307,30 @@ namespace Tests {
         future.Subscribe(startCb);
 
         GRpcServer->AddService(grpcService);
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbExportService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbImportService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbSchemeService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbTableService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbScriptingService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcOperationService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::V1::TGRpcPersQueueService(system, counters, NMsgBusProxy::CreatePersQueueMetaCacheV2Id(), grpcRequestProxyId));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbExportService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbImportService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbSchemeService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbTableService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbScriptingService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcOperationService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::V1::TGRpcPersQueueService(system, counters, NMsgBusProxy::CreatePersQueueMetaCacheV2Id(), grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::V1::TGRpcTopicService(system, counters, NMsgBusProxy::CreatePersQueueMetaCacheV2Id(), grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::V1::TGRpcTopicServiceTx(system, counters, grpcRequestProxyId));
         GRpcServer->AddService(new NGRpcService::TGRpcPQClusterDiscoveryService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NKesus::TKesusGRpcService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcCmsService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcDiscoveryService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbExperimentalService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbClickhouseInternalService(system, counters, appData.InFlightLimiterRegistry, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbS3InternalService(system, counters, grpcRequestProxyId));
+        GRpcServer->AddService(new NKesus::TKesusGRpcService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcCmsService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcDiscoveryService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbExperimentalService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbClickhouseInternalService(system, counters, appData.InFlightLimiterRegistry, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbS3InternalService(system, counters, grpcRequestProxyId, true));
         GRpcServer->AddService(new NQuoter::TRateLimiterGRpcService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbLongTxService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcDataStreamsService(system, counters, grpcRequestProxyId));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbLongTxService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcDataStreamsService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcMonitoringService(system, counters, grpcRequestProxyId, true));
         if (Settings->EnableYq) {
             GRpcServer->AddService(new NGRpcService::TGRpcYandexQueryService(system, counters, grpcRequestProxyId));
-            GRpcServer->AddService(new NGRpcService::TGRpcYqPrivateTaskService(system, counters, grpcRequestProxyId));
+            GRpcServer->AddService(new NGRpcService::TGRpcFederatedQueryService(system, counters, grpcRequestProxyId));
+            GRpcServer->AddService(new NGRpcService::TGRpcFqPrivateTaskService(system, counters, grpcRequestProxyId));
         }
         if (const auto& factory = Settings->GrpcServiceFactory) {
             // All services enabled by default for ut
@@ -331,8 +339,8 @@ namespace Tests {
                 GRpcServer->AddService(service);
             }
         }
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbLogStoreService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcAuthService(system, counters, grpcRequestProxyId));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbLogStoreService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcAuthService(system, counters, grpcRequestProxyId, true));
         GRpcServer->Start();
     }
 
@@ -364,17 +372,17 @@ namespace Tests {
     void TServer::CreateBootstrapTablets() {
         const ui32 domainId = Settings->Domain;
         Y_VERIFY(TDomainsInfo::MakeTxAllocatorIDFixed(domainId, 1) == ChangeStateStorage(TxAllocator, domainId));
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(TxAllocator, domainId), TTabletTypes::TX_ALLOCATOR), &CreateTxAllocator);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(TxAllocator, domainId), TTabletTypes::TxAllocator), &CreateTxAllocator);
         Y_VERIFY(TDomainsInfo::MakeTxCoordinatorIDFixed(domainId, 1) == ChangeStateStorage(Coordinator, domainId));
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(Coordinator, domainId), TTabletTypes::FLAT_TX_COORDINATOR), &CreateFlatTxCoordinator);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(Coordinator, domainId), TTabletTypes::Coordinator), &CreateFlatTxCoordinator);
         Y_VERIFY(TDomainsInfo::MakeTxMediatorIDFixed(domainId, 1) == ChangeStateStorage(Mediator, domainId));
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(Mediator, domainId), TTabletTypes::TX_MEDIATOR), &CreateTxMediator);
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(SchemeRoot, domainId), TTabletTypes::FLAT_SCHEMESHARD), &CreateFlatTxSchemeShard);
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(Hive, domainId), TTabletTypes::FLAT_HIVE), &CreateDefaultHive);
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(MakeBSControllerID(domainId), TTabletTypes::FLAT_BS_CONTROLLER), &CreateFlatBsController);
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(MakeTenantSlotBrokerID(domainId), TTabletTypes::TENANT_SLOT_BROKER), &NTenantSlotBroker::CreateTenantSlotBroker);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(Mediator, domainId), TTabletTypes::Mediator), &CreateTxMediator);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(SchemeRoot, domainId), TTabletTypes::SchemeShard), &CreateFlatTxSchemeShard);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(Hive, domainId), TTabletTypes::Hive), &CreateDefaultHive);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(MakeBSControllerID(domainId), TTabletTypes::BSController), &CreateFlatBsController);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(MakeTenantSlotBrokerID(domainId), TTabletTypes::TenantSlotBroker), &NTenantSlotBroker::CreateTenantSlotBroker);
         if (Settings->EnableConsole)
-            CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(MakeConsoleID(domainId), TTabletTypes::CONSOLE), &NConsole::CreateConsole);
+            CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(MakeConsoleID(domainId), TTabletTypes::Console), &NConsole::CreateConsole);
     }
 
     void TServer::SetupStorage() {
@@ -496,59 +504,59 @@ namespace Tests {
     }
 
     void TServer::SetupLocalConfig(TLocalConfig &localConfig, const NKikimr::TAppData &appData) {
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.Dummy] =
+        localConfig.TabletClassInfo[TTabletTypes::Dummy] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateFlatDummyTablet, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.DataShard] =
+        localConfig.TabletClassInfo[TTabletTypes::DataShard] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateDataShard, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.KeyValue] =
+        localConfig.TabletClassInfo[TTabletTypes::KeyValue] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateKeyValueFlat, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.ColumnShard] =
+        localConfig.TabletClassInfo[TTabletTypes::ColumnShard] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateColumnShard, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.PersQueue] =
+        localConfig.TabletClassInfo[TTabletTypes::PersQueue] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreatePersQueue, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.PersQueueReadBalancer] =
+        localConfig.TabletClassInfo[TTabletTypes::PersQueueReadBalancer] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreatePersQueueReadBalancer, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.Coordinator] =
+        localConfig.TabletClassInfo[TTabletTypes::Coordinator] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateFlatTxCoordinator, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.Mediator] =
+        localConfig.TabletClassInfo[TTabletTypes::Mediator] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateTxMediator, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.Kesus] =
+        localConfig.TabletClassInfo[TTabletTypes::Kesus] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &NKesus::CreateKesusTablet, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.SchemeShard] =
+        localConfig.TabletClassInfo[TTabletTypes::SchemeShard] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateFlatTxSchemeShard, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.Hive] =
+        localConfig.TabletClassInfo[TTabletTypes::Hive] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &CreateDefaultHive, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.SysViewProcessor] =
+        localConfig.TabletClassInfo[TTabletTypes::SysViewProcessor] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &NSysView::CreateSysViewProcessorForTests, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.SequenceShard] =
+        localConfig.TabletClassInfo[TTabletTypes::SequenceShard] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &NSequenceShard::CreateSequenceShard, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
-        localConfig.TabletClassInfo[appData.DefaultTabletTypes.ReplicationController] =
+        localConfig.TabletClassInfo[TTabletTypes::ReplicationController] =
             TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
                 &NReplication::CreateController, TMailboxType::Revolving, appData.UserPoolId,
                 TMailboxType::Revolving, appData.SystemPoolId));
@@ -666,7 +674,7 @@ namespace Tests {
         {
             if (Settings->PQConfig.GetEnabled() == true) {
                 IActor *pqMetaCache = NMsgBusProxy::NPqMetaCacheV2::CreatePQMetaCache(
-                        new NMonitoring::TDynamicCounters(), TDuration::Seconds(1)
+                        new ::NMonitoring::TDynamicCounters(), TDuration::Seconds(1)
                 );
 
                 TActorId pqMetaCacheId = Runtime->Register(pqMetaCache, nodeIdx);
@@ -711,6 +719,11 @@ namespace Tests {
         if (Settings->EnableYq) {
             NYq::NConfig::TConfig protoConfig;
             protoConfig.SetEnabled(true);
+
+            protoConfig.MutableQuotasManager()->SetEnabled(true);
+            protoConfig.MutableRateLimiter()->SetEnabled(false);
+            protoConfig.MutableRateLimiter()->SetControlPlaneEnabled(true); // Will answer on creation requests and give empty kesus name
+            protoConfig.MutableRateLimiter()->SetDataPlaneEnabled(true);
 
             protoConfig.MutableCommon()->SetIdsPrefix("id");
 
@@ -804,7 +817,7 @@ namespace Tests {
             };
 
             const auto ydbCredFactory = NKikimr::CreateYdbCredentialsProviderFactory;
-            auto counters = MakeIntrusive<NMonitoring::TDynamicCounters>();
+            auto counters = MakeIntrusive<::NMonitoring::TDynamicCounters>();
             YqSharedResources = NYq::CreateYqSharedResources(protoConfig, ydbCredFactory, counters);
             NYq::Init(
                 protoConfig,
@@ -817,7 +830,8 @@ namespace Tests {
                 NKikimr::NFolderService::CreateMockFolderServiceActor,
                 NYq::CreateMockYqAuditServiceActor,
                 ydbCredFactory,
-                /*IcPort = */0
+                /*IcPort = */0,
+                {}
                 );
             NYq::InitTest(Runtime.Get(), port, Settings->GrpcPort, YqSharedResources);
         }
@@ -857,8 +871,8 @@ namespace Tests {
         if (!Runtime)
             ythrow TWithBackTrace<yexception>() << "Server is redirected";
 
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(DummyTablet1, Settings->Domain), TTabletTypes::TX_DUMMY), &CreateFlatDummyTablet);
-        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(DummyTablet2, Settings->Domain), TTabletTypes::TX_DUMMY), &CreateFlatDummyTablet);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(DummyTablet1, Settings->Domain), TTabletTypes::Dummy), &CreateFlatDummyTablet);
+        CreateTestBootstrapper(*Runtime, CreateTestTabletInfo(ChangeStateStorage(DummyTablet2, Settings->Domain), TTabletTypes::Dummy), &CreateFlatDummyTablet);
     }
 
     TTestActorRuntime* TServer::GetRuntime() const {
@@ -883,10 +897,6 @@ namespace Tests {
     }
 
     TServer::~TServer() {
-        if (Runtime->GetAppData().Mon) {
-            Runtime->GetAppData().Mon->Stop();
-        }
-
         if (GRpcServer) {
             GRpcServer->Stop();
         }
@@ -1347,7 +1357,7 @@ namespace Tests {
 
     NMsgBusProxy::EResponseStatus TClient::CreateTableWithUniformShardedIndex(const TString& parent,
         const NKikimrSchemeOp::TTableDescription &table, const TString& indexName, const TVector<TString> indexColumns,
-        const TVector<TString> dataColumns, TDuration timeout)
+        NKikimrSchemeOp::EIndexType type, const TVector<TString> dataColumns, TDuration timeout)
     {
         TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
         auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
@@ -1367,7 +1377,7 @@ namespace Tests {
                 indexDesc->AddDataColumnNames(c);
             }
 
-            indexDesc->SetType(NKikimrSchemeOp::EIndexType::EIndexTypeGlobal);
+            indexDesc->SetType(type);
             indexDesc->MutableIndexImplTableDescription()->SetUniformPartitionsCount(16);
         }
 
@@ -1475,14 +1485,14 @@ namespace Tests {
         return (NMsgBusProxy::EResponseStatus)response.GetStatus();
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateOlapTable(const TString& parent, const TString& scheme) {
+    NMsgBusProxy::EResponseStatus TClient::CreateColumnTable(const TString& parent, const TString& scheme) {
         NKikimrSchemeOp::TColumnTableDescription table;
         bool parseOk = ::google::protobuf::TextFormat::ParseFromString(scheme, &table);
         UNIT_ASSERT(parseOk);
-        return CreateOlapTable(parent, table);
+        return CreateColumnTable(parent, table);
     }
 
-    NMsgBusProxy::EResponseStatus TClient::CreateOlapTable(const TString& parent,
+    NMsgBusProxy::EResponseStatus TClient::CreateColumnTable(const TString& parent,
                                                            const NKikimrSchemeOp::TColumnTableDescription& table) {
         auto request = std::make_unique<NMsgBusProxy::TBusSchemeOperation>();
         auto* op = request->Record.MutableTransaction()->MutableModifyScheme();
@@ -1517,6 +1527,24 @@ namespace Tests {
         op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterTable);
         op->SetWorkingDir(parent);
         op->MutableAlterTable()->CopyFrom(alter);
+        TAutoPtr<NBus::TBusMessage> reply;
+        if (userToken) {
+            request->Record.SetSecurityToken(userToken);
+        }
+        NBus::EMessageStatus status = SendAndWaitCompletion(request.Release(), reply);
+        UNIT_ASSERT_VALUES_EQUAL(status, NBus::MESSAGE_OK);
+        return dynamic_cast<NMsgBusProxy::TBusResponse *>(reply.Release());
+    }
+
+    TAutoPtr<NMsgBusProxy::TBusResponse> TClient::MoveIndex(const TString& table, const TString& src, const TString& dst, bool allowOverwrite, const TString& userToken) {
+        TAutoPtr<NMsgBusProxy::TBusSchemeOperation> request(new NMsgBusProxy::TBusSchemeOperation());
+        auto *op = request->Record.MutableTransaction()->MutableModifyScheme();
+        op->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpMoveIndex);
+        auto descr = op->MutableMoveIndex();
+        descr->SetTablePath(table);
+        descr->SetSrcPath(src);
+        descr->SetDstPath(dst);
+        descr->SetAllowOverwrite(allowOverwrite);
         TAutoPtr<NBus::TBusMessage> reply;
         if (userToken) {
             request->Record.SetSecurityToken(userToken);

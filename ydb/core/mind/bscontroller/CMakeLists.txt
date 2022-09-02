@@ -6,6 +6,9 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
+add_subdirectory(ut_bscontroller)
+add_subdirectory(ut_selfheal)
 
 add_library(core-mind-bscontroller)
 target_link_libraries(core-mind-bscontroller PUBLIC
@@ -17,11 +20,13 @@ target_link_libraries(core-mind-bscontroller PUBLIC
   ydb-core-blobstorage
   core-blobstorage-base
   core-blobstorage-groupinfo
+  ydb-core-blob_depot
   core-engine-minikql
   ydb-core-protos
   core-sys_view-common
   ydb-core-tablet
   ydb-core-tablet_flat
+  core-tx-tx_proxy
 )
 target_sources(core-mind-bscontroller PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/bsc.cpp
@@ -52,8 +57,10 @@ target_sources(core-mind-bscontroller PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/select_groups.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/self_heal.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/stat_processor.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/storage_stats_calculator.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/sys_view.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/update_group_latencies.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/update_last_seen_ready.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/update_seen_operational.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/mind/bscontroller/virtual_group.cpp
 )

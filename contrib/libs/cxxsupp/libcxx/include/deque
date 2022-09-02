@@ -160,12 +160,20 @@ template <class T, class Allocator, class Predicate>
 
 */
 
+#include <__algorithm/copy.h>
+#include <__algorithm/copy_backward.h>
+#include <__algorithm/equal.h>
+#include <__algorithm/fill_n.h>
+#include <__algorithm/lexicographical_compare.h>
+#include <__algorithm/min.h>
+#include <__algorithm/remove.h>
+#include <__algorithm/remove_if.h>
+#include <__algorithm/unwrap_iter.h>
+#include <__assert>
 #include <__config>
-#include <__debug>
 #include <__iterator/iterator_traits.h>
 #include <__split_buffer>
 #include <__utility/forward.h>
-#include <algorithm>
 #include <compare>
 #include <initializer_list>
 #include <iterator>
@@ -175,7 +183,7 @@ template <class T, class Allocator, class Predicate>
 #include <version>
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
-#pragma GCC system_header
+#  pragma GCC system_header
 #endif
 
 _LIBCPP_PUSH_MACROS
@@ -1459,7 +1467,7 @@ public:
         _NOEXCEPT_(!__alloc_traits::propagate_on_container_swap::value ||
                    __is_nothrow_swappable<allocator_type>::value);
 #endif
-    _LIBCPP_INLINE_VISIBILITY
+    _LIBCPP_REINITIALIZES_OBJECT _LIBCPP_INLINE_VISIBILITY
     void clear() _NOEXCEPT;
 
     _LIBCPP_INLINE_VISIBILITY
@@ -2940,6 +2948,7 @@ deque<_Tp, _Allocator>::swap(deque& __c)
 }
 
 template <class _Tp, class _Allocator>
+_LIBCPP_REINITIALIZES_OBJECT
 inline
 void
 deque<_Tp, _Allocator>::clear() _NOEXCEPT

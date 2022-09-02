@@ -42,19 +42,21 @@ TString BuildColumnName(const TExprBase column) {
 class TDqsLogicalOptProposalTransformer : public TOptimizeTransformerBase {
 public:
     TDqsLogicalOptProposalTransformer(TTypeAnnotationContext* typeCtx, const TDqConfiguration::TPtr& config)
-        : TOptimizeTransformerBase(typeCtx, NLog::EComponent::ProviderDq, {})
+        : TOptimizeTransformerBase(/*TODO*/nullptr, NLog::EComponent::ProviderDq, {})
         , Config(config)
+        , TypesCtx(*typeCtx)
     {
 #define HNDL(name) "DqsLogical-"#name, Hndl(&TDqsLogicalOptProposalTransformer::name)
         AddHandler(0, &TCoUnorderedBase::Match, HNDL(SkipUnordered));
         AddHandler(0, &TCoAggregate::Match, HNDL(RewriteAggregate));
         AddHandler(0, &TCoTake::Match, HNDL(RewriteTakeSortToTopSort));
         AddHandler(0, &TCoEquiJoin::Match, HNDL(RewriteEquiJoin));
-        AddHandler(0, &TCoCalcOverWindow::Match, HNDL(ExpandWindowFunctions));
+        AddHandler(0, &TCoCalcOverWindowBase::Match, HNDL(ExpandWindowFunctions));
         AddHandler(0, &TCoCalcOverWindowGroup::Match, HNDL(ExpandWindowFunctions));
         AddHandler(0, &TCoFlatMapBase::Match, HNDL(FlatMapOverExtend));
         AddHandler(0, &TDqQuery::Match, HNDL(MergeQueriesWithSinks));
         AddHandler(0, &TDqStageBase::Match, HNDL(UnorderedInStage));
+        AddHandler(0, &TCoSqlIn::Match, HNDL(SqlInDropCompact));
 #undef HNDL
     }
 
@@ -81,7 +83,7 @@ protected:
             if (hopSetting) {
                 return RewriteAsHoppingWindow(node, ctx, input.Cast()).Cast();
             } else {
-                return DqRewriteAggregate(node, ctx);
+                return DqRewriteAggregate(node, ctx, TypesCtx, true);
             }
         }
         return node;
@@ -124,6 +126,10 @@ protected:
 
     TMaybeNode<TExprBase> UnorderedInStage(TExprBase node, TExprContext& ctx) const {
         return DqUnorderedInStage(node, TDqReadWrapBase::Match, ctx, Types);
+    }
+
+    TMaybeNode<TExprBase> SqlInDropCompact(TExprBase node, TExprContext& ctx) const {
+        return DqSqlInDropCompact(node, ctx);
     }
 
 private:
@@ -484,14 +490,14 @@ private:
             const auto tuple = handler.Cast<TCoAggregateTuple>();
 
             TMaybeNode<TExprBase> applier;
-            if (tuple.Trait().InitHandler().Args().Size() == 1) {
+            if (tuple.Trait().Cast<TCoAggregationTraits>().InitHandler().Args().Size() == 1) {
                 applier = Build<TExprApplier>(ctx, pos)
-                    .Apply(tuple.Trait().InitHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().InitHandler())
                     .With(0, initItemArg)
                     .Done();
             } else {
                 applier = Build<TExprApplier>(ctx, pos)
-                    .Apply(tuple.Trait().InitHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().InitHandler())
                     .With(0, initItemArg)
                     .With<TCoUint32>(1)
                         .Literal().Build(ToString(index))
@@ -536,15 +542,15 @@ private:
                 .Done();
 
             TMaybeNode<TExprBase> applier;
-            if (tuple.Trait().UpdateHandler().Args().Size() == 2) {
+            if (tuple.Trait().Cast<TCoAggregationTraits>().UpdateHandler().Args().Size() == 2) {
                 applier = Build<TExprApplier>(ctx, pos)
-                    .Apply(tuple.Trait().UpdateHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().UpdateHandler())
                     .With(0, updateItemArg)
                     .With(1, member)
                     .Done();
             } else {
                 applier = Build<TExprApplier>(ctx, pos)
-                    .Apply(tuple.Trait().UpdateHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().UpdateHandler())
                     .With(0, updateItemArg)
                     .With(1, member)
                     .With<TCoUint32>(2)
@@ -595,7 +601,7 @@ private:
             structItems.push_back(Build<TCoNameValueTuple>(ctx, pos)
                 .Name().Build(columnName)
                 .Value<TExprApplier>()
-                    .Apply(tuple.Trait().MergeHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().MergeHandler())
                     .With(0, member1)
                     .With(1, member2)
                     .Build()
@@ -655,7 +661,7 @@ private:
                 structItems.push_back(Build<TCoNameValueTuple>(ctx, pos)
                     .Name().Build(compoundColumnName)
                     .Value<TExprApplier>()
-                        .Apply(tuple.Trait().FinishHandler())
+                        .Apply(tuple.Trait().Cast<TCoAggregationTraits>().FinishHandler())
                         .With(0, member)
                         .Build()
                     .Done());
@@ -665,7 +671,7 @@ private:
 
             if (const auto namesList = tuple.ColumnName().Maybe<TCoAtomList>()) {
                 const auto expApplier = Build<TExprApplier>(ctx, pos)
-                    .Apply(tuple.Trait().FinishHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().FinishHandler())
                     .With(0, member)
                     .Done();
 
@@ -724,7 +730,7 @@ private:
             structItems.push_back(Build<TCoNameValueTuple>(ctx, pos)
                 .Name().Build(columnName)
                 .Value<TExprApplier>()
-                    .Apply(tuple.Trait().SaveHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().SaveHandler())
                     .With(0, member)
                     .Build()
                 .Done());
@@ -760,7 +766,7 @@ private:
             structItems.push_back(Build<TCoNameValueTuple>(ctx, pos)
                 .Name().Build(columnName)
                 .Value<TExprApplier>()
-                    .Apply(tuple.Trait().LoadHandler())
+                    .Apply(tuple.Trait().Cast<TCoAggregationTraits>().LoadHandler())
                     .With(0, member)
                     .Build()
                 .Done());
@@ -777,6 +783,7 @@ private:
 
 private:
     TDqConfiguration::TPtr Config;
+    TTypeAnnotationContext& TypesCtx;
 };
 
 THolder<IGraphTransformer> CreateDqsLogOptTransformer(TTypeAnnotationContext* typeCtx, const TDqConfiguration::TPtr& config) {

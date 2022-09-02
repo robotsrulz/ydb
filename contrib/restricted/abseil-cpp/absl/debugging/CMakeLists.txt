@@ -6,6 +6,27 @@
 # original buildsystem will not be accepted.
 
 
-if (UNIX)
-  include(CMakeLists.linux.txt)
-endif()
+
+add_library(abseil-cpp-absl-debugging)
+target_compile_options(abseil-cpp-absl-debugging PRIVATE
+  -DNOMINMAX
+  -Wno-everything
+)
+target_include_directories(abseil-cpp-absl-debugging PUBLIC
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp
+)
+target_link_libraries(abseil-cpp-absl-debugging PUBLIC
+  contrib-libs-cxxsupp
+  abseil-cpp-absl-base
+)
+target_sources(abseil-cpp-absl-debugging PRIVATE
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/failure_signal_handler.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/internal/address_is_readable.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/internal/demangle.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/internal/elf_mem_image.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/internal/examine_stack.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/internal/vdso_support.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/leak_check.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/stacktrace.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/debugging/symbolize.cc
+)

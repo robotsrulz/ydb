@@ -215,7 +215,7 @@ class TManyPuts : public TActorBootstrapped<TManyPuts> {
     void Bootstrap(const TActorContext &ctx) {
         Become(&TThis::StateWriteFunc);
 
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters = new NMonitoring::TDynamicCounters;
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters = new ::NMonitoring::TDynamicCounters;
         TIntrusivePtr<NBackpressure::TFlowRecord> flowRecord(new NBackpressure::TFlowRecord);
         QueueActorId = ctx.Register(CreateVDiskBackpressureClient(Conf->GroupInfo, VDiskInfo.VDiskID,
             NKikimrBlobStorage::PutTabletLog, counters, new TBSProxyContext{counters}, {}, "PutTabletLog", 0, false,
@@ -402,7 +402,7 @@ class TManyMultiPuts : public TActorBootstrapped<TManyMultiPuts> {
     void Bootstrap(const TActorContext &ctx) {
         Become(&TThis::StateWriteFunc);
 
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters = new NMonitoring::TDynamicCounters;
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters = new ::NMonitoring::TDynamicCounters;
         TIntrusivePtr<NBackpressure::TFlowRecord> flowRecord(new NBackpressure::TFlowRecord);
         QueueActorId = ctx.Register(CreateVDiskBackpressureClient(Conf->GroupInfo, VDiskInfo.VDiskID,
             NKikimrBlobStorage::PutTabletLog, counters, new TBSProxyContext{counters}, {}, "PutTabletLog", 0, false,
@@ -448,7 +448,7 @@ class TManyMultiPuts : public TActorBootstrapped<TManyMultiPuts> {
             TVDiskIdShort mainVDiskId = TIngress::GetMainReplica(&Conf->GroupInfo->GetTopology(), logoBlobID);
             if (mainVDiskId == VDiskInfo.VDiskID) {
                 ui64 cookieValue = Step;
-                vMultiPut->AddVPut(logoBlobID, MsgData, &cookieValue);
+                vMultiPut->AddVPut(logoBlobID, MsgData, &cookieValue, nullptr, NWilson::TTraceId());
                 putCount++;
 
                 Step++;

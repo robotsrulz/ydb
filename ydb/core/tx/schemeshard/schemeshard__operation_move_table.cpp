@@ -109,7 +109,7 @@ public:
                 Y_VERIFY(dstIndexPath.IsResolved());
 
                 auto remap = move->AddReMapIndexes();
-                PathIdFromPathId(srcIndexPath->PathId, remap->MutablePathId());
+                PathIdFromPathId(srcIndexPath->PathId, remap->MutableSrcPathId());
                 PathIdFromPathId(dstIndexPath->PathId, remap->MutableDstPathId());
             }
 
@@ -143,14 +143,15 @@ void MarkSrcDropped(NIceDb::TNiceDb& db,
                     const TTxState& txState,
                     TPath& srcPath)
 {
+    const auto isBackupTable = context.SS->IsBackupTable(srcPath->PathId);
+    srcPath.Parent()->DecAliveChildren(1, isBackupTable);
+    srcPath.DomainInfo()->DecPathsInside(1, isBackupTable);
+
     srcPath->SetDropped(txState.PlanStep, operationId.GetTxId());
     context.SS->PersistDropStep(db, srcPath->PathId, txState.PlanStep, operationId);
     context.SS->Tables.at(srcPath->PathId)->DetachShardsStats();
     context.SS->PersistRemoveTable(db, srcPath->PathId, context.Ctx);
     context.SS->PersistUserAttributes(db, srcPath->PathId, srcPath->UserAttrs, nullptr);
-
-    srcPath.Parent()->DecAliveChildren();
-    srcPath.DomainInfo()->DecPathsInside();
 
     IncParentDirAlterVersionWithRepublish(operationId, srcPath, context);
 }
@@ -699,6 +700,10 @@ public:
 
         if (!context.SS->CheckLocks(srcPath.Base()->PathId, Transaction, errStr)) {
             result->SetError(NKikimrScheme::StatusMultipleModifications, errStr);
+            return result;
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxMoveTable, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
             return result;
         }
 

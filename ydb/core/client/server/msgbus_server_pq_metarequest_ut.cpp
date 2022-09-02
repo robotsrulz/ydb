@@ -59,6 +59,13 @@ protected:
         // Logging
         Runtime->SetLogPriority(NKikimrServices::PERSQUEUE, NLog::PRI_DEBUG);
         Runtime->GetAppData(0).PQConfig.SetEnabled(true);
+
+        // NOTE(shmel1k@): KIKIMR-14221
+        Runtime->GetAppData(0).PQConfig.SetTopicsAreFirstClassCitizen(false);
+        Runtime->GetAppData(0).PQConfig.SetRequireCredentialsInNewProtocol(false);
+        Runtime->GetAppData(0).PQConfig.SetClusterTablePath("/Root/PQ/Config/V2/Cluster");
+        Runtime->GetAppData(0).PQConfig.SetVersionTablePath("/Root/PQ/Config/V2/Versions");
+        Runtime->GetAppData(0).PQConfig.SetRoot("/Root/PQ");
     }
 
     void TearDown() override {
@@ -126,7 +133,7 @@ protected:
 
     TActorId StartBalancer(ui64 balancerTabletId) {
         TActorId id = CreateTestBootstrapper(*Runtime,
-                                       CreateTestTabletInfo(balancerTabletId, TTabletTypes::PERSQUEUE_READ_BALANCER, TErasureType::ErasureNone),
+                                       CreateTestTabletInfo(balancerTabletId, TTabletTypes::PersQueueReadBalancer, TErasureType::ErasureNone),
                                        &CreatePersQueueReadBalancer);
 
         TDispatchOptions options;
@@ -184,7 +191,7 @@ protected:
 
     TActorId StartPQTablet(ui64 tabletId) {
         TActorId id = CreateTestBootstrapper(*Runtime,
-                                       CreateTestTabletInfo(tabletId, TTabletTypes::PERSQUEUE, TErasureType::ErasureNone),
+                                       CreateTestTabletInfo(tabletId, TTabletTypes::PersQueue, TErasureType::ErasureNone),
                                        &CreatePersQueue);
 
         TDispatchOptions options;

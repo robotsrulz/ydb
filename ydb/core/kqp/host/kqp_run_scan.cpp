@@ -56,10 +56,14 @@ protected:
         YQL_ENSURE(false, "Rollback in ScanQuery tx");
     }
 
-    bool OnExecuterResult(NKikimrKqp::TExecuterTxResult&& execResult, TExprContext& ctx, bool commit) override {
-        Y_UNUSED(execResult);
+    bool OnExecuterResult(NKikimrKqp::TExecuterTxResult&& execResult, NLongTxService::TLockHandle&& lockHandle, TExprContext& ctx, bool commit) override {
         Y_UNUSED(ctx);
         Y_UNUSED(commit);
+        Y_UNUSED(lockHandle);
+
+        if (execResult.HasStats()) {
+            TransformCtx->QueryStats.AddExecutions()->Swap(execResult.MutableStats());
+        }
 
         return true;
     }
@@ -82,6 +86,12 @@ public:
             for (const auto& stage: phyTx.GetStages()) {
                 for (const auto& tableOp: stage.GetTableOps()) {
                     tablesSet.insert(tableOp.GetTable().GetPath());
+                }
+
+                for (const auto& input : stage.GetInputs()) {
+                    if (input.GetTypeCase() == NKqpProto::TKqpPhyConnection::kStreamLookup) {
+                        tablesSet.insert(input.GetStreamLookup().GetTable().GetPath());
+                    }
                 }
             }
         }

@@ -14,7 +14,7 @@
     #include <emmintrin.h>
 #endif
 
-namespace DB
+namespace NDB
 {
 
 namespace ErrorCodes
@@ -89,6 +89,14 @@ void NO_INLINE throwAtAssertionFailed(const char * s, ReadBuffer & buf)
         out << " at end of stream.";
     else
         out << " before: " << quote << String(buf.position(), std::min(SHOW_CHARS_ON_SYNTAX_ERROR, buf.buffer().end() - buf.position()));
+
+    throw ParsingException(out.str(), ErrorCodes::CANNOT_PARSE_INPUT_ASSERTION_FAILED);
+}
+
+void NO_INLINE throwTypeParseFailed(int column)
+{
+    WriteBufferFromOwnString out;
+    out << "Failed to parse type in column " << column << " of csv";
 
     throw ParsingException(out.str(), ErrorCodes::CANNOT_PARSE_INPUT_ASSERTION_FAILED);
 }
@@ -1119,7 +1127,7 @@ void skipToUnescapedNextLineOrEOF(ReadBuffer & buf)
     }
 }
 
-void saveUpToPosition(ReadBuffer & in, DB::Memory<> & memory, char * current)
+void saveUpToPosition(ReadBuffer & in, Memory<> & memory, char * current)
 {
     assert(current >= in.position());
     assert(current <= in.buffer().end());
@@ -1139,7 +1147,7 @@ void saveUpToPosition(ReadBuffer & in, DB::Memory<> & memory, char * current)
     in.position() = current;
 }
 
-bool loadAtPosition(ReadBuffer & in, DB::Memory<> & memory, char * & current)
+bool loadAtPosition(ReadBuffer & in, Memory<> & memory, char * & current)
 {
     assert(current <= in.buffer().end());
 

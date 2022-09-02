@@ -21,6 +21,7 @@ target_link_libraries(clicommands PUBLIC
   common
   lib-ydb_cli-dump
   lib-ydb_cli-import
+  topic
   cpp-client-draft
   cpp-client-ydb_discovery
   cpp-client-ydb_export
@@ -30,9 +31,12 @@ target_link_libraries(clicommands PUBLIC
   cpp-client-ydb_proto
   cpp-client-ydb_scheme
   cpp-client-ydb_table
+  cpp-client-ydb_topic
+  ydb_types-credentials-login
 )
 target_sources(clicommands PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/stock_workload.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/kv_workload.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_command.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_profile.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_root_common.cpp
@@ -42,7 +46,7 @@ target_sources(clicommands PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_service_operation.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_service_scheme.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_service_scripting.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_service_stream.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_service_topic.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_service_table.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_tools.cpp
   ${CMAKE_SOURCE_DIR}/ydb/public/lib/ydb_cli/commands/ydb_workload.cpp

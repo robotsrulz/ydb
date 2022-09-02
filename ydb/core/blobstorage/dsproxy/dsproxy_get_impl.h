@@ -5,7 +5,6 @@
 #include "dsproxy_cookies.h"
 #include "dsproxy_mon.h"
 #include <ydb/core/blobstorage/vdisk/common/vdisk_events.h>
-#include <ydb/core/blobstorage/base/wilson_events.h>
 #include <util/generic/set.h>
 
 namespace NKikimr {
@@ -50,6 +49,10 @@ class TGetImpl {
     const TString RequestPrefix;
 
     const bool PhantomCheck;
+    const bool Decommission;
+
+    std::optional<ui64> ReaderTabletId;
+    std::optional<ui32> ReaderTabletGeneration;
 
 public:
     TGetImpl(const TIntrusivePtr<TBlobStorageGroupInfo> &info, const TIntrusivePtr<TGroupQueues> &groupQueues,
@@ -68,6 +71,9 @@ public:
         , Blackboard(info, groupQueues, NKikimrBlobStorage::AsyncBlob, ev->GetHandleClass)
         , RequestPrefix(requestPrefix)
         , PhantomCheck(ev->PhantomCheck)
+        , Decommission(ev->Decommission)
+        , ReaderTabletId(ev->ReaderTabletId)
+        , ReaderTabletGeneration(ev->ReaderTabletGeneration)
     {
         Y_VERIFY(QuerySize > 0);
     }
@@ -77,6 +83,10 @@ public:
             false /*isIndexOnly*/, ForceBlockedGeneration, IsInternal, IsVerboseNoDataEnabled, CollectDebugInfo,
             ReportDetailedPartMap);
         ev->RestartCounter = counter;
+        ev->PhantomCheck = PhantomCheck;
+        ev->Decommission = Decommission;
+        ev->ReaderTabletId = ReaderTabletId;
+        ev->ReaderTabletGeneration = ReaderTabletGeneration;
         return ev;
     }
 
@@ -214,7 +224,7 @@ public:
             if (replyStatus == NKikimrProto::OK) {
                 // TODO(cthulhu): Verify shift and response size, and cookie
                 R_LOG_DEBUG_SX(logCtx, "BPG58", "Got# OK orderNumber# " << orderNumber << " vDiskId# " << vdisk.ToString());
-                Blackboard.AddResponseData(blobId, orderNumber, resultShift, resultBuffer);
+                Blackboard.AddResponseData(blobId, orderNumber, resultShift, resultBuffer, result.GetKeep(), result.GetDoNotKeep());
             } else if (replyStatus == NKikimrProto::NODATA) {
                 R_LOG_DEBUG_SX(logCtx, "BPG59", "Got# NODATA orderNumber# " << orderNumber
                         << " vDiskId# " << vdisk.ToString());
@@ -228,7 +238,7 @@ public:
             } else if (replyStatus == NKikimrProto::NOT_YET) {
                 R_LOG_DEBUG_SX(logCtx, "BPG67", "Got# NOT_YET orderNumber# " << orderNumber
                         << " vDiskId# " << vdisk.ToString());
-                Blackboard.AddNotYetResponse(blobId, orderNumber);
+                Blackboard.AddNotYetResponse(blobId, orderNumber, result.GetKeep(), result.GetDoNotKeep());
             } else {
                 Y_VERIFY(false, "Unexpected reply status# %s", NKikimrProto::EReplyStatus_Name(replyStatus).data());
             }
@@ -249,7 +259,7 @@ public:
             TDeque<std::unique_ptr<TEvBlobStorage::TEvVMultiPut>> &outVMultiPuts,
             TAutoPtr<TEvBlobStorage::TEvGetResult> &outGetResult);
 
-    void PrepareReply(NKikimrProto::EReplyStatus status, TLogContext &logCtx,
+    void PrepareReply(NKikimrProto::EReplyStatus status, TString errorReason, TLogContext &logCtx,
             TAutoPtr<TEvBlobStorage::TEvGetResult> &outGetResult);
 
     template <typename TVPutEvent>
@@ -302,12 +312,11 @@ protected:
             }
 
             case EStrategyOutcome::ERROR:
-                PrepareReply(NKikimrProto::ERROR, logCtx, outGetResult);
-                outGetResult->ErrorReason = outcome.ErrorReason;
+                PrepareReply(NKikimrProto::ERROR, outcome.ErrorReason, logCtx, outGetResult);
                 return false;
 
             case EStrategyOutcome::DONE:
-                PrepareReply(NKikimrProto::OK, logCtx, outGetResult);
+                PrepareReply(NKikimrProto::OK, "", logCtx, outGetResult);
                 return false;
         }
     }

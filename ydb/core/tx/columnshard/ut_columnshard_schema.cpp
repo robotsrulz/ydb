@@ -9,7 +9,6 @@ using NWrappers::NTestHelpers::TS3Mock;
 namespace {
 
 static const TVector<std::pair<TString, TTypeId>> testYdbSchema = TTestSchema::YdbSchema();
-//static const TVector<std::pair<TString, TTypeId>> testYdbPkSchema = TTestSchema::YdbPkSchema();
 
 std::shared_ptr<arrow::RecordBatch> UpdateColumn(std::shared_ptr<arrow::RecordBatch> batch, TString columnName, i64 seconds) {
     std::string name(columnName.c_str(), columnName.size());
@@ -106,7 +105,7 @@ void TestTtl(bool reboots, bool internal, TTestSchema::TTableSpecials spec = {},
 
     TActorId sender = runtime.AllocateEdgeActor();
     CreateTestBootstrapper(runtime,
-                           CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD),
+                           CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard),
                            &CreateColumnShard);
 
     TDispatchOptions options;
@@ -273,7 +272,7 @@ TestTiers(bool reboots, const std::vector<TString>& blobs, const std::vector<TTe
 
     TActorId sender = runtime.AllocateEdgeActor();
     CreateTestBootstrapper(runtime,
-                           CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD),
+                           CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard),
                            &CreateColumnShard);
 
     TDispatchOptions options;
@@ -429,6 +428,7 @@ void TestTwoHotTiers(bool reboot) {
     TestTwoTiers(spec, true, reboot);
 }
 
+#if 0
 void TestHotAndColdTiers(bool reboot) {
 #if 1
     TString bucket = "ydb";
@@ -464,6 +464,7 @@ void TestHotAndColdTiers(bool reboot) {
 
     TestTwoTiers(spec, false, reboot);
 }
+#endif
 
 void TestDrop(bool reboots) {
     TTestBasicRuntime runtime;
@@ -471,7 +472,7 @@ void TestDrop(bool reboots) {
 
     TActorId sender = runtime.AllocateEdgeActor();
     CreateTestBootstrapper(runtime,
-                           CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::COLUMNSHARD),
+                           CreateTestTabletInfo(TTestTxConfig::TxTablet0, TTabletTypes::ColumnShard),
                            &CreateColumnShard);
 
     TDispatchOptions options;
@@ -606,12 +607,14 @@ Y_UNIT_TEST_SUITE(TColumnShardTestSchema) {
     }
 
     Y_UNIT_TEST(ColdTiers) {
-        TestHotAndColdTiers(false);
+        // Disabled KIKIMR-14942
+        //TestHotAndColdTiers(false);
     }
 
     Y_UNIT_TEST(RebootColdTiers) {
-        NColumnShard::gAllowLogBatchingDefaultValue = false;
-        TestHotAndColdTiers(true);
+        // Disabled KIKIMR-14942
+        //NColumnShard::gAllowLogBatchingDefaultValue = false;
+        //TestHotAndColdTiers(true);
     }
 
     Y_UNIT_TEST(Drop) {

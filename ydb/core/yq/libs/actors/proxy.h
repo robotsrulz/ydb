@@ -3,6 +3,8 @@
 #include "run_actor_params.h"
 #include <util/datetime/base.h>
 
+#include <ydb/core/mon/mon.h>
+
 #include <ydb/core/yq/libs/events/events.h>
 #include <ydb/core/yq/libs/private_client/private_client.h>
 #include <ydb/core/yq/libs/shared_resources/db_pool.h>
@@ -14,7 +16,7 @@
 #include <ydb/library/yql/providers/dq/worker_manager/interface/counters.h>
 #include <ydb/library/yql/providers/dq/actors/proto_builder.h>
 #include <ydb/library/yql/providers/common/http_gateway/yql_http_gateway.h>
-#include <ydb/library/yql/providers/pq/cm_client/interface/client.h>
+#include <ydb/library/yql/providers/pq/cm_client/client.h>
 
 #include <library/cpp/actors/core/actorsystem.h>
 #include <library/cpp/time_provider/time_provider.h>
@@ -41,6 +43,7 @@ NActors::IActor* CreatePendingFetcher(
     const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
     const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
     const ::NYq::NConfig::TPingerConfig& pingerConfig,
+    const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
     const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
     TIntrusivePtr<ITimeProvider> timeProvider,
     TIntrusivePtr<IRandomProvider> randomProvider,
@@ -49,8 +52,9 @@ NActors::IActor* CreatePendingFetcher(
     NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
     NYql::IHTTPGateway::TPtr s3Gateway,
     ::NPq::NConfigurationManager::IConnections::TPtr pqCmConnections,
-    const NMonitoring::TDynamicCounterPtr& clientCounters,
-    const TString& tenantName
+    const ::NMonitoring::TDynamicCounterPtr& clientCounters,
+    const TString& tenantName,
+    NActors::TMon* monitoring
     );
 
 NActors::IActor* CreateRunActor(
@@ -72,8 +76,8 @@ NActors::IActor* CreateResultWriter(
     const TResultId& resultId,
     const TVector<TString>& columns,
     const TString& traceId,
-    const TInstant& deadline
-    );
+    const TInstant& deadline,
+    ui64 resultBytesLimit);
 
 NActors::IActor* CreatePingerActor(
     const TString& tenantName,
@@ -86,6 +90,20 @@ NActors::IActor* CreatePingerActor(
     TInstant deadline,
     const ::NYql::NCommon::TServiceCounters& queryCounters,
     TInstant createdAt);
+
+NActors::IActor* CreateRateLimiterResourceCreator(
+    const NActors::TActorId& parent,
+    const TString& ownerId,
+    const TString& queryId,
+    const TScope& scope,
+    const TString& tenant);
+
+NActors::IActor* CreateRateLimiterResourceDeleter(
+    const NActors::TActorId& parent,
+    const TString& ownerId,
+    const TString& queryId,
+    const TScope& scope,
+    const TString& tenant);
 
 TString MakeInternalError(const TString& text);
 

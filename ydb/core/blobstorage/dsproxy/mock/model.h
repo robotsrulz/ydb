@@ -29,6 +29,7 @@ namespace NFake {
 
             TBarrier() = default;
             TBarrier(const TBarrier& other) = default;
+            TBarrier& operator=(const TBarrier& other) = default;
 
             TBarrier(TGeneration recordGeneration, ui32 perGenerationCounter, TGeneration collectGeneration,
                     TStep collectStep)
@@ -47,6 +48,8 @@ namespace NFake {
         THashMap<std::pair<TTabletId, TChannel>, TBarrier> Barriers;
         THashMap<std::pair<TTabletId, TChannel>, TBarrier> HardBarriers;
         TMap<TLogoBlobID, TBlob> Blobs;
+        // By default only NKikimrBlobStorage::StatusIsValid is set
+        TStorageStatusFlags StorageStatusFlags = TStorageStatusFlags(NKikimrBlobStorage::StatusIsValid);
 
     public: // BS events interface : Handle(event) -> event
         TEvBlobStorage::TEvPutResult* Handle(TEvBlobStorage::TEvPut *msg) {
@@ -56,8 +59,12 @@ namespace NFake {
 
             // validate put against set blocks
             if (IsBlocked(id.TabletID(), id.Generation())) {
-                return new TEvBlobStorage::TEvPutResult(NKikimrProto::BLOCKED, id,
-                        GetStorageStatusFlags(), 0, 0.f);
+                return new TEvBlobStorage::TEvPutResult(NKikimrProto::BLOCKED, id, GetStorageStatusFlags(), 0, 0.f);
+            }
+            for (const auto& [tabletId, generation] : msg->ExtraBlockChecks) {
+                if (IsBlocked(tabletId, generation)) {
+                    return new TEvBlobStorage::TEvPutResult(NKikimrProto::BLOCKED, id, GetStorageStatusFlags(), 0, 0.f);
+                }
             }
 
             // check if this blob is not being collected -- writing such blob is a violation of BS contract
@@ -137,7 +144,7 @@ namespace NFake {
             if (it == Blocks.end()) {
                 Blocks.emplace(msg->TabletId, msg->Generation);
             } else if (msg->Generation <= it->second) {
-                status = NKikimrProto::RACE;
+                status = NKikimrProto::ALREADY;
             } else {
                 it->second = msg->Generation;
             }
@@ -314,7 +321,45 @@ namespace NFake {
 
     public: // Non-event model interaction methods
         TStorageStatusFlags GetStorageStatusFlags() const noexcept {
-            return TStorageStatusFlags(NKikimrBlobStorage::StatusIsValid);
+            return StorageStatusFlags;
+        }
+
+        void SetStorageStatusFlagsByColor(NKikimrBlobStorage::EStatusFlags color) {
+            // Only changes StorageStatusFlags if given EStatusFlags value is color 
+            // Also raises all color flags, that are 'greener' than given
+
+            ui32 newFlags = NKikimrBlobStorage::StatusIsValid;
+            switch (color) {
+            case NKikimrBlobStorage::StatusDiskSpaceBlack:
+                newFlags |= ui32(NKikimrBlobStorage::StatusDiskSpaceBlack);
+                [[fallthrough]];
+            case NKikimrBlobStorage::StatusDiskSpaceRed:
+                newFlags |= ui32(NKikimrBlobStorage::StatusDiskSpaceRed);
+                [[fallthrough]];
+            case NKikimrBlobStorage::StatusDiskSpaceOrange:
+                newFlags |= ui32(NKikimrBlobStorage::StatusDiskSpaceOrange);
+                [[fallthrough]];
+            case NKikimrBlobStorage::StatusDiskSpaceLightOrange:
+                newFlags |= ui32(NKikimrBlobStorage::StatusDiskSpaceLightOrange);
+                [[fallthrough]];
+            case NKikimrBlobStorage::StatusDiskSpaceYellowStop:
+                newFlags |= ui32(NKikimrBlobStorage::StatusDiskSpaceYellowStop);
+                [[fallthrough]];
+            case NKikimrBlobStorage::StatusDiskSpaceLightYellowMove:
+                newFlags |= ui32(NKikimrBlobStorage::StatusDiskSpaceLightYellowMove);
+                [[fallthrough]];
+            case NKikimrBlobStorage::StatusDiskSpaceCyan:
+                newFlags |= ui32(NKikimrBlobStorage::StatusDiskSpaceCyan);
+                break;
+            default:
+                newFlags = 0;
+                break;
+            }
+            StorageStatusFlags.Merge(newFlags);
+        }
+        
+        void SetStorageStatusFlags(TStorageStatusFlags flags) {
+            StorageStatusFlags = flags;
         }
 
         const TMap<TLogoBlobID, TBlob>& AllMyBlobs() const noexcept {

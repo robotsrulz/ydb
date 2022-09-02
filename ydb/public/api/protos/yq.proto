@@ -1,3 +1,5 @@
+// DEPRECATED!! use fq.proto
+
 syntax = "proto3";
 option cc_enable_arenas = true;
 
@@ -43,6 +45,10 @@ message Limits {
     // Common limits
     int64 memory_limit = 6 [(Ydb.value) = ">= 0"]; // Bytes
     google.protobuf.Duration result_ttl = 7;
+    oneof timeout {
+        google.protobuf.Duration execution_timeout = 8;
+        google.protobuf.Timestamp execution_deadline = 9;
+    }
 }
 
 enum ExecuteMode {
@@ -111,6 +117,10 @@ message QueryContent {
     string text = 5 [(Ydb.length).le = 102400]; // The text of the query itself
     bool automatic = 6; // Is used for queries that are created by automatic systems (robots, jdbc driver, ...)
     string description = 7 [(Ydb.length).le = 10240]; // Description of the query, there can be any text
+    // Specified settings for query's executor
+    // Well known settings are:
+    // "executor" - type of executor for this query
+    map<string, string> execution_settings = 10 [(Ydb.map_key).length.range = {min: 1, max: 100}, (Ydb.length).le = 4096];
 }
 
 message CommonMeta {
@@ -141,8 +151,13 @@ message QueryMeta {
     }
 
     CommonMeta common = 1;
-    google.protobuf.Timestamp started_at = 2;
-    google.protobuf.Timestamp finished_at = 3;
+    // Timeline (submitted_at <= started_at <= finished_at)
+    //  sumbitted_at
+    //             \ -> started_at
+    //                              \ -> finished_at
+    google.protobuf.Timestamp submitted_at = 14; // Time when the query was queued for execution
+    google.protobuf.Timestamp started_at = 2; // Start time of query execution
+    google.protobuf.Timestamp finished_at = 3; // Query completition time
     ExecuteMode execute_mode = 4;
     ComputeStatus status = 5;
     int64 last_job_query_revision = 6;
@@ -507,6 +522,7 @@ message ListConnectionsRequest {
         string name = 1 [(Ydb.length).le = 1024]; // connections whose name contains the filter.name substring
         bool created_by_me = 2;
         ConnectionSetting.ConnectionType connection_type = 3;
+        Acl.Visibility visibility = 4;
     }
     Filter filter = 4;
 }
@@ -617,6 +633,48 @@ message ObjectStorageBinding {
         map<string, string> format_setting = 3 [(Ydb.size).le = 100];
         string compression = 4 [(Ydb.length).le = 1024];
         Schema schema = 5;
+
+        /*
+        Partition projection is used to speed up the processing of highly partitioned
+        storages and automate the management of partitions. In partition projection, partition values and
+        locations are calculated from configuration rather than read from an object storage. Depending on the
+        specific characteristics of the query and underlying data, partition projection can significantly
+        reduce query execution time if it uses partitioning constraints on partition metadata retrieval. Similar
+        functionality is implemented in Athena: https://docs.aws.amazon.com/athena/latest/ug/partition-projection.html
+        Only enum, integer and date types are supported for path generation. When using projection, there must
+        be at least one element in partitioned_by. This behavior is introduced for symmetric query usage and
+        compatibility with Athena behavior.
+
+        Example:
+        projection = {
+            "projection.enabled" : "true", // used to enable and disable partitioning
+            "projection.city.type" : "enum", // to generate the city column, the enum type will be used (enumeration of objects separated by commas)
+            "projection.city.values" : "Washington,Roma", // column values city Washington or Roma
+            "projection.code.type" : "enum", // to generate the code column, the enum type will be used (enumeration of objects separated by commas)
+            "projection.code.values" : "0,1", // column values code 0 or 1
+            "storage.location.template" : "/${city}/${code}/${device_id}" // the template to which the generated values will be substituted
+        }
+        partitioned_by = [ "city", "device_id" ] // a subset of columns that are included in partitioning
+        - If storage.location.template and partitioned_by are specified together, then the rule from storage.location.template will be used.
+        - If only partitioned_by is specified, then the Hive Metastore format will be used for storage.location.template: "/city=${city}/device_id=${device_id}"
+        The list of paths that correspond to described projection and partitioned_by values are:
+        "/Washington/0/${device_id}", "/Washington/1/${device_id}", "/Roma/0/${device_id}", "/Roma/1/${device_id}"
+        */
+        map<string, string> projection = 6;
+
+        /*
+        By separating the data, it is possible to limit the amount of data scanned by each query, thereby improving
+        performance and reducing costs. Therefore, user data is partition by key (in practice, this is a partition by time).
+        The partitioned_by defines the keys on which to partition data. The columns described in partitioned_by
+        must be specified in the schema. If projection is not specified, the template will be generated according to
+        partitioned_by. Similar functionality is implemented in Athena: https://docs.aws.amazon.com/athena/latest/ug/partitions.html
+
+        Example:
+        partitioned_by = [ "city", "code", "device_id" ]
+        The corresponding storage.location.template will be as follows:
+        "/city=${city}/code=${code}/device_id=${device_id}"
+        */
+        repeated string partitioned_by = 7;
     }
 
     repeated Subset subset = 1;
@@ -640,6 +698,7 @@ message BriefBinding {
     string connection_id = 2 [(Ydb.length).range = {min: 1, max: 1024}];
     CommonMeta meta = 3;
     BindingSetting.BindingType type = 4;
+    Acl.Visibility visibility = 5;
 }
 
 message BindingContent {
@@ -680,6 +739,7 @@ message ListBindingsRequest {
         string connection_id = 1 [(Ydb.length).le = 1024];
         string name = 2 [(Ydb.length).le = 1024]; // bindings whose name contains the filter.name substring
         bool created_by_me = 3;
+        Acl.Visibility visibility = 4;
     }
     Filter filter = 4;
 }

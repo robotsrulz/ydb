@@ -17,7 +17,8 @@ target_include_directories(ydb-core-viewer-ut PRIVATE
 target_link_libraries(ydb-core-viewer-ut PUBLIC
   contrib-libs-cxxsupp
   yutil
-  library-cpp-lfalloc
+  cpp-malloc-tcmalloc
+  libs-tcmalloc-no_percpu_cache
   library-cpp-cpuid_check
   cpp-testing-unittest_main
   ydb-core-viewer
@@ -34,6 +35,7 @@ target_link_options(ydb-core-viewer-ut PRIVATE
   -ldl
 )
 target_sources(ydb-core-viewer-ut PRIVATE
+  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/http_router_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/viewer_ut.cpp
 )
 add_test(

@@ -16,11 +16,9 @@ target_compile_options(contrib-restricted-thrift PRIVATE
   -Wno-unused-parameter
   -Wno-unused-private-field
   -Wno-unused-variable
+  -Wno-everything
 )
 target_include_directories(contrib-restricted-thrift PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/restricted/thrift
-)
-target_include_directories(contrib-restricted-thrift PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/restricted/thrift
 )
 target_link_libraries(contrib-restricted-thrift PUBLIC
@@ -29,8 +27,10 @@ target_link_libraries(contrib-restricted-thrift PUBLIC
   OpenSSL::OpenSSL
   ZLIB::ZLIB
   contrib-restricted-boost
-  boost-libs-system
-  boost-libs-thread
+  restricted-boost-interprocess
+  restricted-boost-locale
+  restricted-boost-system
+  restricted-boost-thread
 )
 target_sources(contrib-restricted-thrift PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/restricted/thrift/thrift/TApplicationException.cpp

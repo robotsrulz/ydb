@@ -1,33 +1,31 @@
+#include "auth_factory.h"
 #include "events.h"
 #include "http_req.h"
-#include "auth_factory.h"
+#include "json_proto_conversion.h"
+#include "custom_metrics.h"
 
-#include <ydb/public/sdk/cpp/client/ydb_datastreams/datastreams.h>
-#include <ydb/public/sdk/cpp/client/ydb_persqueue_core/impl/common.h>
-#include <ydb/core/grpc_caching/cached_grpc_request_actor.h>
-#include <ydb/core/grpc_services/local_rpc/local_rpc.h>
-#include <ydb/core/protos/serverless_proxy_config.pb.h>
-#include <ydb/services/datastreams/shard_iterator.h>
-#include <ydb/services/datastreams/next_token.h>
-#include <ydb/services/datastreams/datastreams_proxy.h>
-
-#include <ydb/core/viewer/json/json.h>
-#include <ydb/core/base/appdata.h>
-
-#include <ydb/library/naming_conventions/naming_conventions.h>
-#include <ydb/library/yql/public/issue/yql_issue_message.h>
-
-#include <ydb/library/http_proxy/authorization/auth_helpers.h>
-#include <ydb/library/http_proxy/error/error.h>
-#include <ydb/services/lib/sharding/sharding.h>
+#include <library/cpp/actors/http/http_proxy.h>
 #include <library/cpp/cgiparam/cgiparam.h>
 #include <library/cpp/http/misc/parsed_request.h>
 #include <library/cpp/http/server/response.h>
-#include <library/cpp/json/json_reader.h>
-#include <library/cpp/json/json_writer.h>
-#include <library/cpp/protobuf/json/json_output_create.h>
-#include <library/cpp/protobuf/json/proto2json.h>
-#include <library/cpp/protobuf/json/proto2json_printer.h>
+
+#include <ydb/core/base/appdata.h>
+#include <ydb/core/grpc_caching/cached_grpc_request_actor.h>
+#include <ydb/core/grpc_services/local_rpc/local_rpc.h>
+#include <ydb/core/protos/serverless_proxy_config.pb.h>
+#include <ydb/core/viewer/json/json.h>
+
+#include <ydb/library/http_proxy/authorization/auth_helpers.h>
+#include <ydb/library/http_proxy/error/error.h>
+#include <ydb/library/yql/public/issue/yql_issue_message.h>
+
+#include <ydb/public/sdk/cpp/client/ydb_datastreams/datastreams.h>
+#include <ydb/public/sdk/cpp/client/ydb_persqueue_core/impl/common.h>
+
+#include <ydb/services/datastreams/datastreams_proxy.h>
+#include <ydb/services/datastreams/next_token.h>
+#include <ydb/services/datastreams/shard_iterator.h>
+#include <ydb/services/lib/sharding/sharding.h>
 
 #include <library/cpp/uri/uri.h>
 
@@ -37,6 +35,9 @@
 #include <util/string/cast.h>
 #include <util/string/join.h>
 #include <util/string/vector.h>
+
+#include <nlohmann/json.hpp>
+
 
 namespace NKikimr::NHttpProxy {
 
@@ -117,8 +118,6 @@ namespace NKikimr::NHttpProxy {
         }
     }
 
-
-
     template<class TProto>
     TString ExtractStreamNameWithoutProtoField(const TProto& req)
     {
@@ -176,386 +175,8 @@ namespace NKikimr::NHttpProxy {
     constexpr TStringBuf REQUEST_DATE_HEADER = "x-amz-date";
     constexpr TStringBuf REQUEST_FORWARDED_FOR = "x-forwarded-for";
     constexpr TStringBuf REQUEST_TARGET_HEADER = "x-amz-target";
+    constexpr TStringBuf REQUEST_CONTENT_TYPE_HEADER = "content-type";
     static const TString CREDENTIAL_PARAM = "credential";
-
-    namespace {
-        class TYdsProtoToJsonPrinter : public NProtobufJson::TProto2JsonPrinter {
-        public:
-            TYdsProtoToJsonPrinter(const google::protobuf::Reflection* reflection, const NProtobufJson::TProto2JsonConfig& config)
-                : NProtobufJson::TProto2JsonPrinter(config)
-                , ProtoReflection(reflection)
-            {}
-
-        protected:
-            template <bool InMapContext>
-            void PrintDoubleValue(const TStringBuf& key, double value,
-                                  NProtobufJson::IJsonOutput& json) {
-                if constexpr(InMapContext) {
-                    json.WriteKey(key).Write(value);
-                } else {
-                    json.Write(value);
-                }
-            }
-
-            void PrintField(const NProtoBuf::Message& proto, const NProtoBuf::FieldDescriptor& field,
-                            NProtobufJson::IJsonOutput& json, TStringBuf key = {}) override
-            {
-                if (field.options().HasExtension(FieldTransformer)) {
-                    if (field.options().GetExtension(FieldTransformer) == TRANSFORM_BASE64) {
-                        Y_ENSURE(field.cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING,
-                                 "Base64 is only supported for strings");
-
-                        if (!key) {
-                            key = MakeKey(field);
-                        }
-
-                        if (field.is_repeated()) {
-                            for (int i = 0, endI = ProtoReflection->FieldSize(proto, &field); i < endI; ++i) {
-                                PrintStringValue<false>(field, TStringBuf(), Base64Encode(proto.GetReflection()->GetRepeatedString(proto, &field, i)), json);
-                            }
-                        } else {
-                            PrintStringValue<true>(field, key, Base64Encode(proto.GetReflection()->GetString(proto, &field)), json);
-                        }
-                        return;
-                    }
-
-                    if (field.options().GetExtension(FieldTransformer) == TRANSFORM_DOUBLE_S_TO_INT_MS) {
-                        Y_ENSURE(field.cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_INT64,
-                                 "Double S to Int MS is only supported for int64 timestamps");
-
-                        if (!key) {
-                            key = MakeKey(field);
-                        }
-
-                        if (field.is_repeated()) {
-                            for (int i = 0, endI = ProtoReflection->FieldSize(proto, &field); i < endI; ++i) {
-                                double value = proto.GetReflection()->GetRepeatedInt64(proto, &field, i) / 1000.0;
-                                PrintDoubleValue<false>(TStringBuf(), value, json);
-                            }
-                        } else {
-                            double value = proto.GetReflection()->GetInt64(proto, &field) / 1000.0;
-                            PrintDoubleValue<true>(key, value, json);
-                        }
-                        return;
-                    }
-
-                    if (field.options().GetExtension(FieldTransformer) == TRANSFORM_EMPTY_TO_NOTHING) {
-                        Y_ENSURE(field.cpp_type() == google::protobuf::FieldDescriptor::CPPTYPE_STRING,
-                                 "Empty to nothing is only supported for strings");
-
-                        if (!key) {
-                            key = MakeKey(field);
-                        }
-
-                        if (field.is_repeated()) {
-                            for (int i = 0, endI = ProtoReflection->FieldSize(proto, &field); i < endI; ++i) {
-                                auto value = proto.GetReflection()->GetRepeatedString(proto, &field, i);
-                                if (!value.empty()) {
-                                    PrintStringValue<false>(field, TStringBuf(), proto.GetReflection()->GetRepeatedString(proto, &field, i), json);
-                                }
-                            }
-                        } else {
-                            auto value = proto.GetReflection()->GetString(proto, &field);
-                            if (!value.empty()) {
-                                PrintStringValue<true>(field, key, proto.GetReflection()->GetString(proto, &field), json);
-                            }
-                        }
-                        return;
-                    }
-                } else {
-                    return NProtobufJson::TProto2JsonPrinter::PrintField(proto, field, json, key);
-                }
-            }
-
-        private:
-            const google::protobuf::Reflection* ProtoReflection = nullptr;
-        };
-
-        TString ProxyFieldNameConverter(const google::protobuf::FieldDescriptor& descriptor) {
-            return NNaming::SnakeToCamelCase(descriptor.name());
-        }
-
-        void ProtoToJson(const Message& resp, NJson::TJsonValue& value) {
-            auto config = NProtobufJson::TProto2JsonConfig()
-                    .SetFormatOutput(false)
-                    .SetMissingSingleKeyMode(NProtobufJson::TProto2JsonConfig::MissingKeyDefault)
-                    .SetNameGenerator(ProxyFieldNameConverter)
-                    .SetEnumMode(NProtobufJson::TProto2JsonConfig::EnumName);
-            TYdsProtoToJsonPrinter printer(resp.GetReflection(), config);
-            printer.Print(resp, *NProtobufJson::CreateJsonMapOutput(value));
-        }
-
-        void JsonToProto(Message* message, const NJson::TJsonValue& jsonValue, ui32 depth = 0) {
-            Y_ENSURE(depth < 100, "Too deep map");
-            Y_ENSURE(jsonValue.IsMap(), "Top level of json value is not a map");
-            auto* desc = message->GetDescriptor();
-            auto* reflection = message->GetReflection();
-            for (const auto& [key, value] : jsonValue.GetMap()) {
-                auto* fieldDescriptor = desc->FindFieldByName(NNaming::CamelToSnakeCase(key));
-                Y_ENSURE(fieldDescriptor, "Unexpected json key: " + key);
-                auto transformer = Ydb::DataStreams::V1::TRANSFORM_NONE;
-                if (fieldDescriptor->options().HasExtension(FieldTransformer)) {
-                    transformer = fieldDescriptor->options().GetExtension(FieldTransformer);
-                }
-
-                if (value.IsArray()) {
-                    Y_ENSURE(fieldDescriptor->is_repeated());
-                    for (auto& elem : value.GetArray()) {
-                        switch (transformer) {
-                            case Ydb::DataStreams::V1::TRANSFORM_BASE64: {
-                                Y_ENSURE(fieldDescriptor->cpp_type() ==
-                                         google::protobuf::FieldDescriptor::CPPTYPE_STRING,
-                                         "Base64 transformer is only applicable to strings");
-                                reflection->AddString(message, fieldDescriptor, Base64Decode(value.GetString()));
-                                break;
-                            }
-                            case Ydb::DataStreams::V1::TRANSFORM_DOUBLE_S_TO_INT_MS: {
-                                reflection->SetInt64(message, fieldDescriptor, value.GetDouble() * 1000);
-                                break;
-                            }
-                            case Ydb::DataStreams::V1::TRANSFORM_EMPTY_TO_NOTHING:
-                            case Ydb::DataStreams::V1::TRANSFORM_NONE: {
-                                switch (fieldDescriptor->cpp_type()) {
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
-                                        reflection->AddInt32(message, fieldDescriptor, value.GetInteger());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_INT64:
-                                        reflection->AddInt64(message, fieldDescriptor, value.GetInteger());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_UINT32:
-                                        reflection->AddUInt32(message, fieldDescriptor, value.GetUInteger());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_UINT64:
-                                        reflection->AddUInt64(message, fieldDescriptor, value.GetUInteger());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE:
-                                        reflection->AddDouble(message, fieldDescriptor, value.GetDouble());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT:
-                                        reflection->AddFloat(message, fieldDescriptor, value.GetDouble());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
-                                        reflection->AddFloat(message, fieldDescriptor, value.GetBoolean());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_ENUM:
-                                        {
-                                            const EnumValueDescriptor* enumValueDescriptor = fieldDescriptor->enum_type()->FindValueByName(value.GetString());
-                                            i32 number{0};
-                                            if (enumValueDescriptor == nullptr && TryFromString(value.GetString(), number)) {
-                                                enumValueDescriptor = fieldDescriptor->enum_type()->FindValueByNumber(number);
-                                            }
-                                            if (enumValueDescriptor != nullptr) {
-                                                reflection->AddEnum(message, fieldDescriptor, enumValueDescriptor);
-                                            }
-                                        }
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
-                                        reflection->AddString(message, fieldDescriptor, value.GetString());
-                                        break;
-                                    case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE: {
-                                        Message *msg = reflection->AddMessage(message, fieldDescriptor);
-                                        JsonToProto(msg, elem, depth + 1);
-                                        break;
-                                    }
-                                    default:
-                                        Y_ENSURE(false, "Unexpected type");
-                                }
-                                break;
-                            }
-                            default:
-                                Y_ENSURE(false, "Unknown transformer type");
-                        }
-                    }
-                } else {
-                    switch (transformer) {
-                        case Ydb::DataStreams::V1::TRANSFORM_BASE64: {
-                            Y_ENSURE(fieldDescriptor->cpp_type() ==
-                                     google::protobuf::FieldDescriptor::CPPTYPE_STRING,
-                                     "Base64 transformer is applicable only to strings");
-                            reflection->SetString(message, fieldDescriptor, Base64Decode(value.GetString()));
-                            break;
-                        }
-                        case Ydb::DataStreams::V1::TRANSFORM_DOUBLE_S_TO_INT_MS: {
-                            reflection->SetInt64(message, fieldDescriptor, value.GetDouble() * 1000);
-                            break;
-                        }
-                        case Ydb::DataStreams::V1::TRANSFORM_EMPTY_TO_NOTHING:
-                        case Ydb::DataStreams::V1::TRANSFORM_NONE: {
-                            switch (fieldDescriptor->cpp_type()) {
-                                case google::protobuf::FieldDescriptor::CPPTYPE_INT32:
-                                    reflection->SetInt32(message, fieldDescriptor, value.GetInteger());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_INT64:
-                                    reflection->SetInt64(message, fieldDescriptor, value.GetInteger());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_UINT32:
-                                    reflection->SetUInt32(message, fieldDescriptor, value.GetUInteger());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_UINT64:
-                                    reflection->SetUInt64(message, fieldDescriptor, value.GetUInteger());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_DOUBLE:
-                                    reflection->SetDouble(message, fieldDescriptor, value.GetDouble());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_FLOAT:
-                                    reflection->SetFloat(message, fieldDescriptor, value.GetDouble());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_BOOL:
-                                    reflection->SetBool(message, fieldDescriptor, value.GetBoolean());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_ENUM:
-                                    {
-                                        const EnumValueDescriptor* enumValueDescriptor = fieldDescriptor->enum_type()->FindValueByName(value.GetString());
-                                        i32 number{0};
-                                        if (enumValueDescriptor == nullptr && TryFromString(value.GetString(), number)) {
-                                            enumValueDescriptor = fieldDescriptor->enum_type()->FindValueByNumber(number);
-                                        }
-                                        if (enumValueDescriptor != nullptr) {
-                                            reflection->SetEnum(message, fieldDescriptor, enumValueDescriptor);
-                                        }
-                                    }
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_STRING:
-                                    reflection->SetString(message, fieldDescriptor, value.GetString());
-                                    break;
-                                case google::protobuf::FieldDescriptor::CPPTYPE_MESSAGE: {
-                                    auto *msg = reflection->MutableMessage(message, fieldDescriptor);
-                                    JsonToProto(msg, value, depth + 1);
-                                    break;
-                                }
-                                default:
-                                    Y_ENSURE(false, "Unexpected type");
-                            }
-                            break;
-                        }
-                        default:
-                            Y_ENSURE(false, "Unexpected transformer");
-                    }
-                }
-            }
-        }
-
-    }
-
-
-
-    template<class TProtoRequest>
-    void FillInputCustomMetrics(const TProtoRequest& request, const THttpRequestContext& httpContext, const TActorContext& ctx) {
-            Y_UNUSED(request, httpContext, ctx);
-    }
-    template<class TProtoResult>
-    void FillOutputCustomMetrics(const TProtoResult& result, const THttpRequestContext& httpContext, const TActorContext& ctx) {
-            Y_UNUSED(result, httpContext, ctx);
-    }
-
-    TVector<std::pair<TString, TString>> BuildLabels(const TString& method, const THttpRequestContext& httpContext, const TString& name) {
-        if (method.empty()) {
-            return {{"cloud", httpContext.CloudId}, {"folder", httpContext.FolderId},
-                    {"database", httpContext.DatabaseId}, {"stream", httpContext.StreamName},
-                    {"name", name}};
-
-        }
-        return {{"method", method}, {"cloud", httpContext.CloudId}, {"folder", httpContext.FolderId},
-                {"database", httpContext.DatabaseId}, {"stream", httpContext.StreamName},
-                {"name", name}};
-    }
-
-    template <>
-    void FillInputCustomMetrics<PutRecordsRequest>(const PutRecordsRequest& request, const THttpRequestContext& httpContext, const TActorContext& ctx) {
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{request.records_size(), true, true, BuildLabels("", httpContext, "stream.incoming_records_per_second")
-                                            });
-
-        i64 bytes = 0;
-        for (auto& rec : request.records()) {
-            bytes += rec.data().size() +  rec.partition_key().size() + rec.explicit_hash_key().size();
-        }
-
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{bytes, true, true, BuildLabels("", httpContext, "stream.incoming_bytes_per_second")
-                                            });
-
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{bytes, true, true, BuildLabels("", httpContext, "stream.put_records.bytes_per_second")
-                                            });
-    }
-
-    template <>
-    void FillInputCustomMetrics<PutRecordRequest>(const PutRecordRequest& request, const THttpRequestContext& httpContext, const TActorContext& ctx) {
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{1, true, true, BuildLabels("", httpContext, "stream.incoming_records_per_second")
-                                            });
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{1, true, true, BuildLabels("", httpContext, "stream.put_record.records_per_second")
-                                            });
-
-        i64 bytes = request.data().size() +  request.partition_key().size() + request.explicit_hash_key().size();
-
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{bytes, true, true, BuildLabels("", httpContext, "stream.incoming_bytes_per_second")
-                                            });
-
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{bytes, true, true, BuildLabels("", httpContext, "stream.put_record.bytes_per_second")
-                                            });
-    }
-
-
-    template <>
-    void FillOutputCustomMetrics<PutRecordResult>(const PutRecordResult& result, const THttpRequestContext& httpContext, const TActorContext& ctx) {
-        Y_UNUSED(result);
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{1, true, true, BuildLabels("", httpContext, "stream.put_record.success_per_second")
-                                            });
-    }
-
-
-    template <>
-    void FillOutputCustomMetrics<PutRecordsResult>(const PutRecordsResult& result, const THttpRequestContext& httpContext, const TActorContext& ctx) {
-        i64 failed = result.failed_record_count();
-        i64 success = result.records_size() - failed;
-        if (success > 0) {
-            ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{1, true, true, BuildLabels("", httpContext, "stream.put_records.success_per_second")
-                });
-            ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{success, true, true, BuildLabels("", httpContext, "stream.put_records.successfull_records_per_second")
-                });
-        }
-
-        ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{result.records_size(), true, true, BuildLabels("", httpContext, "stream.put_records.total_records_per_second")
-            });
-        if (failed > 0) {
-            ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{failed, true, true,
-BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
-                });
-        }
-    }
-
-    template <>
-    void FillOutputCustomMetrics<GetRecordsResult>(const GetRecordsResult& result, const THttpRequestContext& httpContext, const TActorContext& ctx) {
-        auto records_n = result.records().size();
-        auto bytes = std::accumulate(result.records().begin(), result.records().end(), 0l,
-                                     [](i64 sum, decltype(*result.records().begin()) &r) {
-                                         return sum + r.data().size() +
-                                             r.partition_key().size() +
-                                             r.sequence_number().size() +
-                                             sizeof(r.timestamp()) +
-                                             sizeof(r.encryption())
-                                             ;
-                                     });
-
-        ctx.Send(MakeMetricsServiceID(),
-                 new TEvServerlessProxy::TEvCounter{1, true, true,
-                     BuildLabels("", httpContext, "stream.get_records.success_per_second")}
-                 );
-        ctx.Send(MakeMetricsServiceID(),
-                 new TEvServerlessProxy::TEvCounter{records_n, true, true,
-                     BuildLabels("", httpContext, "stream.get_records.records_per_second")}
-                 );
-        ctx.Send(MakeMetricsServiceID(),
-                 new TEvServerlessProxy::TEvCounter{bytes, true, true,
-                     BuildLabels("", httpContext, "stream.get_records.bytes_per_second")}
-                 );
-        ctx.Send(MakeMetricsServiceID(),
-                 new TEvServerlessProxy::TEvCounter{records_n, true, true,
-                     BuildLabels("", httpContext, "stream.outgoing_records_per_second")}
-                 );
-        ctx.Send(MakeMetricsServiceID(),
-                 new TEvServerlessProxy::TEvCounter{bytes, true, true,
-                     BuildLabels("", httpContext, "stream.outgoing_bytes_per_second")}
-                 );
-    }
 
     template<class TProtoService, class TProtoRequest, class TProtoResponse, class TProtoResult, class TProtoCall, class TRpcEv>
     class THttpRequestProcessor : public IHttpRequestProcessor {
@@ -618,12 +239,12 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
             STFUNC(StateWork)
             {
                 switch (ev->GetTypeRewrite()) {
-                    HFunc(TEvServerlessProxy::TEvGrpcRequestResult, HandleGrpcResponse);
-                    HFunc(TEvServerlessProxy::TEvDiscoverDatabaseEndpointResult, Handle);
                     HFunc(TEvents::TEvWakeup, HandleTimeout);
-                    HFunc(TEvServerlessProxy::TEvToken, HandleToken);
-                    HFunc(TEvServerlessProxy::TEvError, HandleError);
                     HFunc(TEvServerlessProxy::TEvClientReady, HandleClientReady);
+                    HFunc(TEvServerlessProxy::TEvDiscoverDatabaseEndpointResult, Handle);
+                    HFunc(TEvServerlessProxy::TEvError, HandleError);
+                    HFunc(TEvServerlessProxy::TEvGrpcRequestResult, HandleGrpcResponse);
+                    HFunc(TEvServerlessProxy::TEvToken, HandleToken);
                     default:
                         HandleUnexpectedEvent(ev, ctx);
                         break;
@@ -654,23 +275,49 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                         .AuthToken(HttpContext.IamToken)
                         .DiscoveryMode(NYdb::EDiscoveryMode::Async);
 
-                if (!HttpContext.DatabaseName.empty()) {
-                    if (!HttpContext.ServiceConfig.GetTestMode()) {
-                        clientSettings.Database(HttpContext.DatabaseName);
-                    }
+                if (!HttpContext.DatabaseName.empty() && !HttpContext.ServiceConfig.GetTestMode()) {
+                    clientSettings.Database(HttpContext.DatabaseName);
                 }
                 Y_VERIFY(!Client);
                 Client.Reset(new TDataStreamsClient(*HttpContext.Driver, clientSettings));
                 DiscoveryFuture = MakeHolder<NThreading::TFuture<void>>(Client->DiscoveryCompleted());
-                DiscoveryFuture->Subscribe([actorId = ctx.SelfID, actorSystem = ctx.ActorSystem()](const NThreading::TFuture<void>&) {
-                    actorSystem->Send(actorId, new TEvServerlessProxy::TEvClientReady());
-                });
+                DiscoveryFuture->Subscribe(
+                    [actorId = ctx.SelfID, actorSystem = ctx.ActorSystem()] (const NThreading::TFuture<void>&) {
+                        actorSystem->Send(actorId, new TEvServerlessProxy::TEvClientReady());
+                    });
             }
 
             void HandleClientReady(TEvServerlessProxy::TEvClientReady::TPtr&, const TActorContext& ctx){
-                SendGrpcRequest(ctx);
+                HttpContext.Driver ? SendGrpcRequest(ctx) : SendGrpcRequestNoDriver(ctx);
             }
 
+            void SendGrpcRequestNoDriver(const TActorContext& ctx) {
+                RequestState = StateGrpcRequest;
+                LOG_SP_INFO_S(ctx, NKikimrServices::HTTP_PROXY,
+                              "sending grpc request to '" << HttpContext.DiscoveryEndpoint <<
+                              "' database: '" << HttpContext.DatabaseName <<
+                              "' iam token size: " << HttpContext.IamToken.size());
+
+                RpcFuture = NRpcService::DoLocalRpc<TRpcEv>(std::move(Request), HttpContext.DatabaseName,
+                                                            HttpContext.SerializedUserToken, ctx.ActorSystem());
+                RpcFuture.Subscribe([actorId = ctx.SelfID, actorSystem = ctx.ActorSystem()]
+                                    (const NThreading::TFuture<TProtoResponse>& future) {
+                    auto& response = future.GetValueSync();
+                    auto result = MakeHolder<TEvServerlessProxy::TEvGrpcRequestResult>();
+                    Y_VERIFY(response.operation().ready());
+                    if (response.operation().status() == Ydb::StatusIds::SUCCESS) {
+                        TProtoResult rs;
+                        response.operation().result().UnpackTo(&rs);
+                        result->Message = MakeHolder<TProtoResult>(rs);
+                    }
+                    NYql::TIssues issues;
+                    NYql::IssuesFromMessage(response.operation().issues(), issues);
+                    result->Status = MakeHolder<NYdb::TStatus>(NYdb::EStatus(response.operation().status()),
+                                                               std::move(issues));
+                    actorSystem->Send(actorId, result.Release());
+                });
+                return;
+            }
 
             void SendGrpcRequest(const TActorContext& ctx) {
                 RequestState = StateGrpcRequest;
@@ -678,42 +325,29 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                               "sending grpc request to '" << HttpContext.DiscoveryEndpoint <<
                               "' database: '" << HttpContext.DatabaseName <<
                               "' iam token size: " << HttpContext.IamToken.size());
-                if (!HttpContext.Driver) {
-                    RpcFuture = NRpcService::DoLocalRpc<TRpcEv>(std::move(Request), HttpContext.DatabaseName, HttpContext.SerializedUserToken, ctx.ActorSystem());
-                    RpcFuture.Subscribe([actorId = ctx.SelfID, actorSystem = ctx.ActorSystem()](const NThreading::TFuture<TProtoResponse>& future) {
-                        auto& response = future.GetValueSync();
-                        auto result = MakeHolder<TEvServerlessProxy::TEvGrpcRequestResult>();
-                        Y_VERIFY(response.operation().ready());
-                        if (response.operation().status() == Ydb::StatusIds::SUCCESS) {
-                            TProtoResult rs;
-                            response.operation().result().UnpackTo(&rs);
-                            result->Message = MakeHolder<TProtoResult>(rs);
-                        }
-                        NYql::TIssues issues;
-                        NYql::IssuesFromMessage(response.operation().issues(), issues);
-                        result->Status = MakeHolder<NYdb::TStatus>(NYdb::EStatus(response.operation().status()), std::move(issues));
-                        actorSystem->Send(actorId, result.Release());
-                    });
-                    return;
-                }
+
                 Y_VERIFY(Client);
                 Y_VERIFY(DiscoveryFuture->HasValue());
 
                 TProtoResponse response;
 
-                LOG_SP_DEBUG_S(ctx, NKikimrServices::HTTP_PROXY, "sending grpc request " << Request.DebugString());
+                LOG_SP_DEBUG_S(ctx, NKikimrServices::HTTP_PROXY,
+                               "sending grpc request " << Request.DebugString());
 
-                Future = MakeHolder<NThreading::TFuture<TProtoResultWrapper<TProtoResult>>>(Client->template DoProtoRequest<TProtoRequest, TProtoResponse, TProtoResult, TProtoCall>(std::move(Request), ProtoCall));
-                Future->Subscribe([actorId = ctx.SelfID, actorSystem = ctx.ActorSystem()](const NThreading::TFuture<TProtoResultWrapper<TProtoResult>>& future) {
-                    auto& response = future.GetValueSync();
-                    auto result = MakeHolder<TEvServerlessProxy::TEvGrpcRequestResult>();
-                    if (response.IsSuccess()) {
-                        result->Message = MakeHolder<TProtoResult>(response.GetResult());
-                    }
-                    result->Status = MakeHolder<NYdb::TStatus>(response);
-                    actorSystem->Send(actorId, result.Release());
-                });
-
+                Future = MakeHolder<NThreading::TFuture<TProtoResultWrapper<TProtoResult>>>(
+                    Client->template DoProtoRequest<TProtoRequest, TProtoResponse, TProtoResult,
+                    TProtoCall>(std::move(Request), ProtoCall));
+                Future->Subscribe(
+                    [actorId = ctx.SelfID, actorSystem = ctx.ActorSystem()]
+                    (const NThreading::TFuture<TProtoResultWrapper<TProtoResult>>& future) {
+                        auto& response = future.GetValueSync();
+                        auto result = MakeHolder<TEvServerlessProxy::TEvGrpcRequestResult>();
+                        if (response.IsSuccess()) {
+                            result->Message = MakeHolder<TProtoResult>(response.GetResult());
+                        }
+                        result->Status = MakeHolder<NYdb::TStatus>(response);
+                        actorSystem->Send(actorId, result.Release());
+                    });
             }
 
             void HandleUnexpectedEvent(const TAutoPtr<NActors::IEventHandle>& ev, const TActorContext& ctx) {
@@ -728,7 +362,7 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                 if (HttpContext.Driver) {
                     SendYdbDriverRequest(ctx);
                 } else {
-                    SendGrpcRequest(ctx);
+                    SendGrpcRequestNoDriver(ctx);
                 }
             }
 
@@ -758,7 +392,8 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                 TBase::Die(ctx);
             }
 
-            void Handle(TEvServerlessProxy::TEvDiscoverDatabaseEndpointResult::TPtr ev, const TActorContext& ctx) {
+            void Handle(TEvServerlessProxy::TEvDiscoverDatabaseEndpointResult::TPtr ev,
+                        const TActorContext& ctx) {
                 if (ev->Get()->DatabaseInfo) {
                     auto& db = ev->Get()->DatabaseInfo;
                     HttpContext.FolderId = db->FolderId;
@@ -775,8 +410,10 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                     }
 
                     FillInputCustomMetrics<TProtoRequest>(Request, HttpContext, ctx);
-                    ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvCounter{1, true, true, BuildLabels(Method, HttpContext, "api.http.requests_per_second")
-                                            });
+                    ctx.Send(MakeMetricsServiceID(),
+                             new TEvServerlessProxy::TEvCounter{1, true, true,
+                                 BuildLabels(Method, HttpContext, "api.http.requests_per_second")
+                             });
                     CreateClient(ctx);
                     return;
                 }
@@ -786,18 +423,18 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
 
             void ReportLatencyCounters(const TActorContext& ctx) {
                 TDuration dur = ctx.Now() - StartTime;
-                ctx.Send(MakeMetricsServiceID(), new TEvServerlessProxy::TEvHistCounter{static_cast<i64>(dur.MilliSeconds()), 1,
+                ctx.Send(MakeMetricsServiceID(),
+                         new TEvServerlessProxy::TEvHistCounter{static_cast<i64>(dur.MilliSeconds()), 1,
                                     BuildLabels(Method, HttpContext, "api.http.requests_duration_milliseconds")
                         });
             }
 
             void HandleGrpcResponse(TEvServerlessProxy::TEvGrpcRequestResult::TPtr ev,
                                     const TActorContext& ctx) {
-                // convert grpc result to protobuf
-                // return http response;
                 if (ev->Get()->Status->IsSuccess()) {
-                    ProtoToJson(*ev->Get()->Message, HttpContext.ResponseData.ResponseBody);
-                    FillOutputCustomMetrics<TProtoResult>(*(dynamic_cast<TProtoResult*>(ev->Get()->Message.Get())), HttpContext, ctx);
+                    ProtoToJson(*ev->Get()->Message, HttpContext.ResponseData.Body);
+                    FillOutputCustomMetrics<TProtoResult>(
+                        *(dynamic_cast<TProtoResult*>(ev->Get()->Message.Get())), HttpContext, ctx);
                     ReportLatencyCounters(ctx);
 
                     ctx.Send(MakeMetricsServiceID(),
@@ -815,7 +452,7 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                     case ERetryErrorClass::LongRetry:
                         RetryCounter.Click();
                         if (RetryCounter.HasAttemps()) {
-                            return SendGrpcRequest(ctx);
+                            return HttpContext.Driver ? SendGrpcRequest(ctx) : SendGrpcRequestNoDriver(ctx);
                         }
                     case ERetryErrorClass::NoRetry: {
                         TString errorText;
@@ -838,10 +475,10 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
             void Bootstrap(const TActorContext& ctx) {
                 StartTime = ctx.Now();
                 try {
-                    JsonToProto(&Request, HttpContext.RequestBody);
+                    HttpContext.RequestBodyToProto(&Request);
                 } catch (std::exception& e) {
                     LOG_SP_WARN_S(ctx, NKikimrServices::HTTP_PROXY,
-                                  "got new request with incorrect json from [" << SourceAddress << "] " <<
+                                  "got new request with incorrect json from [" << HttpContext.SourceAddress << "] " <<
                                   "database '" << HttpContext.DatabaseName << "'");
 
                     return ReplyWithError(ctx, NYdb::EStatus::BAD_REQUEST, e.what());
@@ -852,15 +489,18 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                 }
 
                 LOG_SP_INFO_S(ctx, NKikimrServices::HTTP_PROXY,
-                              "got new request from [" << SourceAddress << "] " <<
+                              "got new request from [" << HttpContext.SourceAddress << "] " <<
                               "database '" << HttpContext.DatabaseName << "' " <<
                               "stream '" << ExtractStreamName<TProtoRequest>(Request) << "'");
 
-                if (HttpContext.IamToken.empty() || !HttpContext.Driver) { //use Signature or no sdk mode - then need to auth anyway
-                    if (HttpContext.IamToken.empty() && !Signature) { //Test mode - no driver and no creds
-                        SendGrpcRequest(ctx);
+                // Use Signature or no sdk mode - then need to auth anyway
+                if (HttpContext.IamToken.empty() || !HttpContext.Driver) {
+                    // Test mode - no driver and no creds
+                    if (HttpContext.IamToken.empty() && !Signature) {
+                        SendGrpcRequestNoDriver(ctx);
                     } else {
-                        AuthActor = ctx.Register(AppData(ctx)->DataStreamsAuthFactory->CreateAuthActor(ctx.SelfID, HttpContext, std::move(Signature)));
+                        AuthActor = ctx.Register(AppData(ctx)->DataStreamsAuthFactory->CreateAuthActor(
+                                                     ctx.SelfID, HttpContext, std::move(Signature)));
                     }
                 } else {
                     SendYdbDriverRequest(ctx);
@@ -883,17 +523,12 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
             THolder<NThreading::TFuture<void>> DiscoveryFuture;
             TProtoCall ProtoCall;
             TString Method;
-            TString SourceAddress;
             TRetryCounter RetryCounter;
 
             THolder<TDataStreamsClient> Client;
 
             TActorId AuthActor;
         };
-
-
-
-
 
     private:
         TString Method;
@@ -928,6 +563,7 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
         DECLARE_PROCESSOR(DecreaseStreamRetentionPeriod);
         DECLARE_PROCESSOR(IncreaseStreamRetentionPeriod);
         DECLARE_PROCESSOR(UpdateShardCount);
+        DECLARE_PROCESSOR(UpdateStreamMode);
         DECLARE_PROCESSOR(RegisterStreamConsumer);
         DECLARE_PROCESSOR(DeregisterStreamConsumer);
         DECLARE_PROCESSOR(DescribeStreamConsumer);
@@ -944,12 +580,15 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
         #undef DECLARE_PROCESSOR
     }
 
-    bool THttpRequestProcessors::Execute(const TString& name, THttpRequestContext&& context, THolder<NKikimr::NSQS::TAwsRequestSignV4> signature, const TActorContext& ctx) {
+    bool THttpRequestProcessors::Execute(const TString& name, THttpRequestContext&& context,
+                                         THolder<NKikimr::NSQS::TAwsRequestSignV4> signature,
+                                         const TActorContext& ctx) {
         // TODO: To be removed by CLOUD-79086
         if (name == "RegisterStreamConsumer" ||
             name == "DeregisterStreamConsumer" ||
             name == "ListStreamConsumers") {
-            context.SendBadRequest(NYdb::EStatus::BAD_REQUEST, TStringBuilder() << "Unsupported method name " << name, ctx);
+            context.SendBadRequest(NYdb::EStatus::BAD_REQUEST,
+                                   TStringBuilder() << "Unsupported method name " << name, ctx);
             return false;
         }
 
@@ -957,7 +596,8 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
             proc->second->Execute(std::move(context), std::move(signature), ctx);
             return true;
         }
-        context.SendBadRequest(NYdb::EStatus::BAD_REQUEST, TStringBuilder() << "Unknown method name " << name, ctx);
+        context.SendBadRequest(NYdb::EStatus::BAD_REQUEST,
+                               TStringBuilder() << "Unknown method name " << name, ctx);
         return false;
     }
 
@@ -970,8 +610,77 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
         }
     }
 
-    void THttpRequestContext::ParseHeaders(TStringBuf str)
-    {
+    THttpRequestContext::THttpRequestContext(
+        const NKikimrConfig::TServerlessProxyConfig& config,
+        NHttp::THttpIncomingRequestPtr request,
+        NActors::TActorId sender,
+        NYdb::TDriver* driver,
+        std::shared_ptr<NYdb::ICredentialsProvider> serviceAccountCredentialsProvider)
+        : ServiceConfig(config)
+        , Request(request)
+        , Sender(sender)
+        , Driver(driver)
+        , ServiceAccountCredentialsProvider(serviceAccountCredentialsProvider) {
+        char address[INET6_ADDRSTRLEN];
+        if (inet_ntop(AF_INET6, &(Request->Address), address, INET6_ADDRSTRLEN) == nullptr) {
+            SourceAddress = "unknown";
+        } else {
+            SourceAddress = address;
+        }
+
+        DatabaseName = Request->URL;
+        if (DatabaseName == "/") {
+           DatabaseName = "";
+        }
+
+        ParseHeaders(Request->Headers);
+    }
+
+    THolder<NKikimr::NSQS::TAwsRequestSignV4> THttpRequestContext::GetSignature() {
+        THolder<NKikimr::NSQS::TAwsRequestSignV4> signature;
+        if (IamToken.empty()) {
+            const TString fullRequest = TString(Request->Method) + " " +
+                Request->URL + " " +
+                Request->Protocol + "/" + Request->Version + "\r\n" +
+                Request->Headers +
+                Request->Content;
+            signature = MakeHolder<NKikimr::NSQS::TAwsRequestSignV4>(fullRequest);
+        }
+
+        return signature;
+    }
+
+    void THttpRequestContext::SendBadRequest(NYdb::EStatus status, const TString& errorText,
+                                             const TActorContext& ctx) {
+        ResponseData.Body.SetType(NJson::JSON_MAP);
+        ResponseData.Body["message"] = errorText;
+        ResponseData.Body["__type"] = StatusToErrorType(status);
+
+        LOG_SP_INFO_S(ctx, NKikimrServices::HTTP_PROXY,
+                      "reply with status: " << status << " message: " << errorText);
+        auto res = Request->CreateResponse(
+                TStringBuilder() << (int)StatusToHttpCode(status),
+                StatusToErrorType(status),
+                strByMime(ContentType),
+                ResponseData.DumpBody(ContentType)
+            );
+        ctx.Send(Sender, new NHttp::TEvHttpProxy::TEvHttpOutgoingResponse(res));
+    }
+
+    void THttpRequestContext::DoReply(const TActorContext& ctx) {
+        if (ResponseData.Status == NYdb::EStatus::SUCCESS) {
+            LOG_SP_INFO_S(ctx, NKikimrServices::HTTP_PROXY, "reply ok");
+            auto res = Request->CreateResponseOK(
+                    ResponseData.DumpBody(ContentType),
+                    strByMime(ContentType)
+                );
+            ctx.Send(Sender, new NHttp::TEvHttpProxy::TEvHttpOutgoingResponse(res));
+        } else {
+            SendBadRequest(ResponseData.Status, ResponseData.ErrorText, ctx);
+        }
+    }
+
+    void THttpRequestContext::ParseHeaders(TStringBuf str) {
         TString sourceReqId;
         NHttp::THeaders headers(str);
         for (const auto& header : headers.Headers) {
@@ -990,11 +699,63 @@ BuildLabels("", httpContext, "stream.put_records.failed_records_per_second")
                 TVector<TString> parts = SplitString(requestTarget, ".");
                 ApiVersion = parts[0];
                 MethodName = parts[1];
+            } else if (AsciiEqualsIgnoreCase(header.first, REQUEST_CONTENT_TYPE_HEADER)) {
+                ContentType = mimeByStr(header.second);
             } else if (AsciiEqualsIgnoreCase(header.first, REQUEST_DATE_HEADER)) {
             }
         }
         RequestId = GenerateRequestId(sourceReqId);
     }
 
+    TString THttpResponseData::DumpBody(MimeTypes contentType) {
+        switch (contentType) {
+        case MIME_CBOR: {
+            auto toCborStr = NJson::WriteJson(Body, false);
+            auto toCbor =  nlohmann::json::to_cbor({toCborStr.begin(), toCborStr.end()});
+            return {(char*)&toCbor[0], toCbor.size()};
+        }
+        default: {
+        case MIME_JSON:
+            return NJson::WriteJson(Body, false);
+        }
+        }
+    }
 
+    void THttpRequestContext::RequestBodyToProto(NProtoBuf::Message* request) {
+        auto requestJsonStr = Request->Body;
+        if (requestJsonStr.empty()) {
+            throw NKikimr::NSQS::TSQSException(NKikimr::NSQS::NErrors::MALFORMED_QUERY_STRING) <<
+                "Empty body";
+        }
+
+        std::string bufferStr;
+        switch (ContentType) {
+        case MIME_CBOR: {
+            // CborToProto(HttpContext.Request->Body, request);
+            auto fromCbor = nlohmann::json::from_cbor(Request->Body.begin(),
+                                                      Request->Body.end(), true, false);
+            if (fromCbor.is_discarded()) {
+                throw NKikimr::NSQS::TSQSException(NKikimr::NSQS::NErrors::MALFORMED_QUERY_STRING) <<
+                    "Can not parse request body from CBOR";
+            } else {
+                bufferStr = fromCbor.dump();
+                requestJsonStr = TStringBuf(bufferStr.begin(), bufferStr.end());
+            }
+        }
+        case MIME_JSON: {
+            NJson::TJsonValue requestBody;
+            auto fromJson = NJson::ReadJsonTree(requestJsonStr, &requestBody);
+            if (fromJson) {
+                JsonToProto(requestBody, request);
+            } else {
+                throw NKikimr::NSQS::TSQSException(NKikimr::NSQS::NErrors::MALFORMED_QUERY_STRING) <<
+                    "Can not parse request body from JSON";
+            }
+            break;
+        }
+        default:
+            throw NKikimr::NSQS::TSQSException(NKikimr::NSQS::NErrors::MALFORMED_QUERY_STRING) <<
+                "Unknown ContentType";
+        }
+    }
 } // namespace NKikimr::NHttpProxy

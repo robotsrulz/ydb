@@ -24,21 +24,28 @@ def _create_table(root, session, table_name, columns, keys_count, queue_type=Non
     table_path = get_table_path(root, table_name, queue_type)
     keys = [name for name, _ in columns[:keys_count]]
     columns = [ydb.Column(name, ydb.OptionalType(column_type)) for name, column_type in columns]
-    ydb.retry_operation_sync(lambda: session.create_table(
-        table_path,
-        ydb.TableDescription()
-            .with_primary_keys(*keys)
-            .with_columns(*columns)
-            .with_profile(
-                ydb.TableProfile()
-                .with_partitioning_policy(
-                    ydb.PartitioningPolicy()
-                    .with_auto_partitioning(
-                        ydb.AutoPartitioningPolicy.AUTO_SPLIT
-                    )
+
+    if queue_type:
+        ydb.retry_operation_sync(lambda: session.create_table(
+            table_path,
+            ydb.TableDescription()
+                .with_primary_keys(*keys)
+                .with_columns(*columns)
+                .with_uniform_partitions(10)
+                .with_partitioning_settings(
+                    ydb.PartitioningSettings()
+                        .with_min_partitions_count(10)
+                        .with_partitioning_by_size(ydb.FeatureFlag.ENABLED)
+                        .with_partitioning_by_load(ydb.FeatureFlag.ENABLED)
                 )
-            )
-    ))
+        ))
+    else:
+        ydb.retry_operation_sync(lambda: session.create_table(
+            table_path,
+            ydb.TableDescription()
+                .with_primary_keys(*keys)
+                .with_columns(*columns)
+        ))
 
 
 def get_table_keys_for_queue(with_shard=False):
@@ -113,6 +120,23 @@ def create_settings_table(root, session):
     _create_table(root, session, '.Settings', columns, keys_count=2)
 
 
+def create_removed_queues_table(root, session):
+    columns = [
+        ('RemoveTimestamp', ydb.PrimitiveType.Uint64),
+        ('QueueIdNumber', ydb.PrimitiveType.Uint64),
+        ('Account', ydb.PrimitiveType.Utf8),
+        ('QueueName', ydb.PrimitiveType.Utf8),
+        ('FifoQueue', ydb.PrimitiveType.Bool),
+        ('Shards', ydb.PrimitiveType.Uint32),
+        ('CustomQueueName', ydb.PrimitiveType.Utf8),
+        ('FolderId', ydb.PrimitiveType.Utf8),
+        ('TablesFormat', ydb.PrimitiveType.Uint32),
+        ('StartProcessTimestamp', ydb.PrimitiveType.Uint64),
+        ('NodeProcess', ydb.PrimitiveType.Uint32),
+    ]
+    _create_table(root, session, '.RemovedQueues', columns, keys_count=2)
+
+
 def create_attibutes_table(root, session, queue_type):
     queue_keys = get_table_keys_for_queue()
     columns = queue_keys + [
@@ -132,7 +156,13 @@ def create_attibutes_table(root, session, queue_type):
 
 
 def create_state_table(root, session, queue_type):
-    queue_keys = get_table_keys_for_queue(with_shard=(queue_type == QueueType.STD))
+    queue_keys = columns = [
+        ('QueueIdNumberHash', ydb.PrimitiveType.Uint64),
+        ('QueueIdNumber', ydb.PrimitiveType.Uint64),
+    ]
+    if queue_type == QueueType.STD:
+        queue_keys.append(('Shard', ydb.PrimitiveType.Uint32))
+
     columns = queue_keys + [
         ('CleanupTimestamp', ydb.PrimitiveType.Uint64),
         ('CreatedTimestamp', ydb.PrimitiveType.Uint64),
@@ -272,6 +302,7 @@ def create_all_tables(root, driver, session):
     create_queues_table(root, session)
     create_events_table(root, session)
     create_settings_table(root, session)
+    create_removed_queues_table(root, session)
 
     for queue_type in [QueueType.STD, QueueType.FIFO]:
         create_sent_timestamp_idx_table(root, session, queue_type)

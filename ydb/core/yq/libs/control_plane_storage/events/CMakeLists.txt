@@ -15,6 +15,7 @@ target_link_libraries(libs-control_plane_storage-events PUBLIC
   cpp-actors-interconnect
   libs-control_plane_storage-proto
   yq-libs-events
+  libs-quota_manager-events
 )
 target_sources(libs-control_plane_storage-events PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/control_plane_storage/events/events.cpp

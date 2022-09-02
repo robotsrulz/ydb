@@ -67,8 +67,8 @@ struct TReqId {
         ChunkTrim = 48,
         Harakiri = 49,
         Slay = 50,
-        ChunksLock = 51,
-        ChunksUnlock = 52,
+        ChunkLock = 51,
+        ChunkUnlock = 52,
         ChunkReserve = 53,
         ConfigureScheduler = 54,
         Undelivered = 55,
@@ -82,6 +82,7 @@ struct TReqId {
         TryTrimChunk = 63,
         ReleaseChunks = 64,
         StopDevice = 65,
+        ChunkForget = 66,
     };
 
     // 56 bit idx, 8 bit source
@@ -125,8 +126,8 @@ enum class ERequestType {
     RequestHarakiri,
     RequestYardSlay,
     RequestChunkReserve,
-    RequestChunksLock,
-    RequestChunksUnlock,
+    RequestChunkLock,
+    RequestChunkUnlock,
     RequestYardControl,
     RequestAskForCutLog,
     RequestConfigureScheduler,
@@ -139,6 +140,7 @@ enum class ERequestType {
     RequestTryTrimChunk,
     RequestReleaseChunks,
     RequestStopDevice,
+    RequestChunkForget,
 };
 
 inline IOutputStream& operator <<(IOutputStream& out, const TReqId& reqId) {

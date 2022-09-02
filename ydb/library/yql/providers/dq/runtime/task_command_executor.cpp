@@ -55,7 +55,7 @@ void ToProto(T* s1, const NDq::TDqInputChannelStats* ss)
 }
 
 template<typename T>
-void ToProto(T* s1, const NDq::TDqSourceStats* ss)
+void ToProto(T* s1, const NDq::TDqAsyncInputBufferStats* ss)
 {
     s1->SetChunks(ss->Chunks);
     s1->SetBytes(ss->Bytes);
@@ -186,7 +186,7 @@ public:
         auto maybeSourceOldStats = CurrentSourcesStats.find(inputIndex);
         if (maybeSourceOldStats == CurrentSourcesStats.end()) {
             maybeSourceOldStats = CurrentSourcesStats.emplace_hint(
-                maybeSourceOldStats, inputIndex, NDq::TDqSourceStats(inputIndex));
+                maybeSourceOldStats, inputIndex, NDq::TDqAsyncInputBufferStats(inputIndex));
         }
         QueryStat.AddSourceStats(
             *maybeSourceStats->second,
@@ -746,7 +746,7 @@ public:
             settings.AllowGeneratorsInUnboxedValues = true;
             for (const auto& x: taskMeta.GetSecureParams()) {
                 settings.SecureParams[x.first] = x.second;
-                YQL_LOG(DEBUG) << "SecureParam " << x.first << ":XXX";
+                YQL_CLOG(DEBUG, ProviderDq) << "SecureParam " << x.first << ":XXX";
             }
             settings.OptLLVM = DqConfiguration->OptLLVM.Get().GetOrElse("");
 
@@ -759,8 +759,9 @@ public:
 
         QueryStat.Measure<void>("Prepare", [&]() {
             NDq::TDqTaskRunnerMemoryLimits limits;
-            limits.ChannelBufferSize = DqConfiguration->ChannelBufferSize.Get().GetOrElse(2000_MB);
-            limits.OutputChunkMaxSize = DqConfiguration->OutputChunkMaxSize.Get().GetOrElse(4_MB);
+            limits.ChannelBufferSize = DqConfiguration->ChannelBufferSize.Get().GetOrElse(TDqSettings::TDefault::ChannelBufferSize);
+            limits.OutputChunkMaxSize = DqConfiguration->OutputChunkMaxSize.Get().GetOrElse(TDqSettings::TDefault::OutputChunkMaxSize);
+            limits.ChunkSizeLimit = DqConfiguration->ChunkSizeLimit.Get().GetOrElse(TDqSettings::TDefault::ChunkSizeLimit);
             Runner->Prepare(task, limits);
         });
 
@@ -783,7 +784,7 @@ public:
 
     NDq::TDqTaskRunnerStats CurrentStats;
     std::unordered_map<ui64, NDq::TDqInputChannelStats> CurrentInputChannelsStats;
-    std::unordered_map<ui64, NDq::TDqSourceStats> CurrentSourcesStats;
+    std::unordered_map<ui64, NDq::TDqAsyncInputBufferStats> CurrentSourcesStats;
     std::unordered_map<ui64, NDq::TDqOutputChannelStats> CurrentOutputChannelsStats;
 
     i64 LastCommand = -1;

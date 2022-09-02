@@ -15,11 +15,9 @@ target_compile_options(contrib-libs-tbb PRIVATE
   -DUSE_PTHREAD
   -D__TBB_USE_ITT_NOTIFY
   -DDO_ITT_NOTIFY
+  -Wno-everything
 )
 target_include_directories(contrib-libs-tbb PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/libs/tbb/include
-)
-target_include_directories(contrib-libs-tbb PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/tbb/include
 )
 target_link_libraries(contrib-libs-tbb PUBLIC

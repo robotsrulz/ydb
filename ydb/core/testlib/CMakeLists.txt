@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(actors)
+add_subdirectory(basics)
 
 add_library(ydb-core-testlib)
 target_compile_options(ydb-core-testlib PRIVATE
@@ -45,6 +47,7 @@ target_link_libraries(ydb-core-testlib PUBLIC
   core-mind-bscontroller
   core-mind-hive
   ydb-core-node_whiteboard
+  ydb-core-persqueue
   ydb-core-protos
   ydb-core-security
   core-sys_view-processor
@@ -79,10 +82,12 @@ target_link_libraries(ydb-core-testlib PUBLIC
   ydb-services-cms
   ydb-services-datastreams
   ydb-services-discovery
+  ydb-services-fq
   ydb-services-kesus
   ydb-services-persqueue_cluster_discovery
   ydb-services-persqueue_v1
   ydb-services-rate_limiter
+  ydb-services-monitoring
   ydb-services-ydb
   ydb-services-yq
   ydb-core-http_proxy

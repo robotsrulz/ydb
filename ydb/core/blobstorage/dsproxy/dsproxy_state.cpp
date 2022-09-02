@@ -205,7 +205,8 @@ namespace NKikimr {
         Y_VERIFY(Sessions);
         auto *msg = ev->Get();
         Y_VERIFY(Topology);
-        Sessions->QueueConnectUpdate(Topology->GetOrderNumber(msg->VDiskId), msg->QueueId, msg->IsConnected);
+        Sessions->QueueConnectUpdate(Topology->GetOrderNumber(msg->VDiskId), msg->QueueId, msg->IsConnected,
+            msg->ExtraBlockChecksSupport, *Topology);
         if (msg->IsConnected && (CurrentStateFunc() == &TThis::StateEstablishingSessions ||
                 CurrentStateFunc() == &TThis::StateEstablishingSessionsTimeout)) {
             SwitchToWorkWhenGoodToGo();
@@ -293,11 +294,11 @@ namespace NKikimr {
             IsFullMonitoring = IsLimitedKeyless || fullIfPossible;
 
             TString name = Sprintf("%09" PRIu32, GroupId);
-            TIntrusivePtr<NMonitoring::TDynamicCounters> group = GetServiceCounters(
+            TIntrusivePtr<::NMonitoring::TDynamicCounters> group = GetServiceCounters(
                     AppData()->Counters, "dsproxy")->GetSubgroup("blobstorageproxy", name);
-            TIntrusivePtr<NMonitoring::TDynamicCounters> percentileGroup = GetServiceCounters(
+            TIntrusivePtr<::NMonitoring::TDynamicCounters> percentileGroup = GetServiceCounters(
                     AppData()->Counters, "dsproxy_percentile")->GetSubgroup("blobstorageproxy", name);
-            TIntrusivePtr<NMonitoring::TDynamicCounters> overviewGroup = GetServiceCounters(
+            TIntrusivePtr<::NMonitoring::TDynamicCounters> overviewGroup = GetServiceCounters(
                     AppData()->Counters, "dsproxy_overview");
 
             Mon.Reset(new TBlobStorageGroupProxyMon(group, percentileGroup, overviewGroup, Info, NodeMon, limited));

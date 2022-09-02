@@ -1,3 +1,5 @@
+// DEPRECATED!!! use rpc_fq.cpp
+
 #include "rpc_common.h"
 #include "rpc_deferrable.h"
 
@@ -19,6 +21,7 @@ namespace NKikimr {
 namespace NGRpcService {
 
 using namespace Ydb;
+using NPerms = NKikimr::TEvTicketParser::TEvAuthorizeTicket;
 
 template <typename RpcRequestType, typename EvRequestType, typename EvResponseType>
 class TYandexQueryRequestRPC : public TRpcOperationRequestActor<
@@ -66,15 +69,19 @@ public:
         }
         Token = *authToken;
 
-        const TString scope = Request_->GetPeerMetaValues("x-yq-scope").GetOrElse("");
+        TString scope = Request_->GetPeerMetaValues("x-ydb-fq-project").GetOrElse("");
+        if (scope.empty()) {
+            scope = Request_->GetPeerMetaValues("x-yq-scope").GetOrElse(""); // TODO: remove YQ-1055
+        }
+
         if (!scope.StartsWith("yandexcloud://")) {
-            ReplyWithStatus("x-yq-scope should start with yandexcloud:// but got " + scope, StatusIds::BAD_REQUEST);
+            ReplyWithStatus("x-ydb-fq-project should start with yandexcloud:// but got " + scope, StatusIds::BAD_REQUEST);
             return;
         }
 
         const TVector<TString> path = StringSplitter(scope).Split('/').SkipEmpty();
         if (path.size() != 2 && path.size() != 3) {
-            ReplyWithStatus("x-yq-scope format is invalid. Must be yandexcloud://folder_id, but got " + scope, StatusIds::BAD_REQUEST);
+            ReplyWithStatus("x-ydb-fq-project format is invalid. Must be yandexcloud://folder_id, but got " + scope, StatusIds::BAD_REQUEST);
             return;
         }
 
@@ -232,7 +239,7 @@ using TYandexQueryGetResultDataRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvGetResultDataRequest,
     NYq::TEvControlPlaneProxy::TEvGetResultDataResponse>;
 
-void DoGetResultDataRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryGetResultDataRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryGetResultDataRPC(p.release()));
 }
 
@@ -241,7 +248,7 @@ using TYandexQueryListJobsRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvListJobsRequest,
     NYq::TEvControlPlaneProxy::TEvListJobsResponse>;
 
-void DoListJobsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryListJobsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryListJobsRPC(p.release()));
 }
 
@@ -250,7 +257,7 @@ using TYandexQueryDescribeJobRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvDescribeJobRequest,
     NYq::TEvControlPlaneProxy::TEvDescribeJobResponse>;
 
-void DoDescribeJobRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryDescribeJobRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryDescribeJobRPC(p.release()));
 }
 
@@ -259,7 +266,7 @@ using TYandexQueryCreateConnectionRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvCreateConnectionRequest,
     NYq::TEvControlPlaneProxy::TEvCreateConnectionResponse>;
 
-void DoCreateConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryCreateConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryCreateConnectionRPC(p.release()));
 }
 
@@ -268,7 +275,7 @@ using TYandexQueryListConnectionsRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvListConnectionsRequest,
     NYq::TEvControlPlaneProxy::TEvListConnectionsResponse>;
 
-void DoListConnectionsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryListConnectionsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryListConnectionsRPC(p.release()));
 }
 
@@ -277,7 +284,7 @@ using TYandexQueryDescribeConnectionRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvDescribeConnectionRequest,
     NYq::TEvControlPlaneProxy::TEvDescribeConnectionResponse>;
 
-void DoDescribeConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryDescribeConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryDescribeConnectionRPC(p.release()));
 }
 
@@ -286,7 +293,7 @@ using TYandexQueryModifyConnectionRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvModifyConnectionRequest,
     NYq::TEvControlPlaneProxy::TEvModifyConnectionResponse>;
 
-void DoModifyConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryModifyConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryModifyConnectionRPC(p.release()));
 }
 
@@ -295,7 +302,7 @@ using TYandexQueryDeleteConnectionRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvDeleteConnectionRequest,
     NYq::TEvControlPlaneProxy::TEvDeleteConnectionResponse>;
 
-void DoDeleteConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryDeleteConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryDeleteConnectionRPC(p.release()));
 }
 
@@ -304,7 +311,7 @@ using TYandexQueryTestConnectionRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvTestConnectionRequest,
     NYq::TEvControlPlaneProxy::TEvTestConnectionResponse>;
 
-void DoTestConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryTestConnectionRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryTestConnectionRPC(p.release()));
 }
 
@@ -313,7 +320,7 @@ using TYandexQueryCreateBindingRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvCreateBindingRequest,
     NYq::TEvControlPlaneProxy::TEvCreateBindingResponse>;
 
-void DoCreateBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& ) {
+void DoYandexQueryCreateBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& ) {
     TActivationContext::AsActorContext().Register(new TYandexQueryCreateBindingRPC(p.release()));
 }
 
@@ -322,7 +329,7 @@ using TYandexQueryListBindingsRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvListBindingsRequest,
     NYq::TEvControlPlaneProxy::TEvListBindingsResponse>;
 
-void DoListBindingsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryListBindingsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryListBindingsRPC(p.release()));
 }
 
@@ -331,7 +338,7 @@ using TYandexQueryDescribeBindingRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvDescribeBindingRequest,
     NYq::TEvControlPlaneProxy::TEvDescribeBindingResponse>;
 
-void DoDescribeBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryDescribeBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryDescribeBindingRPC(p.release()));
 }
 
@@ -340,7 +347,7 @@ using TYandexQueryModifyBindingRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvModifyBindingRequest,
     NYq::TEvControlPlaneProxy::TEvModifyBindingResponse>;
 
-void DoModifyBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryModifyBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryModifyBindingRPC(p.release()));
 }
 
@@ -349,8 +356,286 @@ using TYandexQueryDeleteBindingRPC = TYandexQueryRequestRPC<
     NYq::TEvControlPlaneProxy::TEvDeleteBindingRequest,
     NYq::TEvControlPlaneProxy::TEvDeleteBindingResponse>;
 
-void DoDeleteBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
+void DoYandexQueryDeleteBindingRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
     TActivationContext::AsActorContext().Register(new TYandexQueryDeleteBindingRPC(p.release()));
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateCreateQueryRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{[](const YandexQuery::CreateQueryRequest& request) {
+        TVector<NPerms::TPermission> basePermissions{
+            NPerms::Required("yq.queries.create"),
+            NPerms::Optional("yq.connections.use"),
+            NPerms::Optional("yq.bindings.use")
+        };
+        if (request.execute_mode() != YandexQuery::SAVE) {
+            basePermissions.push_back(NPerms::Required("yq.queries.invoke"));
+        }
+        if (request.content().acl().visibility() == YandexQuery::Acl::SCOPE) {
+            basePermissions.push_back(NPerms::Required("yq.resources.managePublic"));
+        }
+        return basePermissions;
+    }};
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::CreateQueryRequest, YandexQuery::CreateQueryResponse>>(ctx.Release(), &DoYandexQueryCreateQueryRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateListQueriesRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{[](const YandexQuery::ListQueriesRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.queries.get"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    }};
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ListQueriesRequest, YandexQuery::ListQueriesResponse>>(ctx.Release(), &DoYandexQueryListQueriesRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateDescribeQueryRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{[](const YandexQuery::DescribeQueryRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.queries.get"),
+            NPerms::Optional("yq.queries.viewAst"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    }};
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::DescribeQueryRequest, YandexQuery::DescribeQueryResponse>>(ctx.Release(), &DoYandexQueryDescribeQueryRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateGetQueryStatusRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{[](const YandexQuery::GetQueryStatusRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.queries.getStatus"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    }};
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::GetQueryStatusRequest, YandexQuery::GetQueryStatusResponse>>(ctx.Release(), &DoYandexQueryGetQueryStatusRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateModifyQueryRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{[](const YandexQuery::ModifyQueryRequest& request) {
+        TVector<NPerms::TPermission> basePermissions{
+            NPerms::Required("yq.queries.update"),
+            NPerms::Optional("yq.connections.use"),
+            NPerms::Optional("yq.bindings.use"),
+            NPerms::Optional("yq.resources.managePrivate")
+        };
+        if (request.execute_mode() != YandexQuery::SAVE) {
+            basePermissions.push_back(NPerms::Required("yq.queries.invoke"));
+        }
+        if (request.content().acl().visibility() == YandexQuery::Acl::SCOPE) {
+            basePermissions.push_back(NPerms::Required("yq.resources.managePublic"));
+        }
+        return basePermissions;
+    }};
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ModifyQueryRequest, YandexQuery::ModifyQueryResponse>>(ctx.Release(), &DoYandexQueryModifyQueryRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateDeleteQueryRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{[](const YandexQuery::DeleteQueryRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.queries.delete"),
+            NPerms::Optional("yq.resources.managePublic"),
+            NPerms::Optional("yq.resources.managePrivate")
+        };
+    }};
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::DeleteQueryRequest, YandexQuery::DeleteQueryResponse>>(ctx.Release(), &DoYandexQueryDeleteQueryRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateControlQueryRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{[](const YandexQuery::ControlQueryRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.queries.control"),
+            NPerms::Optional("yq.resources.managePublic"),
+            NPerms::Optional("yq.resources.managePrivate")
+        };
+    }};
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ControlQueryRequest, YandexQuery::ControlQueryResponse>>(ctx.Release(), &DoYandexQueryControlQueryRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateGetResultDataRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::GetResultDataRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.queries.getData"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::GetResultDataRequest, YandexQuery::GetResultDataResponse>>(ctx.Release(), &DoYandexQueryGetResultDataRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateListJobsRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::ListJobsRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.jobs.get"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ListJobsRequest, YandexQuery::ListJobsResponse>>(ctx.Release(), &DoYandexQueryListJobsRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateDescribeJobRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::DescribeJobRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.jobs.get"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::DescribeJobRequest, YandexQuery::DescribeJobResponse>>(ctx.Release(), &DoYandexQueryDescribeJobRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateCreateConnectionRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::CreateConnectionRequest& request) -> TVector<NPerms::TPermission> {
+        TVector<NPerms::TPermission> basePermissions{
+            NPerms::Required("yq.connections.create"),
+        };
+        if (request.content().acl().visibility() == YandexQuery::Acl::SCOPE) {
+            basePermissions.push_back(NPerms::Required("yq.resources.managePublic"));
+        }
+        return basePermissions;
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::CreateConnectionRequest, YandexQuery::CreateConnectionResponse>>(ctx.Release(), &DoYandexQueryCreateConnectionRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateListConnectionsRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::ListConnectionsRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.connections.get"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ListConnectionsRequest, YandexQuery::ListConnectionsResponse>>(ctx.Release(), &DoYandexQueryListConnectionsRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateDescribeConnectionRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::DescribeConnectionRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.connections.get"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::DescribeConnectionRequest, YandexQuery::DescribeConnectionResponse>>(ctx.Release(), &DoYandexQueryDescribeConnectionRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateModifyConnectionRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::ModifyConnectionRequest& request) -> TVector<NPerms::TPermission> {
+        TVector<NPerms::TPermission> basePermissions{
+            NPerms::Required("yq.connections.update"),
+            NPerms::Optional("yq.resources.managePrivate")
+        };
+        if (request.content().acl().visibility() == YandexQuery::Acl::SCOPE) {
+            basePermissions.push_back(NPerms::Required("yq.resources.managePublic"));
+        }
+        return basePermissions;
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ModifyConnectionRequest, YandexQuery::ModifyConnectionResponse>>(ctx.Release(), &DoYandexQueryModifyConnectionRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateDeleteConnectionRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::DeleteConnectionRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.connections.delete"),
+            NPerms::Optional("yq.resources.managePublic"),
+            NPerms::Optional("yq.resources.managePrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::DeleteConnectionRequest, YandexQuery::DeleteConnectionResponse>>(ctx.Release(), &DoYandexQueryDeleteConnectionRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateTestConnectionRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::TestConnectionRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.connections.create")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::TestConnectionRequest, YandexQuery::TestConnectionResponse>>(ctx.Release(), &DoYandexQueryTestConnectionRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateCreateBindingRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::CreateBindingRequest&) -> TVector<NPerms::TPermission> {
+        // For use in binding links on connection with visibility SCOPE,
+        // the yq.resources.managePublic permission is required. But there
+        // is no information about connection visibility in this place,
+        // so yq.resources.managePublic is always requested as optional
+        return {
+            NPerms::Required("yq.bindings.create"),
+            NPerms::Optional("yq.resources.managePublic")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::CreateBindingRequest, YandexQuery::CreateBindingResponse>>(ctx.Release(), &DoYandexQueryCreateBindingRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateListBindingsRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::ListBindingsRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.bindings.get"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ListBindingsRequest, YandexQuery::ListBindingsResponse>>(ctx.Release(), &DoYandexQueryListBindingsRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateDescribeBindingRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::DescribeBindingRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.bindings.get"),
+            NPerms::Optional("yq.resources.viewPublic"),
+            NPerms::Optional("yq.resources.viewPrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::DescribeBindingRequest, YandexQuery::DescribeBindingResponse>>(ctx.Release(), &DoYandexQueryDescribeBindingRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateModifyBindingRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::ModifyBindingRequest&) -> TVector<NPerms::TPermission> {
+        // For use in binding links on connection with visibility SCOPE,
+        // the yq.resources.managePublic permission is required. But there
+        // is no information about connection visibility in this place,
+        // so yq.resources.managePublic is always requested as optional
+        return {
+            NPerms::Required("yq.bindings.update"),
+            NPerms::Optional("yq.resources.managePrivate"),
+            NPerms::Optional("yq.resources.managePublic")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::ModifyBindingRequest, YandexQuery::ModifyBindingResponse>>(ctx.Release(), &DoYandexQueryModifyBindingRequest, permissions);
+}
+
+std::unique_ptr<TEvProxyRuntimeEvent> CreateDeleteBindingRequestOperationCall(TIntrusivePtr<NGrpc::IRequestContextBase> ctx) {
+    static const std::function permissions{ [](const YandexQuery::DeleteBindingRequest&) -> TVector<NPerms::TPermission> {
+        return {
+            NPerms::Required("yq.bindings.delete"),
+            NPerms::Optional("yq.resources.managePublic"),
+            NPerms::Optional("yq.resources.managePrivate")
+        };
+    } };
+
+    return std::make_unique<TGrpcYqRequestOperationCall<YandexQuery::DeleteBindingRequest, YandexQuery::DeleteBindingResponse>>(ctx.Release(), &DoYandexQueryDeleteBindingRequest, permissions);
 }
 
 } // namespace NGRpcService

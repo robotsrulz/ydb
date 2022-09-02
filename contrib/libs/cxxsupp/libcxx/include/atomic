@@ -533,7 +533,7 @@ template <class T>
 #endif
 
 #if !defined(_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
-#pragma GCC system_header
+#  pragma GCC system_header
 #endif
 
 #ifdef _LIBCPP_HAS_NO_ATOMIC_HEADER
@@ -1676,13 +1676,7 @@ struct __atomic_base  // false
 #pragma warning ( push )
 #pragma warning ( disable : 4522 )
 #endif
-#ifndef _LIBCPP_CXX03_LANG
     __atomic_base(const __atomic_base&) = delete;
-#else
-private:
-    _LIBCPP_INLINE_VISIBILITY
-    __atomic_base(const __atomic_base&);
-#endif
 #ifdef _LIBCPP_COMPILER_MSVC
 #pragma warning ( pop )
 #endif
@@ -2471,22 +2465,13 @@ typedef struct atomic_flag
 #pragma warning ( push )
 #pragma warning ( disable : 4522 )
 #endif
-#ifndef _LIBCPP_CXX03_LANG
     atomic_flag(const atomic_flag&) = delete;
     atomic_flag& operator=(const atomic_flag&) = delete;
     atomic_flag& operator=(const atomic_flag&) volatile = delete;
-#else
-private:
-    _LIBCPP_INLINE_VISIBILITY
-    atomic_flag(const atomic_flag&);
-    _LIBCPP_INLINE_VISIBILITY
-    atomic_flag& operator=(const atomic_flag&);
-    _LIBCPP_INLINE_VISIBILITY
-    atomic_flag& operator=(const atomic_flag&) volatile;
-#endif
 #ifdef _LIBCPP_COMPILER_MSVC
 #pragma warning ( pop )
 #endif
+
 } atomic_flag;
 
 
@@ -2727,10 +2712,13 @@ typedef conditional<_LIBCPP_CONTENTION_LOCK_FREE, __cxx_contention_t, char>::typ
 typedef conditional<_LIBCPP_CONTENTION_LOCK_FREE, __cxx_contention_t, unsigned char>::type      __libcpp_unsigned_lock_free;
 #else
     // No signed/unsigned lock-free types
+#define _LIBCPP_NO_LOCK_FREE_TYPES
 #endif
 
+#if !defined(_LIBCPP_NO_LOCK_FREE_TYPES)
 typedef atomic<__libcpp_signed_lock_free> atomic_signed_lock_free;
 typedef atomic<__libcpp_unsigned_lock_free> atomic_unsigned_lock_free;
+#endif
 
 #define ATOMIC_FLAG_INIT {false}
 #define ATOMIC_VAR_INIT(__v) {__v}

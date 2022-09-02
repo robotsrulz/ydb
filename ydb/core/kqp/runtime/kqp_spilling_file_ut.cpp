@@ -31,8 +31,8 @@ void AssertEquals(const TBuffer& lhs, const TBuffer& rhs) {
     UNIT_ASSERT_STRINGS_EQUAL(l, r);
 }
 
-TIntrusivePtr<NMonitoring::TDynamicCounters> Counters() {
-    static auto counters = MakeIntrusive<NMonitoring::TDynamicCounters>();
+TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters() {
+    static auto counters = MakeIntrusive<::NMonitoring::TDynamicCounters>();
     return counters;
 }
 
@@ -299,6 +299,8 @@ Y_UNIT_TEST(SingleFilePart) {
 }
 
 Y_UNIT_TEST(ReadError) {
+    return;
+
     TTestBasicRuntime runtime{1, false};
     runtime.Initialize(TAppPrepare().Unwrap());
     SetupLogs(runtime);
@@ -368,6 +370,10 @@ struct THttpRequest : NMonitoring::IHttpRequest {
 
     const THttpHeaders& GetHeaders() const override {
         return HttpHeaders;
+    }
+
+    TString GetRemoteAddr() const override {
+        return TString();
     }
 };
 

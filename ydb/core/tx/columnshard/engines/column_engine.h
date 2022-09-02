@@ -16,6 +16,8 @@ struct TPredicate;
 struct TCompactionLimits {
     static constexpr const ui32 MIN_GOOD_BLOB_SIZE = 256 * 1024; // some BlobStorage constant
     static constexpr const ui32 MAX_BLOB_SIZE = 8 * 1024 * 1024; // some BlobStorage constant
+    static constexpr const ui64 DEFAULT_EVICTION_BYTES = 64 * 1024 * 1024;
+    static constexpr const ui64 MAX_BLOBS_TO_DELETE = 10000;
 
     ui32 GoodBlobSize{MIN_GOOD_BLOB_SIZE};
     ui32 GranuleBlobSplitSize{MAX_BLOB_SIZE};
@@ -131,6 +133,7 @@ public:
     TVector<TColumnRecord> EvictedRecords;
     TVector<std::pair<TPortionInfo, ui64>> PortionsToMove; // {portion, new granule}
     THashMap<TBlobRange, TString> Blobs;
+    bool NeedRepeat{false};
 
     bool IsInsert() const { return Type == INSERT; }
     bool IsCompaction() const { return Type == COMPACTION; }
@@ -336,6 +339,22 @@ struct TColumnEngineStats {
     TPortionsStats Inactive{};
     TPortionsStats Evicted{};
 
+    TPortionsStats Active() const {
+        return TPortionsStats {
+            .Portions = ActivePortions(),
+            .Blobs = ActiveBlobs(),
+            .Rows = ActiveRows(),
+            .Bytes = ActiveBytes(),
+            .RawBytes = ActiveRawBytes()
+        };
+    }
+
+    ui64 ActivePortions() const { return Inserted.Portions + Compacted.Portions + SplitCompacted.Portions; }
+    ui64 ActiveBlobs() const { return Inserted.Blobs + Compacted.Blobs + SplitCompacted.Blobs; }
+    ui64 ActiveRows() const { return Inserted.Rows + Compacted.Rows + SplitCompacted.Rows; }
+    ui64 ActiveBytes() const { return Inserted.Bytes + Compacted.Bytes + SplitCompacted.Bytes; }
+    ui64 ActiveRawBytes() const { return Inserted.RawBytes + Compacted.RawBytes + SplitCompacted.RawBytes; }
+
     void Clear() {
         *this = {};
     }
@@ -350,6 +369,7 @@ public:
     virtual const std::shared_ptr<arrow::Schema>& GetSortingKey() const { return GetIndexInfo().GetSortingKey(); }
     virtual const std::shared_ptr<arrow::Schema>& GetIndexKey() const { return GetIndexInfo().GetIndexKey(); }
     virtual const THashSet<ui64>* GetOverloadedGranules(ui64 /*pathId*/) const { return nullptr; }
+    virtual bool HasOverloadedGranules() const { return false; }
 
     virtual bool Load(IDbWrapper& db, const THashSet<ui64>& pathsToDrop = {}) = 0;
 
@@ -363,7 +383,8 @@ public:
                                                                   const TSnapshot& outdatedSnapshot) = 0;
     virtual std::shared_ptr<TColumnEngineChanges> StartCleanup(const TSnapshot& snapshot,
                                                                THashSet<ui64>& pathsToDrop) = 0;
-    virtual std::shared_ptr<TColumnEngineChanges> StartTtl(const THashMap<ui64, TTiersInfo>& pathTtls) = 0;
+    virtual std::shared_ptr<TColumnEngineChanges> StartTtl(const THashMap<ui64, TTiersInfo>& pathTtls,
+                                                           ui64 maxBytesToEvict = TCompactionLimits::DEFAULT_EVICTION_BYTES) = 0;
     virtual bool ApplyChanges(IDbWrapper& db, std::shared_ptr<TColumnEngineChanges> changes, const TSnapshot& snapshot) = 0;
     virtual void UpdateDefaultSchema(const TSnapshot& snapshot, TIndexInfo&& info) = 0;
     //virtual void UpdateTableSchema(ui64 pathId, const TSnapshot& snapshot, TIndexInfo&& info) = 0; // TODO
@@ -371,6 +392,7 @@ public:
     virtual const TMap<ui64, std::shared_ptr<TColumnEngineStats>>& GetStats() const = 0;
     virtual const TColumnEngineStats& GetTotalStats() = 0;
     virtual ui64 MemoryUsage() const { return 0; }
+    virtual TSnapshot LastUpdate() const { return {}; }
 };
 
 }

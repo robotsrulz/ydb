@@ -15,7 +15,8 @@
 #include <ydb/library/pdisk_io/aio.h>
 #include <ydb/core/yq/libs/config/protos/audit.pb.h>
 
-#include <ydb/library/yql/providers/pq/cm_client/interface/client.h>
+#include <ydb/library/yql/minikql/computation/mkql_computation_node.h>
+#include <ydb/library/yql/providers/pq/cm_client/client.h>
 
 #include <library/cpp/actors/core/actorsystem.h>
 
@@ -36,7 +37,7 @@ struct TModuleFactories {
     std::shared_ptr<NKqp::IQueryReplayBackendFactory> QueryReplayBackendFactory;
     //
     std::shared_ptr<NMsgBusProxy::IPersQueueGetReadSessionsInfoWorkerFactory> PQReadSessionsInfoWorkerFactory;
-    // Can be nullptr. In that case there would be no ability to work with Yandex Logbroker in Yandex Query.
+    // Can be nullptr. In that case there would be no ability to work with internal configuration manager.
     NPq::NConfigurationManager::IConnections::TPtr PqCmConnections;
     // Export implementation for Data Shards
     std::shared_ptr<NDataShard::IExportFactory> DataShardExportFactory;
@@ -46,7 +47,7 @@ struct TModuleFactories {
     IActor*(*CreateTicketParser)(const NKikimrProto::TAuthConfig&);
     IActor*(*FolderServiceFactory)(const NKikimrProto::NFolderService::TFolderServiceConfig&);
 
-    std::function<IActor*(const NYq::NConfig::TAuditConfig& auditConfig)> YqAuditServiceFactory;
+    std::function<IActor*(const NYq::NConfig::TAuditConfig& auditConfig, const ::NMonitoring::TDynamicCounterPtr& counters)> YqAuditServiceFactory;
     NKikimr::TYdbCredentialsProviderFactory YdbCredentialProviderFactory;
     // Factory for grpc services
     TGrpcServiceFactory GrpcServiceFactory;
@@ -59,6 +60,7 @@ struct TModuleFactories {
     std::shared_ptr<NSQS::IAuthFactory> SqsAuthFactory;
 
     std::shared_ptr<NHttpProxy::IAuthFactory> DataStreamsAuthFactory;
+    std::vector<NKikimr::NMiniKQL::TComputationNodeFactory> AdditionalComputationNodeFactories;
 
     ~TModuleFactories();
 };

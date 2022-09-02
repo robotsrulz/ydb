@@ -1,12 +1,9 @@
-# Managing a YDB cluster
+# Managing a {{ ydb-short-name }} cluster
 
-This section contains articles intended for system administrators responsible for the performance of YDB clusters that application databases are deployed on.
+This section provides information about deploying, configuring, maintaining, monitoring, and performing diagnostics of multi-node [{{ ydb-short-name }} clusters](../concepts/cluster/index.md).
 
-{% include [addition_overlay](_includes/addition_overlay.md) %}
-
-{% note warning %}
-
-The section is under development.
-
-{% endnote %}
-
+* [{#T}](../deploy/index.md).
+* [{#T}](../maintenance/embedded_monitoring/index.md).
+* [{#T}](../maintenance/manual/index.md).
+* [{#T}](../troubleshooting/system_views_cluster.md).
+* [{#T}](../administration/monitoring.md).

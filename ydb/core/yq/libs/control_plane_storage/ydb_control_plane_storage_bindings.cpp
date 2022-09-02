@@ -104,6 +104,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvCreateBindi
         "Connection " + connectionId + " does not exist or permission denied. Please check the id connection or your access rights",
         permissions,
         user,
+        content.acl().visibility(),
         YdbConnection->TablePathPrefix);
 
     TVector<TValidationQuery> validators;
@@ -203,6 +204,11 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListBinding
             filters.push_back("`" USER_COLUMN_NAME "` = $user");
         }
 
+        if (request.filter().visibility() != YandexQuery::Acl::VISIBILITY_UNSPECIFIED) {
+            queryBuilder.AddInt64("visibility", request.filter().visibility());
+            filters.push_back("`" VISIBILITY_COLUMN_NAME "` = $visibility");
+        }
+
         filter = JoinSeq(" AND ", filters);
     }
 
@@ -219,7 +225,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListBinding
 
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
     auto prepare = [resultSets=resultSets, limit] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";
@@ -249,6 +255,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvListBinding
             case YandexQuery::BindingSetting::BINDING_NOT_SET:
             break;
             }
+            briefBinding.set_visibility(binding.content().acl().visibility());
         }
 
         if (result.binding_size() == limit + 1) {
@@ -322,7 +329,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvDescribeBin
 
     const auto query = queryBuilder.Build();
     auto debugInfo = Config.Proto.GetEnableDebugMode() ? std::make_shared<TDebugInfo>() : TDebugInfoPtr{};
-    auto [result, resultSets] = Read(query.Sql, query.Params, requestCounters, debugInfo);
+    auto [result, resultSets] = Read(NActors::TActivationContext::ActorSystem(), query.Sql, query.Params, requestCounters, debugInfo);
     auto prepare = [=, resultSets=resultSets] {
         if (resultSets->size() != 1) {
             ythrow TControlPlaneStorageException(TIssuesIds::INTERNAL_ERROR) << "Result set size is not equal to 1 but equal " << resultSets->size() << ". Please contact internal support";
@@ -461,7 +468,7 @@ void TYdbControlPlaneStorageActor::Handle(TEvControlPlaneStorage::TEvModifyBindi
         TSqlQueryBuilder writeQueryBuilder(YdbConnection->TablePathPrefix, "ModifyBinding(write)");
         writeQueryBuilder.AddString("scope", scope);
         writeQueryBuilder.AddString("binding_id", bindingId);
-        writeQueryBuilder.AddInt64("visibility", YandexQuery::Acl::SCOPE); // TODO: fix me
+        writeQueryBuilder.AddInt64("visibility", binding.content().acl().visibility());
         writeQueryBuilder.AddString("name", binding.content().name());
         writeQueryBuilder.AddInt64("revision", meta.revision());
         writeQueryBuilder.AddString("internal", bindingInternal.SerializeAsString());

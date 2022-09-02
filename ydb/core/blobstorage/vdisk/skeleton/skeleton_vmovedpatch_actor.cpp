@@ -23,14 +23,13 @@ namespace NKikimr {
             std::unique_ptr<TEvBlobStorage::TEvPatch::TDiff[]> Diffs;
 
             TActorIDPtr SkeletonFrontIDPtr;
-            NMonitoring::TDynamicCounters::TCounterPtr MovedPatchResMsgsPtr;
+            ::NMonitoring::TDynamicCounters::TCounterPtr MovedPatchResMsgsPtr;
 
             TEvBlobStorage::TEvVMovedPatch::TPtr Event;
             TActorId LeaderId;
             TOutOfSpaceStatus OOSStatus;
 
 
-            NWilson::TTraceId TraceId;
             NLWTrace::TOrbit Orbit;
 
             const ui64 IncarnationGuid;
@@ -39,7 +38,7 @@ namespace NKikimr {
 
         public:
             TVMovedPatchActor(TActorId leaderId, TOutOfSpaceStatus oosStatus, TEvBlobStorage::TEvVMovedPatch::TPtr &ev,
-                    TActorIDPtr skeletonFrontIDPtr, NMonitoring::TDynamicCounters::TCounterPtr movedPatchResMsgsPtr,
+                    TActorIDPtr skeletonFrontIDPtr, ::NMonitoring::TDynamicCounters::TCounterPtr movedPatchResMsgsPtr,
                     ui64 incarnationGuid, const TVDiskContextPtr &vCtx)
                 : TActorBootstrapped()
                 , SkeletonFrontIDPtr(skeletonFrontIDPtr)
@@ -86,8 +85,7 @@ namespace NKikimr {
                 TInstant now = TAppData::TimeProvider->Now();
                 auto vMovedPatchResult = std::make_unique<TEvBlobStorage::TEvVMovedPatchResult>(status, OriginalId,
                         PatchedId, vdisk, cookie, OOSStatus, now, Event->Get()->GetCachedByteSize(), &record,
-                        SkeletonFrontIDPtr, MovedPatchResMsgsPtr, nullptr, std::move(TraceId), IncarnationGuid,
-                        ErrorReason);
+                        SkeletonFrontIDPtr, MovedPatchResMsgsPtr, nullptr, IncarnationGuid, ErrorReason);
                 vMovedPatchResult->Orbit = std::move(Orbit);
 
                 if (status == NKikimrProto::ERROR) {
@@ -98,7 +96,7 @@ namespace NKikimr {
                             << " ErrorReason# " << ErrorReason
                             << " Marker# BSVSP01");
                 }
-                SendVDiskResponse(ctx, Event->Sender, vMovedPatchResult.release(), *this, Event->Cookie);
+                SendVDiskResponse(ctx, Event->Sender, vMovedPatchResult.release(), Event->Cookie);
                 PassAway();
             }
 
@@ -112,7 +110,6 @@ namespace NKikimr {
             void Handle(TEvBlobStorage::TEvGetResult::TPtr &ev, const TActorContext &ctx) {
                 TEvBlobStorage::TEvGetResult *result = ev->Get();
                 Orbit = std::move(result->Orbit);
-                TraceId = std::move(ev->TraceId);
 
                 ui32 patchedIdHash = PatchedId.Hash();
 
@@ -150,13 +147,12 @@ namespace NKikimr {
                         NKikimrBlobStorage::UserData, TEvBlobStorage::TEvPut::TacticDefault);
                 put->Orbit = std::move(Orbit);
 
-                SendToBSProxy(SelfId(), PatchedGroupId, put.release(), OriginalId.Hash(), std::move(Event->TraceId));
+                SendToBSProxy(SelfId(), PatchedGroupId, put.release(), OriginalId.Hash());
             }
 
             void Handle(TEvBlobStorage::TEvPutResult::TPtr &ev, const TActorContext &ctx) {
                 TEvBlobStorage::TEvPutResult *result = ev->Get();
                 Orbit = std::move(result->Orbit);
-                TraceId = std::move(ev->TraceId);
 
                 ui32 originalIdHash = OriginalId.Hash();
 
@@ -182,7 +178,7 @@ namespace NKikimr {
                         OriginalId.BlobSize(), deadline, NKikimrBlobStorage::AsyncRead);
                 get->Orbit = std::move(Event->Get()->Orbit);
 
-                SendToBSProxy(SelfId(), OriginalGroupId, get.release(), PatchedId.Hash(), std::move(Event->TraceId));
+                SendToBSProxy(SelfId(), OriginalGroupId, get.release(), PatchedId.Hash());
                 Become(&TThis::StateWait);
             }
 
@@ -198,7 +194,7 @@ namespace NKikimr {
 
     IActor* CreateSkeletonVMovedPatchActor(TActorId leaderId, TOutOfSpaceStatus oosStatus,
             TEvBlobStorage::TEvVMovedPatch::TPtr &ev, TActorIDPtr skeletonFrontIDPtr,
-            NMonitoring::TDynamicCounters::TCounterPtr counterPtr, ui64 incarnationGuid,
+            ::NMonitoring::TDynamicCounters::TCounterPtr counterPtr, ui64 incarnationGuid,
             const TVDiskContextPtr &vCtx)
     {
         return new NPrivate::TVMovedPatchActor(leaderId, oosStatus, ev, skeletonFrontIDPtr,

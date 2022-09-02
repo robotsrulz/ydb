@@ -382,6 +382,11 @@ public:
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxAlterExtSubDomain, errStr))
+        {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         if (settings.HasDeclaredSchemeQuotas()) {
             alterData->SetDeclaredSchemeQuotas(settings.GetDeclaredSchemeQuotas());
@@ -402,12 +407,12 @@ public:
         txState.State = TTxState::CreateParts;
 
         if (!wasSharedTxSupported && setSupportSharedTx) {
-            DeclareShards(txState, OperationId.GetTxId(), subDomain->PathId, settings.GetCoordinators(), TTabletTypes::FLAT_TX_COORDINATOR, channelBindings, context.SS);
-            DeclareShards(txState, OperationId.GetTxId(), subDomain->PathId, settings.GetMediators(), TTabletTypes::TX_MEDIATOR, channelBindings, context.SS);
+            DeclareShards(txState, OperationId.GetTxId(), subDomain->PathId, settings.GetCoordinators(), TTabletTypes::Coordinator, channelBindings, context.SS);
+            DeclareShards(txState, OperationId.GetTxId(), subDomain->PathId, settings.GetMediators(), TTabletTypes::Mediator, channelBindings, context.SS);
         }
 
         if (addExternalSchemeShard) {
-            DeclareShards(txState, OperationId.GetTxId(), subDomain->PathId, 1, TTabletTypes::FLAT_SCHEMESHARD, channelBindings, context.SS);
+            DeclareShards(txState, OperationId.GetTxId(), subDomain->PathId, 1, TTabletTypes::SchemeShard, channelBindings, context.SS);
         }
 
         if (addExternalHive) {

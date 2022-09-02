@@ -84,6 +84,16 @@ public:
         clientConfig.SslCaCert = dbState->CaCert;
         clientConfig.MemQuota = MemoryQuota_;
 
+        if (MaxMessageSize_ > 0) {
+            clientConfig.MaxMessageSize = MaxMessageSize_;
+        }
+        if (MaxInboundMessageSize_ > 0) {
+            clientConfig.MaxInboundMessageSize = MaxInboundMessageSize_;
+        }
+        if (MaxOutboundMessageSize_ > 0) {
+            clientConfig.MaxOutboundMessageSize = MaxOutboundMessageSize_;
+        }
+
         if (std::is_same<TService,Ydb::Discovery::V1::DiscoveryService>()
             || dbState->Database.empty()
             || endpointPolicy == TRpcRequestSettings::TEndpointPolicy::UseDiscoveryEndpoint)
@@ -596,8 +606,8 @@ public:
 
     bool GetDrainOnDtors() const;
     TBalancingSettings GetBalancingSettings() const override;
-    bool StartStatCollecting(NMonitoring::IMetricRegistry* sensorsRegistry) override;
-    NMonitoring::TMetricRegistry* GetMetricRegistry() override;
+    bool StartStatCollecting(::NMonitoring::IMetricRegistry* sensorsRegistry) override;
+    ::NMonitoring::TMetricRegistry* GetMetricRegistry() override;
     void RegisterExtension(IExtension* extension);
     void RegisterExtensionApi(IExtensionApi* api);
     void SetDiscoveryMutator(IDiscoveryMutatorApi::TMutatorCb&& cb);
@@ -688,7 +698,7 @@ private:
 
 private:
     std::mutex ExtensionsLock_;
-    NMonitoring::TMetricRegistry* MetricRegistryPtr_ = nullptr;
+    ::NMonitoring::TMetricRegistry* MetricRegistryPtr_ = nullptr;
 
     std::unique_ptr<IThreadPool> ResponseQueue_;
 
@@ -705,6 +715,9 @@ private:
     const TDuration GRpcKeepAliveTimeout_;
     const bool GRpcKeepAlivePermitWithoutCalls_;
     const ui64 MemoryQuota_;
+    const ui64 MaxInboundMessageSize_;
+    const ui64 MaxOutboundMessageSize_;
+    const ui64 MaxMessageSize_;
 
     std::atomic_int64_t QueuedRequests_;
 #ifndef YDB_GRPC_BYPASS_CHANNEL_POOL

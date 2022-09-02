@@ -394,16 +394,23 @@ public:
         bool parseOk = ParseFromStringNoSizeLimit(config, tabletConfig);
         Y_VERIFY(parseOk);
 
-        ui64 throughput = ((ui64)partitionsToCreate) * config.GetPartitionConfig().GetWriteSpeedInBytesPerSecond();
-        ui64 storage = throughput * config.GetPartitionConfig().GetLifetimeSeconds();
-        ui64 storageToReserve = storage;
+        const ui64 throughput = ((ui64)partitionsToCreate) *
+                                config.GetPartitionConfig().GetWriteSpeedInBytesPerSecond();
+        const ui64 storage = [&config, &throughput]() {
+            if (config.GetPartitionConfig().HasStorageLimitBytes()) {
+                return config.GetPartitionConfig().GetStorageLimitBytes();
+            } else {
+                return throughput * config.GetPartitionConfig().GetLifetimeSeconds();
+            }
+        }();
+
         {
             NSchemeShard::TPath::TChecker checks = dstPath.Check();
             checks
                 .ShardsLimit(shardsToCreate)
                 .PathShardsLimit(shardsToCreate)
                 .PQPartitionsLimit(partitionsToCreate)
-                .PQReservedStorageLimit(storageToReserve);
+                .PQReservedStorageLimit(storage);
 
             if (!checks) {
                 TString explain = TStringBuilder() << "dst path fail checks"
@@ -423,7 +430,7 @@ public:
         // a tablet with local db which doesn't use extra channels in any way.
         const ui32 tabletProfileId = 0;
         TChannelsBindings tabletChannelsBinding;
-        if (!context.SS->ResolvePqChannels(tabletProfileId, dstPath.DomainId(), tabletChannelsBinding)) {
+        if (!context.SS->ResolvePqChannels(tabletProfileId, dstPath.GetPathIdForDomain(), tabletChannelsBinding)) {
             result->SetError(NKikimrScheme::StatusInvalidParameter,
                              "Unable to construct channel binding for PQ with the storage pool");
             return result;
@@ -452,7 +459,7 @@ public:
 
             const auto resolved = context.SS->ResolveChannelsByPoolKinds(
                 partitionPoolKinds,
-                dstPath.DomainId(),
+                dstPath.GetPathIdForDomain(),
                 pqChannelsBinding);
             if (!resolved) {
                 result->SetError(NKikimrScheme::StatusInvalidParameter,
@@ -463,6 +470,10 @@ public:
             context.SS->SetPqChannelsParams(ecps, pqChannelsBinding);
         } else {
             pqChannelsBinding = tabletChannelsBinding;
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxCreatePQGroup, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
         }
 
         dstPath.MaterializeLeaf(owner);
@@ -540,7 +551,7 @@ public:
         dstPath.DomainInfo()->IncPathsInside();
         dstPath.DomainInfo()->AddInternalShards(txState);
         dstPath.DomainInfo()->IncPQPartitionsInside(partitionsToCreate);
-        dstPath.DomainInfo()->IncPQReservedStorage(storageToReserve);
+        dstPath.DomainInfo()->IncPQReservedStorage(storage);
 
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_THROUGHPUT].Add(throughput);
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_STORAGE].Add(storage);

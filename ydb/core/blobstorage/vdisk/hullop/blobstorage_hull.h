@@ -1,6 +1,7 @@
 #pragma once
 #include "defs.h"
 #include <ydb/core/blobstorage/vdisk/common/vdisk_hulllogctx.h>
+#include <ydb/core/blobstorage/vdisk/hulldb/hullds_cache_block.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/hulldb_recovery.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/hulldb_bulksst_add.h>
 #include <ydb/core/blobstorage/vdisk/synclog/blobstorage_synclog_public_events.h>
@@ -84,7 +85,8 @@ namespace NKikimr {
         // Request from PDisk to cut the recovery log
         void CutRecoveryLog(const TActorContext &ctx, std::unique_ptr<NPDisk::TEvCutLog> msg);
 
-        void PostponeReplyUntilCommitted(IEventBase *msg, const TActorId &recipient, ui64 recipientCookie, ui64 lsn);
+        void PostponeReplyUntilCommitted(IEventBase *msg, const TActorId &recipient, ui64 recipientCookie,
+            NWilson::TTraceId traceId, ui64 lsn);
 
         ////////////////////////////////////////////////////////////////////////
         // LogoBlobs
@@ -92,7 +94,8 @@ namespace NKikimr {
         THullCheckStatus CheckLogoBlob(
                 const TActorContext &ctx,
                 const TLogoBlobID &id,
-                bool ignoreBlock);
+                bool ignoreBlock,
+                const NProtoBuf::RepeatedPtrField<NKikimrBlobStorage::TEvVPut::TExtraBlockCheck>& extraBlockChecks);
 
         void AddLogoBlob(
                 const TActorContext &ctx,
@@ -134,7 +137,7 @@ namespace NKikimr {
         ////////////////////////////////////////////////////////////////////////
         // Blocks
         ////////////////////////////////////////////////////////////////////////
-        using TReplySender = std::function<void (const TActorId &, ui64, IEventBase *)>;
+        using TReplySender = std::function<void (const TActorId &, ui64, NWilson::TTraceId, IEventBase *)>;
 
         THullCheckStatus CheckBlockCmdAndAllocLsn(
                 ui64 tabletID,
@@ -153,6 +156,14 @@ namespace NKikimr {
 
         bool GetBlocked(ui64 tabletID, ui32 *outGen) {
             return BlocksCache.Find(tabletID, outGen);
+        }
+
+        bool IsBlocked(ui64 tabletID, TBlocksCache::TBlockedGen tabletGeneration) {
+            auto res = BlocksCache.IsBlocked(tabletID, tabletGeneration);
+            if (res.Status == TBlocksCache::EStatus::OK) {
+                return false;
+            }
+            return true;
         }
 
         ////////////////////////////////////////////////////////////////////////

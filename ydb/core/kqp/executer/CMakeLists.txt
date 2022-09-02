@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(core-kqp-executer)
 target_compile_options(core-kqp-executer PRIVATE
@@ -23,6 +24,7 @@ target_link_libraries(core-kqp-executer PUBLIC
   core-kqp-compile
   core-kqp-rm
   ydb-core-protos
+  tx-long_tx_service-public
   ydb-core-ydb_convert
   ydb-library-mkql_proto
   library-mkql_proto-protos

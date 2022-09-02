@@ -27,7 +27,7 @@ public:
 
     NThreading::TFuture<TResult> ExecutePlan(
         const TString& sessionId,
-        NYql::NDqs::IDqsExecutionPlanner& plan,
+        NYql::NDqs::TPlan&& plan,
         const TVector<TString>& columns,
         const THashMap<TString, TString>& secureParams,
         const THashMap<TString, TString>& queryParams,
@@ -39,12 +39,11 @@ public:
         Y_UNUSED(progressWriter);
         Y_UNUSED(modulesMapping); // TODO: support.
         Y_UNUSED(discard);
-        Y_UNUSED(queryParams);
 
         NProto::TGraphParams params;
         THashMap<i64, TString> stagePrograms;
-        NTasksPacker::Pack(plan.GetTasks(), stagePrograms);
-        for (auto&& task : plan.GetTasks()) {
+        NTasksPacker::Pack(plan.Tasks, stagePrograms);
+        for (auto&& task : plan.Tasks) {
             *params.AddTasks() = std::move(task);
         }
         for (const auto& [id, program]: stagePrograms) {
@@ -57,30 +56,18 @@ public:
             (*params.MutableSecureParams())[k] = v;
         }
         settings->Save(params);
-        if (plan.GetSourceID()) {
-            params.SetSourceId(plan.GetSourceID().NodeId() - 1);
-            params.SetResultType(plan.GetResultType());
+        if (plan.SourceID) {
+            params.SetSourceId(plan.SourceID.NodeId() - 1);
+            params.SetResultType(plan.ResultType);
         }
         params.SetSession(sessionId);
 
-        NActors::TActivationContext::Send(new NActors::IEventHandle(RunActorId, {}, new TEvents::TEvGraphParams(params)));
-
         auto result = NThreading::NewPromise<NYql::IDqGateway::TResult>();
-        NYql::IDqGateway::TResult gatewayResult;
-        // fake it till you make it
-        // generate dummy result for YQL facade now, remove this gateway completely
-        // when top-level YQL facade call like Preprocess() is implemented
-        if (plan.GetResultType()) {
-            // for resultable graphs return dummy "select 1" result (it is not used and is required to satisfy YQL facade only)
-            gatewayResult.SetSuccess();
-            gatewayResult.Data = "[[\001\0021]]";
-            gatewayResult.Truncated = true;
-            gatewayResult.RowsCount = 0;
-        } else {
-            // for resultless results expect infinite INSERT FROM SELECT and fail YQL facade (with well known secret code?)
-            gatewayResult.Issues.AddIssues({NYql::TIssue("MAGIC BREAK").SetCode(555, NYql::TSeverityIds::S_ERROR)});
-        }
-        result.SetValue(gatewayResult);
+        auto event = MakeHolder<TEvents::TEvGraphParams>(params);
+        event->IsEvaluation = queryParams.Value("Evaluation", "") == "true";
+        event->Result = result;
+        NActors::TActivationContext::Send(new NActors::IEventHandle(RunActorId, {}, event.Release()));
+
         return result;
     }
 

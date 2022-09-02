@@ -6,8 +6,14 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(AsmPrinter)
+add_subdirectory(GlobalISel)
+add_subdirectory(SelectionDAG)
 
 add_library(llvm12-lib-CodeGen)
+target_compile_options(llvm12-lib-CodeGen PRIVATE
+  -Wno-everything
+)
 target_include_directories(llvm12-lib-CodeGen PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/llvm12/lib/CodeGen
 )

@@ -4,6 +4,7 @@
 
 #include <util/string/cast.h>
 #include <util/string/join.h>
+#include <util/string/type.h>
 
 namespace NYql {
 
@@ -1039,6 +1040,48 @@ std::pair<bool, bool> IsRequiredSide(const TExprNode::TPtr& joinTree, const TJoi
     return{ false, false };
 }
 
+TMaybe<bool> IsFilteredSide(const TExprNode::TPtr& joinTree, const TJoinLabels& labels, ui32 inputIndex) {
+    auto joinType = joinTree->Child(0)->Content();
+    auto left = joinTree->ChildPtr(1);
+    auto right = joinTree->ChildPtr(2);
+
+    TMaybe<bool> isLeftFiltered;
+    if (!left->IsAtom()) {
+        isLeftFiltered = IsFilteredSide(left, labels, inputIndex);
+    } else {
+        auto table = left->Content();
+        if (*labels.FindInputIndex(table) == inputIndex) {
+            if (joinType == "Inner" || joinType == "LeftOnly" || joinType == "LeftSemi") {
+                isLeftFiltered = true;
+            } else if (joinType != "RightOnly" && joinType != "RightSemi") {
+                isLeftFiltered = false;
+            }
+        }
+    }
+
+    TMaybe<bool> isRightFiltered;
+    if (!right->IsAtom()) {
+        isRightFiltered = IsFilteredSide(right, labels, inputIndex);
+    } else {
+        auto table = right->Content();
+        if (*labels.FindInputIndex(table) == inputIndex) {
+            if (joinType == "Inner" || joinType == "RightOnly" || joinType == "RightSemi") {
+                isRightFiltered = true;
+            } else if (joinType != "LeftOnly" && joinType != "LeftSemi") {
+                isRightFiltered = false;
+            }
+        }
+    }
+
+    YQL_ENSURE(!(isLeftFiltered.Defined() && isRightFiltered.Defined()));
+
+    if (!isLeftFiltered.Defined() && !isRightFiltered.Defined()) {
+        return {};
+    }
+
+    return isLeftFiltered.Defined() ? isLeftFiltered : isRightFiltered;
+}
+
 void AppendEquiJoinRenameMap(TPositionHandle pos, const TMap<TStringBuf, TVector<TStringBuf>>& newRenameMap,
     TExprNode::TListType& joinSettingNodes, TExprContext& ctx) {
     for (auto& x : newRenameMap) {
@@ -1538,5 +1581,218 @@ TExprNode::TPtr MakeDictForJoin(TExprNode::TPtr&& list, bool payload, bool multi
 
 template TExprNode::TPtr MakeDictForJoin<true>(TExprNode::TPtr&& list, bool payload, bool multi, TExprContext& ctx);
 template TExprNode::TPtr MakeDictForJoin<false>(TExprNode::TPtr&& list, bool payload, bool multi, TExprContext& ctx);
+
+TExprNode::TPtr MakeCrossJoin(TPositionHandle pos, TExprNode::TPtr left, TExprNode::TPtr right, TExprContext& ctx) {
+    return ctx.Builder(pos)
+        .List()
+            .Atom(0, "Cross")
+            .Add(1, left)
+            .Add(2, right)
+            .List(3)
+            .Seal()
+            .List(4)
+            .Seal()
+            .List(5)
+            .Seal()
+        .Seal()
+        .Build();
+}
+
+TExprNode::TPtr PreparePredicate(TExprNode::TPtr predicate, TExprContext& ctx) {
+    auto originalPredicate = predicate;
+    bool isPg = false;
+    if (predicate->IsCallable("ToPg")) {
+        isPg = true;
+        predicate = predicate->ChildPtr(0);
+    }
+
+    if (!predicate->IsCallable("Or")) {
+        return originalPredicate;
+    }
+
+    if (predicate->ChildrenSize() == 1) {
+        return originalPredicate;
+    }
+
+    // try to extract common And parts from Or
+    TVector<TExprNode::TListType> andParts;
+    for (ui32 i = 0; i < predicate->ChildrenSize(); ++i) {
+        TExprNode::TListType res;
+        bool isPg;
+        GatherAndTerms(predicate->ChildPtr(i), res, isPg, ctx);
+        YQL_ENSURE(!isPg); // direct child for Or
+        andParts.emplace_back(std::move(res));
+    }
+
+    THashMap<const TExprNode*, ui32> commonParts;
+    for (ui32 j = 0; j < andParts[0].size(); ++j) {
+        commonParts[andParts[0][j].Get()] = j;
+    }
+
+    for (ui32 i = 1; i < andParts.size(); ++i) {
+        THashSet<const TExprNode*> found;
+        for (ui32 j = 0; j < andParts[i].size(); ++j) {
+            found.insert(andParts[i][j].Get());
+        }
+
+        // remove
+        for (auto it = commonParts.begin(); it != commonParts.end();) {
+            if (found.contains(it->first)) {
+                ++it;
+            } else {
+                commonParts.erase(it++);
+            }
+        }
+    }
+
+    if (commonParts.size() == 0) {
+        return originalPredicate;
+    }
+
+    // rebuild commonParts in order of original And
+    TVector<ui32> idx;
+    for (const auto& x : commonParts) {
+        idx.push_back(x.second);
+    }
+
+    Sort(idx);
+    TExprNode::TListType andArgs;
+    for (ui32 i : idx) {
+        andArgs.push_back(andParts[0][i]);
+    }
+
+    TExprNode::TListType orArgs;
+    for (ui32 i = 0; i < andParts.size(); ++i) {
+        TExprNode::TListType restAndArgs;
+        for (ui32 j = 0; j < andParts[i].size(); ++j) {
+            if (commonParts.contains(andParts[i][j].Get())) {
+                continue;
+            }
+
+            restAndArgs.push_back(andParts[i][j]);
+        }
+
+        if (restAndArgs.size() >= 1) {
+            orArgs.push_back(ctx.NewCallable(predicate->Pos(), "And", std::move(restAndArgs)));
+        }
+    }
+
+    if (orArgs.size() >= 1) {
+        andArgs.push_back(ctx.NewCallable(predicate->Pos(), "Or", std::move(orArgs)));
+    }
+
+    auto ret = ctx.NewCallable(predicate->Pos(), "And", std::move(andArgs));
+    if (isPg) {
+        ret = ctx.NewCallable(predicate->Pos(), "ToPg", { ret });
+    }
+
+    return ret;
+}
+
+void GatherAndTermsImpl(const TExprNode::TPtr& predicate, TExprNode::TListType& andTerms, TExprContext& ctx) {
+    auto pred = PreparePredicate(predicate, ctx);
+
+    if (!pred->IsCallable("And")) {
+        andTerms.emplace_back(pred);
+        return;
+    }
+
+    for (ui32 i = 0; i < pred->ChildrenSize(); ++i) {
+        GatherAndTermsImpl(pred->ChildPtr(i), andTerms, ctx);
+    }
+}
+
+void GatherAndTerms(const TExprNode::TPtr& predicate, TExprNode::TListType& andTerms, bool& isPg, TExprContext& ctx) {
+    isPg = false;
+    if (predicate->IsCallable("ToPg")) {
+        isPg = true;
+        GatherAndTermsImpl(predicate->HeadPtr(), andTerms, ctx);
+    } else {
+        GatherAndTermsImpl(predicate, andTerms, ctx);
+    }
+}
+
+TExprNode::TPtr FuseAndTerms(TPositionHandle position, const TExprNode::TListType& andTerms, const TExprNode::TPtr& exclude, bool isPg, TExprContext& ctx) {
+    TExprNode::TPtr prevAndNode = nullptr;
+    TNodeSet added;
+    for (const auto& otherAndTerm : andTerms) {
+        if (otherAndTerm == exclude) {
+            continue;
+        }
+
+        if (!added.insert(otherAndTerm.Get()).second) {
+            continue;
+        }
+
+        if (!prevAndNode) {
+            prevAndNode = otherAndTerm;
+        } else {
+            prevAndNode = ctx.NewCallable(position, "And", { prevAndNode, otherAndTerm });
+        }
+    }
+
+    if (isPg) {
+        return ctx.NewCallable(position, "ToPg", { prevAndNode });
+    } else {
+        return prevAndNode;
+    }
+}
+
+bool IsEquality(TExprNode::TPtr predicate, TExprNode::TPtr& left, TExprNode::TPtr& right) {
+    if (predicate->IsCallable("Coalesce")) {
+        if (predicate->Tail().IsCallable("Bool") && IsFalse(predicate->Tail().Head().Content())) {
+            predicate = predicate->HeadPtr();
+        } else {
+            return false;
+        }
+    }
+
+    if (predicate->IsCallable("FromPg")) {
+        predicate = predicate->HeadPtr();
+    }
+
+    if (predicate->IsCallable("==")) {
+        left = predicate->ChildPtr(0);
+        right = predicate->ChildPtr(1);
+        return true;
+    }
+
+    if (predicate->IsCallable("PgResolvedOp") &&
+        (predicate->Head().Content() == "=")) {
+        left = predicate->ChildPtr(2);
+        right = predicate->ChildPtr(3);
+        return true;
+    }
+
+    return false;
+}
+
+void GatherJoinInputs(const TExprNode::TPtr& expr, const TExprNode& row,
+    const TParentsMap& parentsMap, const THashMap<TString, TString>& backRenameMap,
+    const TJoinLabels& labels, TSet<ui32>& inputs, TSet<TStringBuf>& usedFields) {
+    usedFields.clear();
+
+    if (!HaveFieldsSubset(expr, row, usedFields, parentsMap, false)) {
+        const auto inputStructType = RemoveOptionalType(row.GetTypeAnn())->Cast<TStructExprType>();
+        for (const auto& i : inputStructType->GetItems()) {
+            usedFields.insert(i->GetName());
+        }
+    }
+
+    for (auto x : usedFields) {
+        // rename used fields
+        if (auto renamed = backRenameMap.FindPtr(x)) {
+            x = *renamed;
+        }
+
+        TStringBuf part1;
+        TStringBuf part2;
+        SplitTableName(x, part1, part2);
+        inputs.insert(*labels.FindInputIndex(part1));
+        if (inputs.size() == labels.Inputs.size()) {
+            break;
+        }
+    }
+}
 
 } // namespace NYql

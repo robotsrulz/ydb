@@ -55,30 +55,48 @@ void TColumnShard::Handle(TEvents::TEvPoisonPill::TPtr& ev, const TActorContext&
 
 void TColumnShard::Handle(TEvTabletPipe::TEvClientConnected::TPtr& ev, const TActorContext&) {
     auto tabletId = ev->Get()->TabletId;
+    auto clientId = ev->Get()->ClientId;
 
-    if (PipeClientCache->OnConnect(ev)) {
-        LOG_S_DEBUG("Connected to tablet at " << TabletID() << ", remote " << tabletId);
+    if (clientId == StatsReportPipe) {
+        if (ev->Get()->Status == NKikimrProto::OK) {
+            LOG_S_DEBUG("Connected to " << tabletId << " at tablet " << TabletID());
+        } else {
+            LOG_S_INFO("Failed to connect to " << tabletId << " at tablet " << TabletID());
+            StatsReportPipe = {};
+        }
         return;
     }
 
-    LOG_S_INFO("Failed to connect at " << TabletID() << ", remote " << tabletId);
+    if (PipeClientCache->OnConnect(ev)) {
+        LOG_S_DEBUG("Connected to " << tabletId << " at tablet " << TabletID());
+        return;
+    }
+
+    LOG_S_INFO("Failed to connect to " << tabletId << " at tablet " << TabletID());
 }
 
 void TColumnShard::Handle(TEvTabletPipe::TEvClientDestroyed::TPtr& ev, const TActorContext&) {
     auto tabletId = ev->Get()->TabletId;
-    LOG_S_DEBUG("Client pipe reset at " << TabletID() << ", remote " << tabletId);
+    auto clientId = ev->Get()->ClientId;
+
+    LOG_S_DEBUG("Client pipe reset to " << tabletId << " at tablet " << TabletID());
+
+    if (clientId == StatsReportPipe) {
+        StatsReportPipe = {};
+        return;
+    }
 
     PipeClientCache->OnDisconnect(ev);
 }
 
 void TColumnShard::Handle(TEvTabletPipe::TEvServerConnected::TPtr& ev, const TActorContext&) {
-    auto tabletId = ev->Get()->TabletId;
-    LOG_S_DEBUG("Server pipe connected at tablet " << TabletID() << ", remote " << tabletId);
+    Y_UNUSED(ev);
+    LOG_S_DEBUG("Server pipe connected at tablet " << TabletID());
 }
 
 void TColumnShard::Handle(TEvTabletPipe::TEvServerDisconnected::TPtr& ev, const TActorContext&) {
-    auto tabletId = ev->Get()->TabletId;
-    LOG_S_DEBUG("Server pipe reset at tablet " << TabletID() << ", remote " << tabletId);
+    Y_UNUSED(ev);
+    LOG_S_DEBUG("Server pipe reset at tablet " << TabletID());
 }
 
 void TColumnShard::Handle(TEvPrivate::TEvScanStats::TPtr& ev, const TActorContext &ctx) {
@@ -113,7 +131,37 @@ void TColumnShard::Handle(TEvPrivate::TEvPeriodicWakeup::TPtr& ev, const TActorC
         SendWaitPlanStep(GetOutdatedStep());
     }
 
+    SendPeriodicStats();
     ctx.Schedule(ActivationPeriod, new TEvPrivate::TEvPeriodicWakeup());
+}
+
+void TColumnShard::Handle(TEvMediatorTimecast::TEvRegisterTabletResult::TPtr& ev, const TActorContext&) {
+    const auto* msg = ev->Get();
+    Y_VERIFY(msg->TabletId == TabletID());
+    MediatorTimeCastEntry = msg->Entry;
+    Y_VERIFY(MediatorTimeCastEntry);
+    LOG_S_DEBUG("Registered with mediator time cast at tablet " << TabletID());
+
+    RescheduleWaitingReads();
+}
+
+void TColumnShard::Handle(TEvMediatorTimecast::TEvNotifyPlanStep::TPtr& ev, const TActorContext&) {
+    const auto* msg = ev->Get();
+    Y_VERIFY(msg->TabletId == TabletID());
+
+    Y_VERIFY(MediatorTimeCastEntry);
+    ui64 step = MediatorTimeCastEntry->Get(TabletID());
+    LOG_S_DEBUG("Notified by mediator time cast with PlanStep# " << step << " at tablet " << TabletID());
+
+    for (auto it = MediatorTimeCastWaitingSteps.begin(); it != MediatorTimeCastWaitingSteps.end();) {
+        if (step < *it) {
+            break;
+        }
+        it = MediatorTimeCastWaitingSteps.erase(it);
+    }
+
+    RescheduleWaitingReads();
+    EnqueueBackgroundActivities(true);
 }
 
 void TColumnShard::UpdateBlobMangerCounters() {
@@ -129,8 +177,8 @@ void TColumnShard::UpdateBlobMangerCounters() {
 }
 
 void TColumnShard::UpdateInsertTableCounters() {
-    NOlap::TInsertTable::TCounters prepared, committed;
-    InsertTable->GetCounters(prepared, committed);
+    auto& prepared = InsertTable->GetCountersPrepared();
+    auto& committed = InsertTable->GetCountersCommitted();
 
     SetCounter(COUNTER_PREPARED_RECORDS, prepared.Rows);
     SetCounter(COUNTER_PREPARED_BYTES, prepared.Bytes);
@@ -182,7 +230,23 @@ void TColumnShard::UpdateIndexCounters() {
     SetCounter(COUNTER_EVICTED_RAW_BYTES, stats.Evicted.RawBytes);
 }
 
-void TColumnShard::UpdateResourceMetrics(const TUsage& usage) {
+ui64 TColumnShard::MemoryUsage() const {
+    ui64 memory =
+        Tables.size() * sizeof(TTableInfo) +
+        PathsToDrop.size() * sizeof(ui64) +
+        Ttl.PathsCount() * sizeof(TTtl::TDescription) +
+        SchemaPresets.size() * sizeof(TSchemaPreset) +
+        AltersInFlight.size() * sizeof(TAlterMeta) +
+        CommitsInFlight.size() * sizeof(TCommitMeta) +
+        TabletCounters->Simple()[COUNTER_PREPARED_RECORDS].Get() * sizeof(NOlap::TInsertedData) +
+        TabletCounters->Simple()[COUNTER_COMMITTED_RECORDS].Get() * sizeof(NOlap::TInsertedData);
+    if (PrimaryIndex) {
+        memory += PrimaryIndex->MemoryUsage();
+    }
+    return memory;
+}
+
+void TColumnShard::UpdateResourceMetrics(const TActorContext& ctx, const TUsage& usage) {
     auto * metrics = Executor()->GetResourceMetrics();
     if (!metrics) {
         return;
@@ -196,22 +260,9 @@ void TColumnShard::UpdateResourceMetrics(const TUsage& usage) {
         TabletCounters->Simple()[COUNTER_SPLIT_COMPACTED_BYTES].Get() +
         TabletCounters->Simple()[COUNTER_INACTIVE_BYTES].Get();
 
-    ui64 memory =
-        Tables.size() * sizeof(TTableInfo) +
-        PathsToDrop.size() * sizeof(ui64) +
-        Ttl.PathsCount() * sizeof(TTtl::TDescription) +
-        SchemaPresets.size() * sizeof(TSchemaPreset) +
-        //TtlSettingsPresets.size() * sizeof(TTtlSettingsPreset) +
-        AltersInFlight.size() * sizeof(TAlterMeta) +
-        CommitsInFlight.size() * sizeof(TCommitMeta) +
-        TabletCounters->Simple()[COUNTER_PREPARED_RECORDS].Get() * sizeof(NOlap::TInsertedData) +
-        TabletCounters->Simple()[COUNTER_COMMITTED_RECORDS].Get() * sizeof(NOlap::TInsertedData);
-    if (PrimaryIndex) {
-        memory += PrimaryIndex->MemoryUsage();
-    }
+    ui64 memory = MemoryUsage();
 
-    const TActorContext& ctx = TlsActivationContext->AsActorContext();
-    TInstant now = AppData(ctx)->TimeProvider->Now();
+    TInstant now = TAppData::TimeProvider->Now();
     metrics->CPU.Increment(usage.CPUExecTime, now);
     metrics->Network.Increment(usage.Network, now);
     //metrics->StorageSystem
@@ -221,6 +272,60 @@ void TColumnShard::UpdateResourceMetrics(const TUsage& usage) {
     //metrics->WriteThroughput
 
     metrics->TryUpdate(ctx);
+}
+
+void TColumnShard::SendPeriodicStats() {
+    if (!CurrentSchemeShardId || !StorePathId) {
+        LOG_S_DEBUG("Disabled periodic stats at tablet " << TabletID());
+        return;
+    }
+
+    const TActorContext& ctx = TActivationContext::ActorContextFor(SelfId());
+    TInstant now = TAppData::TimeProvider->Now();
+    if (LastStatsReport + StatsReportInterval > now) {
+        return;
+    }
+    LastStatsReport = now;
+
+    if (!StatsReportPipe) {
+        LOG_S_DEBUG("Create periodic stats pipe to " << CurrentSchemeShardId << " at tablet " << TabletID());
+        NTabletPipe::TClientConfig clientConfig;
+        StatsReportPipe = ctx.Register(NTabletPipe::CreateClient(ctx.SelfID, CurrentSchemeShardId, clientConfig));
+    }
+
+    auto ev = std::make_unique<TEvDataShard::TEvPeriodicTableStats>(TabletID(), StorePathId);
+    {
+        ev->Record.SetShardState(2); // NKikimrTxDataShard.EDatashardState.Ready
+        ev->Record.SetGeneration(Executor()->Generation());
+        ev->Record.SetRound(StatsReportRound++);
+        ev->Record.SetNodeId(ctx.ExecutorThread.ActorSystem->NodeId);
+        ev->Record.SetStartTime(StartTime().MilliSeconds());
+
+        if (auto* resourceMetrics = Executor()->GetResourceMetrics()) {
+            resourceMetrics->Fill(*ev->Record.MutableTabletMetrics());
+        }
+
+        auto* tabletStats = ev->Record.MutableTableStats();
+        tabletStats->SetTxRejectedByOverload(TabletCounters->Cumulative()[COUNTER_WRITE_OVERLOAD].Get());
+        tabletStats->SetTxRejectedBySpace(TabletCounters->Cumulative()[COUNTER_OUT_OF_SPACE].Get());
+        tabletStats->SetInFlightTxCount(Executor()->GetStats().TxInFly);
+
+        if (PrimaryIndex) {
+            const auto& indexStats = PrimaryIndex->GetTotalStats();
+            NOlap::TSnapshot lastIndexUpdate = PrimaryIndex->LastUpdate();
+            auto activeIndexStats = indexStats.Active(); // data stats excluding inactive and evicted
+
+            tabletStats->SetRowCount(activeIndexStats.Rows);
+            tabletStats->SetDataSize(activeIndexStats.Bytes + TabletCounters->Simple()[COUNTER_COMMITTED_BYTES].Get());
+            // TODO: we need row/dataSize counters for evicted data (managed by tablet but stored outside)
+            //tabletStats->SetIndexSize(); // TODO: calc size of internal tables
+            //tabletStats->SetLastAccessTime(); // TODO: last read/write time
+            tabletStats->SetLastUpdateTime(lastIndexUpdate.PlanStep);
+        }
+    }
+
+    LOG_S_DEBUG("Sending periodic stats at tablet " << TabletID());
+    NTabletPipe::SendData(ctx, StatsReportPipe, ev.release());
 }
 
 }

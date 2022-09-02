@@ -27,18 +27,18 @@ target_compile_options(libs-apache-arrow PRIVATE
   -DPARQUET_EXPORTING
   -DURI_STATIC_BUILD
   -DHAVE_NETINET_IN_H
+  -Wno-everything
 )
 target_include_directories(libs-apache-arrow PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/src
 )
 target_include_directories(libs-apache-arrow PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src
-  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/src
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/generated
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/orc/c++/include
   ${CMAKE_SOURCE_DIR}/contrib/libs/flatbuffers/include
   ${CMAKE_SOURCE_DIR}/contrib/libs/lz4
+  ${CMAKE_SOURCE_DIR}/contrib/libs/rapidjson/include
   ${CMAKE_SOURCE_DIR}/contrib/libs/re2
   ${CMAKE_SOURCE_DIR}/contrib/libs/utf8proc
   ${CMAKE_SOURCE_DIR}/contrib/libs/zstd/include
@@ -51,6 +51,7 @@ target_link_libraries(libs-apache-arrow PUBLIC
   libs-brotli-enc
   contrib-libs-double-conversion
   contrib-libs-lz4
+  contrib-libs-rapidjson
   contrib-libs-re2
   contrib-libs-snappy
   contrib-libs-utf8proc
@@ -147,6 +148,11 @@ target_sources(libs-apache-arrow PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/datum.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/device.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/extension_type.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/filesystem/filesystem.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/filesystem/localfs.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/filesystem/mockfs.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/filesystem/path_util.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/filesystem/util_internal.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/io/buffered.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/io/caching.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/io/compressed.cc
@@ -158,11 +164,20 @@ target_sources(libs-apache-arrow PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/io/transform.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/dictionary.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/feather.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/json_simple.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/message.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/metadata_internal.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/options.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/reader.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/ipc/writer.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/chunked_builder.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/chunker.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/converter.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/object_parser.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/object_writer.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/options.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/parser.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/json/reader.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/memory_pool.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/pretty_print.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/apache/arrow/cpp/src/arrow/record_batch.cc

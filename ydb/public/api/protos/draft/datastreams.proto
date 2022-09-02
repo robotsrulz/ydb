@@ -8,13 +8,14 @@ import "google/protobuf/descriptor.proto";
 package Ydb.DataStreams.V1;
 option java_package = "com.yandex.ydb.datastreams.v1";
 
-// Extsions to simplify json <-> proto conversion
+// Extensions to simplify json <-> proto conversion
 enum EFieldTransformationType {
     TRANSFORM_NONE = 0;
     TRANSFORM_BASE64 = 1;
     TRANSFORM_DOUBLE_S_TO_INT_MS = 2;
     TRANSFORM_EMPTY_TO_NOTHING = 3;
 }
+
 
 extend google.protobuf.FieldOptions {
     EFieldTransformationType FieldTransformer = 58123;
@@ -27,6 +28,13 @@ enum EncryptionType {
     NONE = 1;
     KMS = 2;
 }
+
+enum StreamMode {
+    STREAM_MODE_UNDEFINED = 0;
+    PROVISIONED = 1;
+    ON_DEMAND = 2;
+}
+
 
 message EnhancedMetrics {
     // List of shard-level metrics
@@ -80,7 +88,7 @@ message StreamDescription {
         DELETING = 2;
         // Stream is ready for read & write operations or deletion
         ACTIVE = 3;
-        // Shards in the stream are being merged ot split
+        // Shards in the stream are being merged on split
         UPDATING = 4;
     }
 
@@ -103,8 +111,15 @@ message StreamDescription {
     StreamStatus stream_status = 9;
     // Name of the stream
     string stream_name = 10;
+    // YDS-specific Write quota in KB/S
     int32 write_quota_kb_per_sec = 11;
+    // YDS-specific Owner of the stream
     string owner = 12;
+    // YDS-specific Storage limit in MB of the stream
+    int64 storage_limit_mb = 13;
+
+    // stream metering mode
+    StreamModeDetails stream_mode_details = 14;
 }
 
 // Represents range of possible sequence numbers for the shard
@@ -253,16 +268,27 @@ message Tag {
     string value = 2;
 }
 
+// Represents stream mode details
+message StreamModeDetails {
+    StreamMode stream_mode = 1;
+}
+
 message CreateStreamRequest {
     Ydb.Operations.OperationParams operation_params = 1;
     // Name of the stream
     string stream_name = 2;
     // Shards count for a new stream
     int32 shard_count = 3;
-
     // Datastreams extension. Allow to set retention and write quota upon stream creation
     int32 write_quota_kb_per_sec = 4;
-    int32 retention_period_hours = 5;
+    oneof retention {
+        // Retention period in hours
+        int32 retention_period_hours = 5;
+        // Retention storage in megabytes
+        int32 retention_storage_megabytes = 6;
+    }
+    // stream metering mode
+    StreamModeDetails stream_mode_details = 7;
 }
 
 message CreateStreamResponse {
@@ -295,7 +321,7 @@ message ListStreamsRequest {
     string exclusive_start_stream_name = 2;
     // Max number of entries to return
     int32 limit = 3;
-    // Will make recurse listing if set to true. Otherwise will return only streams from root directory.
+    // Will make recursive listing if set to true. Otherwise will return only streams from root directory.
     bool recurse = 4;
 }
 
@@ -361,8 +387,15 @@ message UpdateStreamRequest {
     int32 write_quota_kb_per_sec = 3;
     // New number of shards
     int32 target_shard_count = 4;
-    // Retention period in hours
-    int32 retention_period_hours = 5;
+    oneof retention {
+        // Retention period in hours
+        int32 retention_period_hours = 5;
+        // Retention storage in megabytes
+        int32 retention_storage_megabytes = 6;
+    }
+    // stream metering mode
+    StreamModeDetails stream_mode_details = 7;
+
 }
 
 message UpdateStreamResponse {
@@ -653,7 +686,7 @@ message DescribeStreamSummaryResponse {
 }
 
 message DescribeStreamSummaryResult {
-    // Stream description sumary
+    // Stream description summary
     StreamDescriptionSummary stream_description_summary = 1;
 }
 
@@ -856,3 +889,23 @@ message UpdateShardCountResult {
     // Updated number of shards
     int32 target_shard_count = 3;
 }
+
+
+message UpdateStreamModeRequest {
+    Ydb.Operations.OperationParams operation_params = 1;
+    // Stream name or arn
+    string stream_arn = 2;
+    // stream metering mode
+    StreamModeDetails stream_mode_details = 3;
+
+
+}
+
+message UpdateStreamModeResponse {
+    // Result of request will be inside operation.
+    Ydb.Operations.Operation operation = 1;
+}
+
+message UpdateStreamModeResult {
+}
+

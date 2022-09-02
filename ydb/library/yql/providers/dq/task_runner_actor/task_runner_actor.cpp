@@ -2,10 +2,12 @@
 
 #include <ydb/library/yql/dq/actors/dq.h>
 #include <ydb/library/yql/providers/dq/actors/actor_helpers.h>
-#include "ydb/library/yql/providers/dq/actors/events.h"
+#include <ydb/library/yql/providers/dq/actors/events.h>
+#include <ydb/library/yql/providers/dq/runtime/runtime_data.h>
 #include <ydb/library/yql/providers/dq/common/yql_dq_settings.h>
 #include <ydb/library/yql/providers/dq/counters/counters.h>
 #include <ydb/library/yql/providers/dq/task_runner/tasks_runner_proxy.h>
+#include <ydb/library/yql/providers/dq/common/yql_dq_common.h>
 
 #include <ydb/library/yql/minikql/mkql_string_util.h>
 
@@ -31,16 +33,6 @@ TTaskRunnerActorSensors GetSensors(const T& t) {
     return result;
 }
 
-template<typename T>
-TTaskRunnerActorRusage GetRusage(const T& t) {
-    TTaskRunnerActorRusage rusage = {
-        t.GetRusage().GetUtime(),
-        t.GetRusage().GetStime(),
-        t.GetRusage().GetMajorPageFaults()
-    };
-    return rusage;
-}
-
 } // namespace
 
 class TTaskRunnerActor
@@ -54,18 +46,33 @@ public:
         ITaskRunnerActor::ICallbacks* parent,
         const NTaskRunnerProxy::IProxyFactory::TPtr& factory,
         const ITaskRunnerInvoker::TPtr& invoker,
-        const TString& traceId)
+        const TTxId& txId,
+        ui64 taskId,
+        TWorkerRuntimeData* runtimeData)
         : TActor<TTaskRunnerActor>(&TTaskRunnerActor::Handler)
         , Parent(parent)
-        , TraceId(traceId)
+        , TraceId(TStringBuilder() << txId)
+        , TaskId(taskId)
         , Factory(factory)
         , Invoker(invoker)
         , Local(Invoker->IsLocal())
         , Settings(MakeIntrusive<TDqConfiguration>())
-        , StageId(0) {
+        , StageId(0)
+        , RuntimeData(runtimeData)
+        , ClusterName(RuntimeData ? RuntimeData->ClusterName : "local")
+    {
+        Y_UNUSED(TaskId);
+        if (RuntimeData) {
+            RuntimeData->OnWorkerStart(TraceId);
+        }
     }
 
-    ~TTaskRunnerActor() { }
+    ~TTaskRunnerActor()
+    {
+        if (RuntimeData) {
+            RuntimeData->OnWorkerStop(TraceId);
+        }
+    }
 
     STRICT_STFUNC(Handler, {
         cFunc(NActors::TEvents::TEvPoison::EventType, TTaskRunnerActor::PassAway);
@@ -78,16 +85,8 @@ public:
     })
 
 private:
-    struct TRunResult {
-        bool Retriable;
-        bool Fallback;
-        TString FilteredStderr;
-
-        TRunResult() : Retriable(false), Fallback(false), FilteredStderr() {
-        }
-    };
-
-    static TRunResult ParseStderr(const TString& input, TIntrusivePtr<TDqConfiguration> settings) {
+    static std::pair<NYql::NDqProto::StatusIds::StatusCode, TString> ParseStderr(const TString& input, TIntrusivePtr<TDqConfiguration> settings) {
+        TString filteredStderr;
         THashSet<TString> fallbackOn;
         if (settings->_FallbackOnRuntimeErrors.Get()) {
             TString parts = settings->_FallbackOnRuntimeErrors.Get().GetOrElse("");
@@ -96,66 +95,73 @@ private:
             }
         }
 
-        TRunResult result;
+        bool fallback = false;
+        bool retry = false;
         for (TStringBuf line: StringSplitter(input).SplitByString("\n").SkipEmpty()) {
             if (line.Contains("mlockall failed")) {
                 // skip
             } else {
-                if (!result.Fallback) {
+                if (!fallback) {
                     if (line.Contains("FindColumnInfo(): requirement memberType->GetKind() == TType::EKind::Data")) {
                     // YQL-14757: temporary workaround for part6/produce-reduce_lambda_list_table-default.txt
-                        result.Fallback = true;
+                        fallback = true;
                     } else if (line.Contains("embedded:Len")) {
                         // YQL-14763
-                        result.Fallback = true;
+                        fallback = true;
                     } else if (line.Contains("Container killed by OOM")) {
                         // temporary workaround for YQL-12066
-                        result.Fallback = true;
+                        fallback = true;
                     } else if (line.Contains("Expected data or optional of data, actual:")) {
                         // temporary workaround for YQL-12835
-                        result.Fallback = true;
+                        fallback = true;
                     } else if (line.Contains("Pattern nodes can not get computation node by index:")) {
                         // temporary workaround for YQL-12987
-                        result.Fallback = true;
+                        fallback = true;
                     } else if (line.Contains("contrib/libs/protobuf/src/google/protobuf/messagext.cc") && line.Contains("Message size") && line.Contains("exceeds")) {
                         // temporary workaround for YQL-12988
-                        result.Fallback = true;
+                        fallback = true;
                     } else if (line.Contains("Cannot start container")) {
                         // temporary workaround for YQL-14221
-                        result.Retriable = true;
-                        result.Fallback = true;
+                        retry = true;
+                        fallback = true;
                     } else if (line.Contains("Cannot execl")) {
                         // YQL-14099
-                        result.Retriable = true;
-                        result.Fallback = true;
+                        retry = true;
+                        fallback = true;
                     } else {
                         for (const auto& part : fallbackOn) {
                             if (line.Contains(part)) {
-                                result.Fallback = true;
+                                fallback = true;
                             }
                         }
                     }
                 }
 
-                result.FilteredStderr += line;
-                result.FilteredStderr += "\n";
+                filteredStderr += line;
+                filteredStderr += "\n";
             }
         }
-        return result;
+        auto status = NYql::NDqProto::StatusIds::BAD_REQUEST;  // no retries, no fallback, error though
+        if (retry) {
+            status = NYql::NDqProto::StatusIds::UNAVAILABLE;  // retries, fallback on retries limit
+        } else if (fallback) {
+            status = NYql::NDqProto::StatusIds::UNSUPPORTED;  // no retries, fallback immediately
+        }
+        return {status, filteredStderr};
     }
 
-    static THolder<TEvDq::TEvAbortExecution> StatusToError(
+    static THolder<TEvDq::TEvAbortExecution> MakeError(
         const TEvError::TStatus& status,
         TIntrusivePtr<TDqConfiguration> settings,
         ui64 stageId,
         TString message = CurrentExceptionMessage()) {
         // stderr always affects retriable/fallback flags
-        auto runResult = ParseStderr(status.Stderr, settings);
+        auto [queryStatus, filteredStderr] = ParseStderr(status.Stderr, settings);
         auto stderrStr = TStringBuilder{}
             << "ExitCode: " << status.ExitCode << "\n"
             << "StageId: " << stageId << "\n"
-            << runResult.FilteredStderr;
-        auto issueCode = runResult.Fallback
+            << filteredStderr;
+        auto issueCode = NCommon::NeedFallback(queryStatus)
             ? TIssuesIds::DQ_GATEWAY_NEED_FALLBACK_ERROR
             : TIssuesIds::DQ_GATEWAY_ERROR;
         TIssue issue;
@@ -171,7 +177,8 @@ private:
                 issue.AddSubIssue(MakeIntrusive<TIssue>(YqlIssue(parsedPos.GetOrElse(TPosition()), TIssuesIds::DQ_GATEWAY_ERROR, TString{terminationMessage})));
             }
         }
-        return MakeHolder<NDq::TEvDq::TEvAbortExecution>(runResult.Retriable ? NYql::NDqProto::StatusIds::UNAVAILABLE : (runResult.Fallback ? NYql::NDqProto::StatusIds::UNSUPPORTED : NYql::NDqProto::StatusIds::BAD_REQUEST), TVector<TIssue>{issue});
+        Y_VERIFY(queryStatus != NYql::NDqProto::StatusIds::SUCCESS);
+        return MakeHolder<NDq::TEvDq::TEvAbortExecution>(queryStatus, TVector<TIssue>{issue});
     }
 
     void PassAway() override {
@@ -227,14 +234,14 @@ private:
                     new IEventHandle(
                         replyTo,
                         selfId,
-                        StatusToError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
+                        MakeError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
                         /*flags=*/0,
                         cookie));
             }
         });
     }
 
-    void SourcePush(
+    void AsyncInputPush(
         ui64 cookie,
         ui64 index,
         NKikimr::NMiniKQL::TUnboxedValueVector&& batch,
@@ -253,7 +260,9 @@ private:
             try {
                 // auto guard = taskRunner->BindAllocator(); // only for local mode
                 auto source = taskRunner->GetSource(index);
-                (static_cast<NTaskRunnerProxy::IStringSource*>(source.Get()))->PushString(std::move(strings), space);
+                if (!strings.empty()) {
+                    (static_cast<NTaskRunnerProxy::IStringSource*>(source.Get()))->PushString(std::move(strings), space);
+                }
                 if (finish) {
                     source->Finish();
                 }
@@ -261,7 +270,7 @@ private:
                     new IEventHandle(
                         parentId,
                         selfId,
-                        new TEvSourcePushFinished(index),
+                        new TEvAsyncInputPushFinished(index),
                         /*flags=*/0,
                         cookie));
             } catch (...) {
@@ -270,7 +279,7 @@ private:
                     new IEventHandle(
                         parentId,
                         selfId,
-                        StatusToError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
+                        MakeError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
                         /*flags=*/0,
                         cookie));
             }
@@ -348,7 +357,7 @@ private:
                     new IEventHandle(
                         replyTo,
                         selfId,
-                        StatusToError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
+                        MakeError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
                         /*flags=*/0,
                         cookie));
             }
@@ -416,7 +425,7 @@ private:
                     new IEventHandle(
                         replyTo,
                         selfId,
-                        StatusToError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
+                        MakeError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
                         /*flags=*/0,
                         cookie));
             }
@@ -429,6 +438,8 @@ private:
         auto cookie = ev->Cookie;
         auto taskId = ev->Get()->Task.GetId();
         auto& inputs = ev->Get()->Task.GetInputs();
+        auto startTime = TInstant::Now();
+
         for (auto inputId = 0; inputId < inputs.size(); inputId++) {
             auto& input = inputs[inputId];
             if (input.HasSource()) {
@@ -445,7 +456,7 @@ private:
             TaskRunner = Factory->GetOld(ev->Get()->Task, TraceId);
         } catch (...) {
             TString message = "Could not create TaskRunner for " + ToString(taskId) + " on node " + ToString(replyTo.NodeId()) + ", error: " + CurrentExceptionMessage();
-            Send(replyTo, MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, message, /*retriable = */ true, /*fallback=*/ true), 0, cookie);
+            Send(replyTo, MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, message), 0, cookie);
             return;
         }
 
@@ -457,17 +468,24 @@ private:
             Settings->FreezeDefaults();
             StageId = taskMeta.GetStageId();
         }
-        Invoker->Invoke([taskRunner=TaskRunner, replyTo, selfId, cookie, actorSystem, settings=Settings, stageId=StageId](){
+        Invoker->Invoke([taskRunner=TaskRunner, replyTo, selfId, cookie, actorSystem, settings=Settings, stageId=StageId, startTime, clusterName = ClusterName](){
             try {
                 //auto guard = taskRunner->BindAllocator(); // only for local mode
                 auto result = taskRunner->Prepare();
+                auto sensors = GetSensors(result);
+                auto sensorName = TCounters::GetCounterName(
+                    "Actor",
+                    {{"ClusterName", clusterName}},
+                    "ProcessInit");
+                i64 val = (TInstant::Now()-startTime).MilliSeconds();
+                sensors.push_back({sensorName, val, val, val, val, 1});
 
                 auto event = MakeHolder<TEvTaskRunnerCreateFinished>(
                     taskRunner->GetSecureParams(),
                     taskRunner->GetTaskParams(),
                     taskRunner->GetTypeEnv(),
                     taskRunner->GetHolderFactory(),
-                    GetSensors(result));
+                    sensors);
 
                 actorSystem->Send(
                     new IEventHandle(
@@ -479,7 +497,7 @@ private:
             } catch (...) {
                 auto status = taskRunner->GetStatus();
                 actorSystem->Send(
-                    new IEventHandle(replyTo, selfId, StatusToError({status.ExitCode, status.Stderr}, settings, stageId).Release(), 0, cookie));
+                    new IEventHandle(replyTo, selfId, MakeError({status.ExitCode, status.Stderr}, settings, stageId).Release(), 0, cookie));
             }
         });
     }
@@ -495,7 +513,7 @@ private:
 
         auto sourcesMap = Sources;
 
-        Invoker->Invoke([selfId, cookie, actorSystem, replyTo, taskRunner=TaskRunner, inputMap, sourcesMap, memLimit=ev->Get()->MemLimit, settings=Settings, stageId=StageId]() mutable {
+        Invoker->Invoke([selfId, cookie, actorSystem, replyTo, taskRunner=TaskRunner, inputMap, sourcesMap, memLimit=ev->Get()->MemLimit, settings=Settings, stageId=StageId, runtimeData=RuntimeData]() mutable {
             try {
                 // auto guard = taskRunner->BindAllocator(); // only for local mode
                 // guard.GetMutex()->SetLimit(memLimit);
@@ -522,17 +540,24 @@ private:
                             res,
                             std::move(inputChannelFreeSpace),
                             std::move(sourcesFreeSpace),
-                            GetSensors(response),
-                            GetRusage(response)),
+                            GetSensors(response)),
                         /*flags=*/0,
                         cookie));
+
+                if (runtimeData) {
+                    ::TRusage delta;
+                    delta.Stime = TDuration::MicroSeconds(response.GetRusage().GetStime());
+                    delta.Utime = TDuration::MicroSeconds(response.GetRusage().GetUtime());
+                    delta.MajorPageFaults = response.GetRusage().GetMajorPageFaults();
+                    runtimeData->AddRusageDelta(delta);
+                }
             } catch (...) {
                 auto status = taskRunner->GetStatus();
                 actorSystem->Send(
                     new IEventHandle(
                         replyTo,
                         selfId,
-                        StatusToError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
+                        MakeError({status.ExitCode, status.Stderr}, settings, stageId).Release(),
                         /*flags=*/0,
                         cookie));
             }
@@ -541,7 +566,8 @@ private:
 
     NActors::TActorId ParentId;
     ITaskRunnerActor::ICallbacks* Parent;
-    TString TraceId;
+    const TString TraceId;
+    const ui64 TaskId;
     NTaskRunnerProxy::IProxyFactory::TPtr Factory;
     NTaskRunnerProxy::ITaskRunner::TPtr TaskRunner;
     ITaskRunnerInvoker::TPtr Invoker;
@@ -550,24 +576,29 @@ private:
     THashSet<ui32> Sources;
     TIntrusivePtr<TDqConfiguration> Settings;
     ui64 StageId;
+    TWorkerRuntimeData* RuntimeData;
+    TString ClusterName;
 };
 
 class TTaskRunnerActorFactory: public ITaskRunnerActorFactory {
 public:
     TTaskRunnerActorFactory(
         const NTaskRunnerProxy::IProxyFactory::TPtr& proxyFactory,
-        const NDqs::ITaskRunnerInvokerFactory::TPtr& invokerFactory)
+        const NDqs::ITaskRunnerInvokerFactory::TPtr& invokerFactory,
+        TWorkerRuntimeData* runtimeData)
         : ProxyFactory(proxyFactory)
         , InvokerFactory(invokerFactory)
+        , RuntimeData(runtimeData)
     { }
 
     std::tuple<ITaskRunnerActor*, NActors::IActor*> Create(
         ITaskRunnerActor::ICallbacks* parent,
-        const TString& traceId,
+        const TTxId& txId,
+        ui64 taskId,
         THashSet<ui32>&&,
         THolder<NYql::NDq::TDqMemoryQuota>&&) override
     {
-        auto* actor = new TTaskRunnerActor(parent, ProxyFactory, InvokerFactory->Create(), traceId);
+        auto* actor = new TTaskRunnerActor(parent, ProxyFactory, InvokerFactory->Create(), txId, taskId, RuntimeData);
         return std::make_tuple(
             static_cast<ITaskRunnerActor*>(actor),
             static_cast<NActors::IActor*>(actor)
@@ -577,13 +608,15 @@ public:
 private:
     NTaskRunnerProxy::IProxyFactory::TPtr ProxyFactory;
     NDqs::ITaskRunnerInvokerFactory::TPtr InvokerFactory;
+    TWorkerRuntimeData* RuntimeData;
 };
 
 ITaskRunnerActorFactory::TPtr CreateTaskRunnerActorFactory(
     const NTaskRunnerProxy::IProxyFactory::TPtr& proxyFactory,
-    const NDqs::ITaskRunnerInvokerFactory::TPtr& invokerFactory)
+    const NDqs::ITaskRunnerInvokerFactory::TPtr& invokerFactory,
+    TWorkerRuntimeData* runtimeData)
 {
-    return ITaskRunnerActorFactory::TPtr(new TTaskRunnerActorFactory(proxyFactory, invokerFactory));
+    return ITaskRunnerActorFactory::TPtr(new TTaskRunnerActorFactory(proxyFactory, invokerFactory, runtimeData));
 }
 
 } // namespace NTaskRunnerActor

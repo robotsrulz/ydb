@@ -6,6 +6,10 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(protos)
+add_subdirectory(test)
+add_subdirectory(ut)
+add_subdirectory(ut_large)
 
 add_library(ydb-core-tablet_flat)
 target_compile_options(ydb-core-tablet_flat PRIVATE
@@ -57,6 +61,7 @@ target_sources(ydb-core-tablet_flat PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/tablet_flat/flat_executor_gclogic.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tablet_flat/flat_bio_actor.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tablet_flat/flat_executor_snapshot.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tablet_flat/flat_executor_tx_env.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tablet_flat/flat_executor_txloglogic.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tablet_flat/flat_load_blob_queue.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tablet_flat/flat_mem_warm.cpp

@@ -7,16 +7,15 @@
 #include "blobstorage_pdisk_util_countedqueueoneone.h"
 #include "blobstorage_pdisk_util_flightcontrol.h"
 #include "blobstorage_pdisk_util_idlecounter.h"
-#include "blobstorage_pdisk_util_wcache.h"
 
 #include <ydb/core/base/appdata.h>
-#include <ydb/core/blobstorage/base/wilson_events.h>
 #include <ydb/core/blobstorage/lwtrace_probes/blobstorage_probes.h>
 #include <ydb/core/protos/services.pb.h>
 #include <ydb/core/util/cache.h>
 #include <ydb/core/util/yverify_stream.h>
 #include <ydb/library/pdisk_io/aio.h>
 #include <ydb/library/pdisk_io/spdk_state.h>
+#include <ydb/library/pdisk_io/wcache.h>
 
 #include <library/cpp/actors/core/log.h>
 #include <library/cpp/actors/util/thread.h>
@@ -943,9 +942,6 @@ protected:
             REQUEST_VALGRIND_CHECK_MEM_IS_ADDRESSABLE(data, size);
         }
 
-        if (ActorSystem) {
-            WILSON_TRACE(*ActorSystem, traceId, BlockPread, DiskOffset = offset, Size = size);
-        }
         IAsyncIoOperation* op = IoContext->CreateAsyncIoOperation(completionAction, reqId, traceId);
         IoContext->PreparePRead(op, data, size, offset);
         Submit(op);
@@ -963,9 +959,6 @@ protected:
             REQUEST_VALGRIND_CHECK_MEM_IS_DEFINED(data, size);
         }
 
-        if (ActorSystem) {
-            WILSON_TRACE(*ActorSystem, traceId, BlockPwrite, DiskOffset = offset, Size = size);
-        }
         IAsyncIoOperation* op = IoContext->CreateAsyncIoOperation(completionAction, reqId, traceId);
         IoContext->PreparePWrite(op, const_cast<void*>(data), size, offset);
         Submit(op);

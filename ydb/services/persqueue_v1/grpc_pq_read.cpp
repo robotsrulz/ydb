@@ -23,14 +23,14 @@ using namespace PersQueue::V1;
 
 
 IActor* CreatePQReadService(const TActorId& schemeCache, const TActorId& newSchemeCache,
-                             TIntrusivePtr<NMonitoring::TDynamicCounters> counters, const ui32 maxSessions) {
+                             TIntrusivePtr<::NMonitoring::TDynamicCounters> counters, const ui32 maxSessions) {
     return new TPQReadService(schemeCache, newSchemeCache, counters, maxSessions);
 }
 
 
 
 TPQReadService::TPQReadService(const TActorId& schemeCache, const TActorId& newSchemeCache,
-                             TIntrusivePtr<NMonitoring::TDynamicCounters> counters, const ui32 maxSessions)
+                             TIntrusivePtr<::NMonitoring::TDynamicCounters> counters, const ui32 maxSessions)
     : SchemeCache(schemeCache)
     , NewSchemeCache(newSchemeCache)
     , Counters(counters)
@@ -113,8 +113,8 @@ google::protobuf::RepeatedPtrField<Ydb::Issue::IssueMessage> FillInfoResponse(co
     return res;
 }
 
-void TPQReadService::Handle(NGRpcService::TEvStreamPQReadRequest::TPtr& ev, const TActorContext& ctx) {
-    HandleStreamPQReadRequest<NGRpcService::TEvStreamPQReadRequest>(ev, ctx);
+void TPQReadService::Handle(NGRpcService::TEvStreamTopicReadRequest::TPtr& ev, const TActorContext& ctx) {
+    HandleStreamPQReadRequest<NGRpcService::TEvStreamTopicReadRequest>(ev, ctx);
 }
 
 void TPQReadService::Handle(NGRpcService::TEvStreamPQMigrationReadRequest::TPtr& ev, const TActorContext& ctx) {
@@ -148,7 +148,7 @@ bool TPQReadService::TooMuchSessions() {
 }
 
 
-void NKikimr::NGRpcService::TGRpcRequestProxy::Handle(NKikimr::NGRpcService::TEvStreamPQReadRequest::TPtr& ev, const TActorContext& ctx) {
+void NKikimr::NGRpcService::TGRpcRequestProxy::Handle(NKikimr::NGRpcService::TEvStreamTopicReadRequest::TPtr& ev, const TActorContext& ctx) {
     ctx.Send(NKikimr::NGRpcProxy::V1::GetPQReadServiceActorID(), ev->Release().Release());
 }
 

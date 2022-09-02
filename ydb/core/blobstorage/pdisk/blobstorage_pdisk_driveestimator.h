@@ -9,7 +9,7 @@
 #include "blobstorage_pdisk_mon.h"
 
 #include <util/system/hp_timer.h>
-#include <util/system/atomic.h>
+#include <library/cpp/deprecated/atomic/atomic.h>
 #include <util/system/condvar.h>
 #include <library/cpp/actors/core/actorsystem.h>
 
@@ -18,7 +18,7 @@ namespace NPDisk {
 
 class TDriveEstimator {
     TString Filename;
-    TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters;
     TPDiskMon PDiskMon;
     std::unique_ptr<TActorSystemCreator> ActorSystemCreator;
     TActorSystem *ActorSystem;

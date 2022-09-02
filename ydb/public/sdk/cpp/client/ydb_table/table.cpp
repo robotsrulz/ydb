@@ -273,6 +273,14 @@ class TTableDescription::TImpl {
             Indexes_.emplace_back(TProtoAccessor::FromProto(index));
         }
 
+        if constexpr (std::is_same_v<TProto, Ydb::Table::DescribeTableResult>) {
+            // changefeeds
+            Changefeeds_.reserve(proto.changefeedsSize());
+            for (const auto& changefeed : proto.changefeeds()) {
+                Changefeeds_.emplace_back(TProtoAccessor::FromProto(changefeed));
+            }
+        }
+
         // ttl settings
         switch (proto.ttl_settings().mode_case()) {
         case Ydb::Table::TtlSettings::kDateTypeColumn:
@@ -431,6 +439,10 @@ public:
         Indexes_.emplace_back(TIndexDescription(indexName, type, indexColumns, dataColumns));
     }
 
+    void AddChangefeed(const TString& name, EChangefeedMode mode, EChangefeedFormat format) {
+        Changefeeds_.emplace_back(name, mode, format);
+    }
+
     void SetTtlSettings(TTtlSettings&& settings) {
         TtlSettings_ = std::move(settings);
     }
@@ -495,6 +507,10 @@ public:
 
     const TVector<TIndexDescription>& GetIndexDescriptions() const {
         return Indexes_;
+    }
+
+    const TVector<TChangefeedDescription>& GetChangefeedDescriptions() const {
+        return Changefeeds_;
     }
 
     const TMaybe<TTtlSettings>& GetTtlSettings() const {
@@ -575,6 +591,7 @@ private:
     TVector<TString> PrimaryKey_;
     TVector<TTableColumn> Columns_;
     TVector<TIndexDescription> Indexes_;
+    TVector<TChangefeedDescription> Changefeeds_;
     TMaybe<TTtlSettings> TtlSettings_;
     TString Owner_;
     TVector<NScheme::TPermissions> Permissions_;
@@ -630,6 +647,10 @@ TVector<TTableColumn> TTableDescription::GetTableColumns() const {
 
 TVector<TIndexDescription> TTableDescription::GetIndexDescriptions() const {
     return Impl_->GetIndexDescriptions();
+}
+
+TVector<TChangefeedDescription> TTableDescription::GetChangefeedDescriptions() const {
+    return Impl_->GetChangefeedDescriptions();
 }
 
 TMaybe<TTtlSettings> TTableDescription::GetTtlSettings() const {
@@ -1355,7 +1376,7 @@ private:
     const ui32 MaxActiveSessions_;
     NSdkStats::TSessionCounter ActiveSessionsCounter_;
     NSdkStats::TSessionCounter InPoolSessionsCounter_;
-    NSdkStats::TAtomicCounter<NMonitoring::TRate> FakeSessionsCounter_;
+    NSdkStats::TAtomicCounter<::NMonitoring::TRate> FakeSessionsCounter_;
 };
 
 static TDuration RandomizeThreshold(TDuration duration) {
@@ -2588,7 +2609,7 @@ private:
 
     static void CollectParams(
         ::google::protobuf::Map<TString, Ydb::TypedValue>* params,
-        NSdkStats::TAtomicHistogram<NMonitoring::THistogram> histgoram)
+        NSdkStats::TAtomicHistogram<::NMonitoring::THistogram> histgoram)
     {
 
         if (params && histgoram.IsCollecting()) {
@@ -2602,7 +2623,7 @@ private:
 
     static void CollectParams(
         const ::google::protobuf::Map<TString, Ydb::TypedValue>& params,
-        NSdkStats::TAtomicHistogram<NMonitoring::THistogram> histgoram)
+        NSdkStats::TAtomicHistogram<::NMonitoring::THistogram> histgoram)
     {
 
         if (histgoram.IsCollecting()) {
@@ -2614,13 +2635,13 @@ private:
         }
     }
 
-    static void CollectQuerySize(const TString& query, NSdkStats::TAtomicHistogram<NMonitoring::THistogram>& querySizeHistogram) {
+    static void CollectQuerySize(const TString& query, NSdkStats::TAtomicHistogram<::NMonitoring::THistogram>& querySizeHistogram) {
         if (querySizeHistogram.IsCollecting()) {
             querySizeHistogram.Record(query.size());
         }
     }
 
-    static void CollectQuerySize(const TDataQuery&, NSdkStats::TAtomicHistogram<NMonitoring::THistogram>&) {}
+    static void CollectQuerySize(const TDataQuery&, NSdkStats::TAtomicHistogram<::NMonitoring::THistogram>&) {}
 
     template <typename TQueryType, typename TParamsType>
     TAsyncDataQueryResult ExecuteDataQueryInternal(const TSession& session, const TQueryType& query,
@@ -2730,6 +2751,9 @@ private:
             case TTxSettings::TS_STALE_RO:
                 proto->mutable_stale_read_only();
                 break;
+            case TTxSettings::TS_SNAPSHOT_RO:
+                proto->mutable_snapshot_read_only();
+                break;
             default:
                 throw TContractViolation("Unexpected transaction mode.");
         }
@@ -2767,12 +2791,12 @@ private:
         const TCreateSessionSettings& settings);
 
 public:
-    NSdkStats::TAtomicCounter<NMonitoring::TRate> CacheMissCounter;
+    NSdkStats::TAtomicCounter<::NMonitoring::TRate> CacheMissCounter;
     NSdkStats::TStatCollector::TClientRetryOperationStatCollector RetryOperationStatCollector;
-    NSdkStats::TAtomicHistogram<NMonitoring::THistogram> QuerySizeHistogram;
-    NSdkStats::TAtomicHistogram<NMonitoring::THistogram> ParamsSizeHistogram;
-    NSdkStats::TAtomicCounter<NMonitoring::TRate> SessionRemovedDueBalancing;
-    NSdkStats::TAtomicCounter<NMonitoring::TRate> RequestMigrated;
+    NSdkStats::TAtomicHistogram<::NMonitoring::THistogram> QuerySizeHistogram;
+    NSdkStats::TAtomicHistogram<::NMonitoring::THistogram> ParamsSizeHistogram;
+    NSdkStats::TAtomicCounter<::NMonitoring::TRate> SessionRemovedDueBalancing;
+    NSdkStats::TAtomicCounter<::NMonitoring::TRate> RequestMigrated;
 
 private:
     TSessionPoolImpl SessionPool_;
@@ -3642,8 +3666,16 @@ static Ydb::Table::AlterTableRequest MakeAlterTableProtoRequest(
         addIndex.SerializeTo(*request.add_add_indexes());
     }
 
-    for (const auto& dropIndex : settings.DropIndexes_) {
-        request.add_drop_indexes(dropIndex);
+    for (const auto& name : settings.DropIndexes_) {
+        request.add_drop_indexes(name);
+    }
+
+    for (const auto& addChangefeed : settings.AddChangefeeds_) {
+        addChangefeed.SerializeTo(*request.add_add_changefeeds());
+    }
+
+    for (const auto& name : settings.DropChangefeeds_) {
+        request.add_drop_changefeeds(name);
     }
 
     if (settings.AlterStorageSettings_) {
@@ -4324,6 +4356,128 @@ bool operator==(const TIndexDescription& lhs, const TIndexDescription& rhs) {
 }
 
 bool operator!=(const TIndexDescription& lhs, const TIndexDescription& rhs) {
+    return !(lhs == rhs);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TChangefeedDescription::TChangefeedDescription(const TString& name, EChangefeedMode mode, EChangefeedFormat format)
+    : Name_(name)
+    , Mode_(mode)
+    , Format_(format)
+{}
+
+TChangefeedDescription::TChangefeedDescription(const Ydb::Table::Changefeed& proto)
+    : TChangefeedDescription(FromProto(proto))
+{}
+
+TChangefeedDescription::TChangefeedDescription(const Ydb::Table::ChangefeedDescription& proto)
+    : TChangefeedDescription(FromProto(proto))
+{}
+
+const TString& TChangefeedDescription::GetName() const {
+    return Name_;
+}
+
+EChangefeedMode TChangefeedDescription::GetMode() const {
+    return Mode_;
+}
+
+EChangefeedFormat TChangefeedDescription::GetFormat() const {
+    return Format_;
+}
+
+template <typename TProto>
+TChangefeedDescription TChangefeedDescription::FromProto(const TProto& proto) {
+    EChangefeedMode mode;
+    EChangefeedFormat format;
+
+    switch (proto.mode()) {
+    case Ydb::Table::ChangefeedMode::MODE_KEYS_ONLY:
+        mode = EChangefeedMode::KeysOnly;
+        break;
+    case Ydb::Table::ChangefeedMode::MODE_UPDATES:
+        mode = EChangefeedMode::Updates;
+        break;
+    case Ydb::Table::ChangefeedMode::MODE_NEW_IMAGE:
+        mode = EChangefeedMode::NewImage;
+        break;
+    case Ydb::Table::ChangefeedMode::MODE_OLD_IMAGE:
+        mode = EChangefeedMode::OldImage;
+        break;
+    case Ydb::Table::ChangefeedMode::MODE_NEW_AND_OLD_IMAGES:
+        mode = EChangefeedMode::NewAndOldImages;
+        break;
+    default:
+        mode = EChangefeedMode::Unknown;
+        break;
+    }
+
+    switch (proto.format()) {
+    case Ydb::Table::ChangefeedFormat::FORMAT_JSON:
+        format = EChangefeedFormat::Json;
+        break;
+    default:
+        format = EChangefeedFormat::Unknown;
+        break;
+    }
+
+    return TChangefeedDescription(proto.name(), mode, format);
+}
+
+void TChangefeedDescription::SerializeTo(Ydb::Table::Changefeed& proto) const {
+    proto.set_name(Name_);
+
+    switch (Mode_) {
+    case EChangefeedMode::KeysOnly:
+        proto.set_mode(Ydb::Table::ChangefeedMode::MODE_KEYS_ONLY);
+        break;
+    case EChangefeedMode::Updates:
+        proto.set_mode(Ydb::Table::ChangefeedMode::MODE_UPDATES);
+        break;
+    case EChangefeedMode::NewImage:
+        proto.set_mode(Ydb::Table::ChangefeedMode::MODE_NEW_IMAGE);
+        break;
+    case EChangefeedMode::OldImage:
+        proto.set_mode(Ydb::Table::ChangefeedMode::MODE_OLD_IMAGE);
+        break;
+    case EChangefeedMode::NewAndOldImages:
+        proto.set_mode(Ydb::Table::ChangefeedMode::MODE_NEW_AND_OLD_IMAGES);
+        break;
+    case EChangefeedMode::Unknown:
+        break;
+    }
+
+    switch (Format_) {
+    case EChangefeedFormat::Json:
+        proto.set_format(Ydb::Table::ChangefeedFormat::FORMAT_JSON);
+        break;
+    case EChangefeedFormat::Unknown:
+        break;
+    }
+}
+
+TString TChangefeedDescription::ToString() const {
+    TString result;
+    TStringOutput out(result);
+    Out(out);
+    return result;
+}
+
+void TChangefeedDescription::Out(IOutputStream& o) const {
+    o << "{ name: \"" << Name_ << "\""
+      << ", mode: " << Mode_ << ""
+      << ", format: " << Format_ << ""
+    << " }";
+}
+
+bool operator==(const TChangefeedDescription& lhs, const TChangefeedDescription& rhs) {
+    return lhs.GetName() == rhs.GetName()
+        && lhs.GetMode() == rhs.GetMode()
+        && lhs.GetFormat() == rhs.GetFormat();
+}
+
+bool operator!=(const TChangefeedDescription& lhs, const TChangefeedDescription& rhs) {
     return !(lhs == rhs);
 }
 

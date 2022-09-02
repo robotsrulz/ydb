@@ -1,6 +1,6 @@
 #pragma once
 
-#include <util/system/atomic.h>
+#include <library/cpp/deprecated/atomic/atomic.h>
 
 namespace NBus {
     /* Consumer and feeder quota model impl.
@@ -25,7 +25,7 @@ namespace NBus {
             Y_UNUSED(padd_);
         }
 
-        bool Acquire(TAtomic level = 1, bool force = false) {
+        bool Acquire(TAtomicBase level = 1, bool force = false) {
             level = Max(TAtomicBase(level), TAtomicBase(1));
 
             if (Enabled && (Acquired < level || force)) {
@@ -65,7 +65,7 @@ namespace NBus {
             return Acquired + AtomicGet(Tokens_);
         }
 
-        size_t Check(const TAtomic level) const noexcept {
+        size_t Check(const TAtomicBase level) const noexcept {
             return !Enabled || level <= Acquired;
         }
 

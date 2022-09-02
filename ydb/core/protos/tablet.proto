@@ -41,19 +41,20 @@ message TTabletTypes {
         BlockStoreDiskRegistry = 31;
         SysViewProcessor = 32;
         FileStore = 33;
-        OlapShard = 34;
+        // number 34 was OlapShard
         ColumnShard = 35;
         TestShard = 36;
         SequenceShard = 37;
         ReplicationController = 38;
+        BlobDepot = 39;
 
         // when adding a new tablet type and keeping parse compatibility with the old version
         // rename existing reserved item to desired one, and add new reserved item to
         // the end of reserved list
-        Reserved39 = 39;
         Reserved40 = 40;
         Reserved41 = 41;
         Reserved42 = 42;
+        Reserved43 = 43;
 
         UserTypeStart = 255;
         TypeInvalid = -1;

@@ -86,9 +86,7 @@ struct TOwnerData {
         if (VDiskId == TVDiskID::InvalidId) {
             return false;
         }
-        TGroupID groupId(VDiskId.GroupID);
-        bool isStatic = (groupId.ConfigurationType() == GroupConfigurationTypeStatic);
-        return isStatic;
+        return TGroupID(VDiskId.GroupID).ConfigurationType() == EGroupConfigurationType::Static;
     }
 
     bool IsNextLsnOk(const ui64 lsn) const {
@@ -151,9 +149,14 @@ struct TChunkState {
         DATA_RESERVED,
         DATA_COMMITTED,
         DATA_ON_QUARANTINE,
-        DATA_COMMITTED_ON_QUARANTINE,
+        DATA_COMMITTED_DELETE_ON_QUARANTINE,
         LOG_RESERVED,
         LOG_COMMITTED,
+        DATA_RESERVED_DELETE_ON_QUARANTINE,
+        DATA_DECOMMITTED,
+        DATA_RESERVED_DECOMMIT_IN_PROGRESS,
+        DATA_COMMITTED_DECOMMIT_IN_PROGRESS,
+        LOCKED,
     };
 
     ui64 Nonce;

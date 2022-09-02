@@ -239,6 +239,47 @@ Y_UNIT_TEST_SUITE(TMetricRegistryTest) {
         UNIT_ASSERT_NO_DIFF(ss.Str(), NResource::Find("/histograms.json"));
     }
 
+    Y_UNIT_TEST(HistogramsFabric) {
+        TMetricRegistry registry(TLabels{{"common", "label"}});
+        bool called = false;
+
+        auto collector = [&]() {
+            called = true;
+            return ExponentialHistogram(5, 2);
+        };
+
+        THistogram* h1 = registry.HistogramCounter(
+                {{"sensor", "readTimeMillis"}},
+                collector);
+
+        UNIT_ASSERT_VALUES_EQUAL(called, true);
+        called = false;
+
+        h1 = registry.HistogramCounter(
+            {{"sensor", "readTimeMillis"}},
+            collector);
+
+        UNIT_ASSERT_VALUES_EQUAL(called, false);
+
+        THistogram* h2 = registry.HistogramRate(
+            {{"sensor", "writeTimeMillis"}},
+            ExplicitHistogram({1, 5, 15, 20, 25}));
+
+        for (i64 i = 0; i < 100; i++) {
+            h1->Record(i);
+            h2->Record(i);
+        }
+
+        TStringStream ss;
+        {
+            auto encoder = EncoderJson(&ss, 2);
+            registry.Accept(TInstant::Zero(), encoder.Get());
+        }
+        ss << '\n';
+
+        UNIT_ASSERT_NO_DIFF(ss.Str(), NResource::Find("/histograms.json"));
+    }
+
     Y_UNIT_TEST(StreamingEncoderTest) {
         const TString expected {
             "{\"commonLabels\":{\"common\":\"label\"},"
@@ -263,8 +304,8 @@ Y_UNIT_TEST_SUITE(TMetricRegistryTest) {
         registry.Gauge({{"foo", "bar"}});
         UNIT_ASSERT_EXCEPTION(registry.Counter({{"foo", "bar"}}), yexception);
 
-        registry.HistogramCounter({{"bar", "baz"}}, nullptr);
-        UNIT_ASSERT_EXCEPTION(registry.HistogramRate({{"bar", "baz"}}, nullptr), yexception);
+        registry.HistogramCounter({{"bar", "baz"}}, ExponentialHistogram(5, 2));
+        UNIT_ASSERT_EXCEPTION(registry.HistogramRate({{"bar", "baz"}}, ExponentialHistogram(5, 2)), yexception);
     }
 
     Y_UNIT_TEST(EncodeRegistryWithCommonLabels) {
@@ -340,15 +381,5 @@ Y_UNIT_TEST_SUITE(TMetricRegistryTest) {
         UNIT_ASSERT(commonLabels.size() == 1);
         UNIT_ASSERT(commonLabels[0].GetName() == "common");
         UNIT_ASSERT(commonLabels[0].GetValue() == "label");
-    }
-
-    Y_UNIT_TEST(HasMetricTest) {
-        TMetricRegistry registry;
-        TLabels labels{{"some", "labels"}};
-        TLabels anotherLabels{{"another", "label"}};
-
-        registry.Gauge(labels);
-        UNIT_ASSERT_EQUAL(registry.HasMetric(labels), true);
-        UNIT_ASSERT_EQUAL(registry.HasMetric(anotherLabels), false);
     }
 }

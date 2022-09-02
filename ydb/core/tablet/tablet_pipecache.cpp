@@ -12,19 +12,19 @@ class TPipePeNodeCache : public TActor<TPipePeNodeCache> {
     NTabletPipe::TClientConfig PipeConfig;
 
     struct TCounters {
-        NMonitoring::TDynamicCounters::TCounterPtr Tablets;
-        NMonitoring::TDynamicCounters::TCounterPtr Subscribers;
-        NMonitoring::TDynamicCounters::TCounterPtr PipesActive;
-        NMonitoring::TDynamicCounters::TCounterPtr PipesInactive;
-        NMonitoring::TDynamicCounters::TCounterPtr PipesConnecting;
-        NMonitoring::TDynamicCounters::TCounterPtr EventCreate;
-        NMonitoring::TDynamicCounters::TCounterPtr EventConnectOk;
-        NMonitoring::TDynamicCounters::TCounterPtr EventConnectFailure;
-        NMonitoring::TDynamicCounters::TCounterPtr EventGracefulShutdown;
-        NMonitoring::TDynamicCounters::TCounterPtr EventDisconnect;
+        ::NMonitoring::TDynamicCounters::TCounterPtr Tablets;
+        ::NMonitoring::TDynamicCounters::TCounterPtr Subscribers;
+        ::NMonitoring::TDynamicCounters::TCounterPtr PipesActive;
+        ::NMonitoring::TDynamicCounters::TCounterPtr PipesInactive;
+        ::NMonitoring::TDynamicCounters::TCounterPtr PipesConnecting;
+        ::NMonitoring::TDynamicCounters::TCounterPtr EventCreate;
+        ::NMonitoring::TDynamicCounters::TCounterPtr EventConnectOk;
+        ::NMonitoring::TDynamicCounters::TCounterPtr EventConnectFailure;
+        ::NMonitoring::TDynamicCounters::TCounterPtr EventGracefulShutdown;
+        ::NMonitoring::TDynamicCounters::TCounterPtr EventDisconnect;
         bool HaveCounters = false;
 
-        explicit TCounters(NMonitoring::TDynamicCounterPtr counters) {
+        explicit TCounters(::NMonitoring::TDynamicCounterPtr counters) {
             if (counters) {
                 Tablets = counters->GetCounter("PipeCache/Tablets");
                 Subscribers = counters->GetCounter("PipeCache/Subscribers");
@@ -278,6 +278,7 @@ class TPipePeNodeCache : public TActor<TPipePeNodeCache> {
         const bool subscribe = msg->Subscribe;
         const TActorId peer = ev->Sender;
         const ui64 cookie = ev->Cookie;
+        NWilson::TTraceId traceId = std::move(ev->TraceId);
 
         auto *tabletState = EnsureTablet(tablet);
         auto *clientState = EnsureClient(tabletState, tablet);
@@ -309,9 +310,9 @@ class TPipePeNodeCache : public TActor<TPipePeNodeCache> {
             }
             const ui64 seqNo = ++clientState->LastSentSeqNo;
             clientState->Peers[peer] = seqNo;
-            NTabletPipe::SendDataWithSeqNo(peer, tabletState->LastClient, msg->Ev.Release(), seqNo, cookie);
+            NTabletPipe::SendDataWithSeqNo(peer, tabletState->LastClient, msg->Ev.Release(), seqNo, cookie, std::move(traceId));
         } else {
-            NTabletPipe::SendData(peer, tabletState->LastClient, msg->Ev.Release(), cookie);
+            NTabletPipe::SendData(peer, tabletState->LastClient, msg->Ev.Release(), cookie, std::move(traceId));
         }
     }
 

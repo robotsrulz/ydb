@@ -405,7 +405,7 @@ THolder<TProposeResponse> TCreateFileStore::Propose(
     TChannelsBindings storeChannelBindings;
     const auto storeChannelsResolved = context.SS->ResolveChannelsByPoolKinds(
         storePoolKinds,
-        dstPath.DomainId(),
+        dstPath.GetPathIdForDomain(),
         storeChannelBindings
     );
 
@@ -426,6 +426,10 @@ THolder<TProposeResponse> TCreateFileStore::Propose(
     auto fs = CreateFileStoreInfo(operation, status, errStr);
     if (!fs) {
         result->SetError(status, errStr);
+        return result;
+    }
+    if (!context.SS->CheckInFlightLimit(TTxState::TxCreateFileStore, errStr)) {
+        result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
         return result;
     }
 

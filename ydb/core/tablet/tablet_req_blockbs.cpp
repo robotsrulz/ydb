@@ -5,15 +5,13 @@
 
 namespace NKikimr {
 
-constexpr ui32 MAX_ATTEMPTS = 3;
-
 class TTabletReqBlockBlobStorageGroup : public TActorBootstrapped<TTabletReqBlockBlobStorageGroup> {
 public:
     TActorId Owner;
     ui64 TabletId;
     ui32 GroupId;
     ui32 Generation;
-    ui32 ErrorCount;
+    ui64 IssuerGuid;
 
     void ReplyAndDie(NKikimrProto::EReplyStatus status, const TString &reason = { }) {
         Send(Owner, new TEvTabletBase::TEvBlockBlobStorageResult(status, TabletId, reason));
@@ -22,7 +20,7 @@ public:
 
     void SendRequest() {
         const TActorId proxy = MakeBlobStorageProxyID(GroupId);
-        THolder<TEvBlobStorage::TEvBlock> event(new TEvBlobStorage::TEvBlock(TabletId, Generation, TInstant::Max()));
+        auto event = MakeHolder<TEvBlobStorage::TEvBlock>(TabletId, Generation, TInstant::Max(), IssuerGuid);
         event->IsMonitored = false;
         SendToBSProxy(TlsActivationContext->AsActorContext(), proxy, event.Release());
     }
@@ -37,17 +35,14 @@ public:
         switch (msg->Status) {
         case NKikimrProto::OK:
             return ReplyAndDie(NKikimrProto::OK);
+        case NKikimrProto::ALREADY:
         case NKikimrProto::BLOCKED:
         case NKikimrProto::RACE:
         case NKikimrProto::NO_GROUP:
             // The request will never succeed
             return ReplyAndDie(msg->Status, msg->ErrorReason);
         default:
-            ++ErrorCount;
-            if (ErrorCount >= MAX_ATTEMPTS) {
-                return ReplyAndDie(NKikimrProto::ERROR, msg->ErrorReason);
-            }
-            return SendRequest();
+            return ReplyAndDie(NKikimrProto::ERROR, msg->ErrorReason);
         }
     }
 
@@ -70,11 +65,11 @@ public:
         Become(&TThis::StateWait);
     }
 
-    TTabletReqBlockBlobStorageGroup(ui64 tabletId, ui32 groupId, ui32 gen)
+    TTabletReqBlockBlobStorageGroup(ui64 tabletId, ui32 groupId, ui32 gen, ui64 issuerGuid)
         : TabletId(tabletId)
         , GroupId(groupId)
         , Generation(gen)
-        , ErrorCount(0)
+        , IssuerGuid(issuerGuid)
     {}
 };
 
@@ -85,6 +80,7 @@ class TTabletReqBlockBlobStorage : public TActorBootstrapped<TTabletReqBlockBlob
     ui32 Replied = 0;
     TVector<THolder<TTabletReqBlockBlobStorageGroup>> Requests;
     TVector<TActorId> ReqActors;
+    ui64 IssuerGuid = RandomNumber<ui64>() | 1;
 
     void PassAway() override {
         for (auto &x : ReqActors)
@@ -114,6 +110,7 @@ class TTabletReqBlockBlobStorage : public TActorBootstrapped<TTabletReqBlockBlob
             return ReplyAndDie(msg->Status, msg->ErrorReason);
         }
     }
+
 public:
     TTabletReqBlockBlobStorage(TActorId owner, TTabletStorageInfo* info, ui32 generation, bool blockPrevEntry)
         : Owner(owner)
@@ -134,7 +131,8 @@ public:
                 continue;
             }
             if (blocked.insert(itEntry->GroupID).second) {
-                Requests.emplace_back(new TTabletReqBlockBlobStorageGroup(TabletId, itEntry->GroupID, Generation));
+                Requests.emplace_back(new TTabletReqBlockBlobStorageGroup(TabletId, itEntry->GroupID, Generation,
+                    IssuerGuid));
             }
 
             if (blockPrevEntry) {
@@ -143,7 +141,8 @@ public:
                     continue;
                 }
                 if (blocked.insert(itEntry->GroupID).second) {
-                    Requests.emplace_back(new TTabletReqBlockBlobStorageGroup(TabletId, itEntry->GroupID, Generation));
+                    Requests.emplace_back(new TTabletReqBlockBlobStorageGroup(TabletId, itEntry->GroupID, Generation,
+                        IssuerGuid));
                 }
             }
         }

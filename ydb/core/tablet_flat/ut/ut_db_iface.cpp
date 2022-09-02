@@ -306,11 +306,13 @@ Y_UNIT_TEST_SUITE(DBase) {
         me.To(30).Begin().Apply(*TAlter().DropTable(1));
         me.To(31).Commit().Affects(0, { });
         me.To(32).Begin().Add(2, row).Commit().Affects(0, { 2 });
-        me.To(33).Begin().Snapshot(2).Commit().Affects(0, { 2 });
+        auto epoch = me.To(33).Begin().Snapshot(2);
+        UNIT_ASSERT(epoch == TEpoch::FromIndex(2));
+        me.Commit().Affects(0, { 2 });
         me.To(34).Compact(2);
 
         UNIT_ASSERT(me->Counters().MemTableOps == 0);
-        UNIT_ASSERT(me.BackLog().Snapshots.at(0).Epoch == TEpoch::FromIndex(2));
+        UNIT_ASSERT(me.BackLog().Snapshots == 1);
 
         {
             const auto subset = me->Subset(2, TEpoch::Max(), { }, { });
@@ -732,6 +734,302 @@ Y_UNIT_TEST_SUITE(DBase) {
 
     Y_UNIT_TEST(VersionCompactedParts) {
         RunVersionChecks(true, true);
+    }
+
+    // Regression test for KIKIMR-15506
+    Y_UNIT_TEST(KIKIMR_15506_MissingSnapshotKeys) {
+        TDbExec me;
+
+        const ui32 table = 1;
+        me.To(10)
+            .Begin()
+            .Apply(*TAlter()
+                .AddTable("me_1", table)
+                .AddColumn(table, "key", 1, ETypes::Uint64, false)
+                .AddColumn(table, "val", 2, ETypes::Uint64, false, Cimple(0_u64))
+                .AddColumnToKey(table, 1)
+                .SetEraseCache(table, true, 2, 8192))
+            .Commit();
+
+        auto dumpCache = [&]() -> TString {
+            if (auto* cache = me->DebugGetTableErasedKeysCache(table)) {
+                TStringStream stream;
+                stream << cache->DumpRanges();
+                return stream.Str();
+            } else {
+                return nullptr;
+            }
+        };
+
+        // Write a bunch of rows at v1/50
+        me.To(20).Begin();
+        for (ui64 i = 1; i <= 18; ++i) {
+            if (i != 9) {
+                me.WriteVer({1, 50}).Put(table, *me.SchemedCookRow(table).Col(i, i));
+            }
+        }
+        me.Commit();
+
+        // Erase a bunch of rows at v2/50
+        me.To(21).Begin();
+        for (ui64 i = 1; i <= 16; ++i) {
+            if (i != 9) {
+                me.WriteVer({2, 50}).Add(table, *me.SchemedCookRow(table).Col(i), ERowOp::Erase);
+            }
+        }
+        me.Commit();
+
+        // Verify we can only see 2 last rows at v3/50 (all other are deleted)
+        me.To(22).ReadVer({3, 50}).IterData(table)
+            .Seek({ }, ESeek::Lower).Is(*me.SchemedCookRow(table).Col(17_u64, 17_u64))
+            .Next().Is(*me.SchemedCookRow(table).Col(18_u64, 18_u64))
+            .Next().Is(EReady::Gone);
+
+        UNIT_ASSERT_VALUES_EQUAL(dumpCache(), "TKeyRangeCache{ [{1}, {16}] }");
+
+        // Add a new row at v4/50 (it's expected to invalidate the cached range)
+        me.To(23).Begin();
+        me.WriteVer({4, 50}).Put(table, *me.SchemedCookRow(table).Col(9_u64, 9_u64));
+        me.Commit();
+
+        UNIT_ASSERT_VALUES_EQUAL(dumpCache(), "TKeyRangeCache{ }");
+
+        // Verify we can only see 2 last rows at v3/50 (erased range shouldn't be cached incorrectly)
+        me.To(24).ReadVer({3, 50}).IterData(table)
+            .Seek({ }, ESeek::Lower).Is(*me.SchemedCookRow(table).Col(17_u64, 17_u64))
+            .Next().Is(*me.SchemedCookRow(table).Col(18_u64, 18_u64))
+            .Next().Is(EReady::Gone);
+
+        UNIT_ASSERT_VALUES_EQUAL(dumpCache(), "TKeyRangeCache{ [{1}, {8}], [{10}, {16}] }");
+
+        // Verify we can see all 3 rows at v5/50 (bug would cause as to skip over the key 9)
+        me.To(25).ReadVer({5, 50}).IterData(table)
+            .Seek({ }, ESeek::Lower).Is(*me.SchemedCookRow(table).Col(9_u64, 9_u64))
+            .Next().Is(*me.SchemedCookRow(table).Col(17_u64, 17_u64))
+            .Next().Is(*me.SchemedCookRow(table).Col(18_u64, 18_u64))
+            .Next().Is(EReady::Gone);
+    }
+
+    Y_UNIT_TEST(AlterAndUpsertChangesVisibility) {
+        TDbExec me;
+
+        const ui32 table1 = 1;
+        const ui32 table2 = 2;
+        me.To(10).Begin();
+
+        me.To(20).Apply(*TAlter()
+                .AddTable("me_1", table1)
+                .AddColumn(table1, "key",    1, ETypes::Uint64, false)
+                .AddColumn(table1, "arg1",   4, ETypes::Uint64, false, Cimple(10004_u64))
+                .AddColumn(table1, "arg2",   5, ETypes::Uint64, false, Cimple(10005_u64))
+                .AddColumnToKey(table1, 1));
+        me.To(21).PutN(table1, 1_u64, 11_u64, 12_u64);
+        me.To(22).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(23).Select(table1).NoKeyN(2_u64);
+
+        me.To(30).Apply(*TAlter()
+                .AddTable("me_2", table2)
+                .AddColumn(table2, "key",    1, ETypes::Uint64, false)
+                .AddColumn(table2, "arg1",   4, ETypes::Uint64, false, Cimple(20004_u64))
+                .AddColumn(table2, "arg2",   5, ETypes::Uint64, false, Cimple(20005_u64))
+                .AddColumnToKey(table2, 1));
+        me.To(31).PutN(table2, 2_u64, 21_u64, 22_u64);
+        me.To(32).Select(table2).NoKeyN(1_u64);
+        me.To(33).Select(table2).HasN(2_u64, 21_u64, 22_u64);
+
+        me.Commit();
+
+        me.To(40).Begin();
+        me.To(41).Apply(*TAlter()
+                .DropColumn(table2, 5)
+                .AddColumn(table2, "arg3", 6, ETypes::Uint64, false, Cimple(20006_u64)));
+        me.To(42).Select(table2).HasN(2_u64, 21_u64, 20006_u64);
+        me.To(43).PutN(table2, 2_u64, ECellOp::Empty, 23_u64);
+        me.To(44).Select(table2).HasN(2_u64, 21_u64, 23_u64);
+        me.Reject();
+
+        me.To(50).Begin();
+        me.To(51).Select(table2).HasN(2_u64, 21_u64, 22_u64);
+        me.To(52).PutN(table2, 2_u64, 24_u64, ECellOp::Empty);
+        me.To(53).Select(table2).HasN(2_u64, 24_u64, 22_u64);
+        me.Commit();
+
+        me.To(60).Replay(EPlay::Boot);
+        me.To(61).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(62).Select(table2).HasN(2_u64, 24_u64, 22_u64);
+        me.To(63).Replay(EPlay::Redo);
+        me.To(64).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(65).Select(table2).HasN(2_u64, 24_u64, 22_u64);
+    }
+
+    Y_UNIT_TEST(UncommittedChangesVisibility) {
+        TDbExec me;
+
+        const ui32 table1 = 1;
+
+        me.To(10).Begin();
+        me.To(11).Apply(*TAlter()
+                .AddTable("me_1", table1)
+                .AddColumn(table1, "key",    1, ETypes::Uint64, false)
+                .AddColumn(table1, "arg1",   4, ETypes::Uint64, false, Cimple(10004_u64))
+                .AddColumn(table1, "arg2",   5, ETypes::Uint64, false, Cimple(10005_u64))
+                .AddColumnToKey(table1, 1));
+        me.To(12).PutN(table1, 1_u64, 11_u64, 12_u64);
+        me.To(13).WriteTx(123).PutN(table1, 1_u64, ECellOp::Empty, 13_u64);
+        UNIT_ASSERT(me->HasOpenTx(table1, 123));
+        me.To(14).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(15).ReadTx(123).Select(table1).HasN(1_u64, 11_u64, 13_u64);
+        me.To(16).Commit();
+
+        me.To(20).Begin();
+        me.To(21).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(22).CommitTx(table1, 123);
+        UNIT_ASSERT(!me->HasOpenTx(table1, 123));
+        UNIT_ASSERT(me->HasCommittedTx(table1, 123));
+        me.To(23).Select(table1).HasN(1_u64, 11_u64, 13_u64);
+        me.To(24).Reject();
+
+        UNIT_ASSERT(me->HasOpenTx(table1, 123));
+        UNIT_ASSERT(!me->HasCommittedTx(table1, 123));
+
+        me.To(30).Begin();
+        me.To(31).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(32).RemoveTx(table1, 123);
+        UNIT_ASSERT(!me->HasOpenTx(table1, 123));
+        UNIT_ASSERT(me->HasRemovedTx(table1, 123));
+        me.To(33).Reject();
+
+        UNIT_ASSERT(me->HasOpenTx(table1, 123));
+        UNIT_ASSERT(!me->HasRemovedTx(table1, 123));
+
+        me.To(40).Begin();
+        me.To(41).CommitTx(table1, 123);
+        me.To(42).Commit();
+
+        UNIT_ASSERT(!me->HasOpenTx(table1, 123));
+        UNIT_ASSERT(me->HasCommittedTx(table1, 123));
+
+        me.To(50).Select(table1).HasN(1_u64, 11_u64, 13_u64);
+        me.To(51).Snap(table1).Compact(table1);
+
+        UNIT_ASSERT(!me->HasOpenTx(table1, 123));
+        UNIT_ASSERT(!me->HasCommittedTx(table1, 123));
+
+        me.To(52).Select(table1).HasN(1_u64, 11_u64, 13_u64);
+    }
+
+    Y_UNIT_TEST(ReplayNewTable) {
+        TDbExec me;
+
+        const ui32 table1 = 1;
+
+        me.To(10).Begin();
+        me.To(11).Apply(*TAlter()
+                .AddTable("me_1", table1)
+                .AddColumn(table1, "key",    1, ETypes::Uint64, false)
+                .AddColumn(table1, "arg1",   4, ETypes::Uint64, false, Cimple(10004_u64))
+                .AddColumn(table1, "arg2",   5, ETypes::Uint64, false, Cimple(10005_u64))
+                .AddColumnToKey(table1, 1));
+        me.To(13).Commit();
+        me.To(14).Affects(0, { });
+
+        me.To(21).Replay(EPlay::Boot);
+        me.To(22).Replay(EPlay::Redo);
+    }
+
+    Y_UNIT_TEST(SnapshotNewTable) {
+        TDbExec me;
+
+        const ui32 table1 = 1;
+
+        me.To(10).Begin();
+        me.To(11).Apply(*TAlter()
+                .AddTable("me_1", table1)
+                .AddColumn(table1, "key",    1, ETypes::Uint64, false)
+                .AddColumn(table1, "arg1",   4, ETypes::Uint64, false, Cimple(10004_u64))
+                .AddColumn(table1, "arg2",   5, ETypes::Uint64, false, Cimple(10005_u64))
+                .AddColumnToKey(table1, 1));
+        me.To(12).Snapshot(table1);
+        me.To(13).Commit();
+        me.To(14).Affects(0, { });
+
+        me.To(21).Replay(EPlay::Boot);
+        me.To(22).Replay(EPlay::Redo);
+    }
+
+    Y_UNIT_TEST(DropModifiedTable) {
+        TDbExec me;
+
+        const ui32 table1 = 1;
+
+        me.To(10).Begin();
+        me.To(11).Apply(*TAlter()
+                .AddTable("me_1", table1)
+                .AddColumn(table1, "key",    1, ETypes::Uint64, false)
+                .AddColumn(table1, "arg1",   4, ETypes::Uint64, false, Cimple(10004_u64))
+                .AddColumn(table1, "arg2",   5, ETypes::Uint64, false, Cimple(10005_u64))
+                .AddColumnToKey(table1, 1));
+        me.To(12).Commit();
+
+        me.To(20).Begin();
+        me.To(21).PutN(table1, 1_u64, 11_u64, 12_u64);
+        me.To(22).Commit();
+
+        me.To(30).Begin();
+        me.To(31).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(32).Apply(*TAlter()
+                .AddColumn(table1, "arg3",  6, ETypes::Uint64, false, Cimple(10006_u64)));
+        me.To(33).Select(table1).HasN(1_u64, 11_u64, 12_u64, 10006_u64);
+        me.To(34).Apply(*TAlter()
+                .DropTable(table1));
+        me.To(35).Reject();
+
+        me.To(40).Begin();
+        me.To(41).Select(table1).HasN(1_u64, 11_u64, 12_u64);
+        me.To(42).Apply(*TAlter()
+                .AddColumn(table1, "arg3",  6, ETypes::Uint64, false, Cimple(10006_u64)));
+        me.To(43).Select(table1).HasN(1_u64, 11_u64, 12_u64, 10006_u64);
+        me.To(44).Apply(*TAlter()
+                .DropTable(table1));
+        me.To(45).Commit();
+
+        me.To(51).Replay(EPlay::Boot);
+        me.To(52).Replay(EPlay::Redo);
+    }
+
+    Y_UNIT_TEST(KIKIMR_15598_Many_MemTables) {
+        TDbExec me;
+
+        const ui32 table = 1;
+        me.To(10)
+            .Begin()
+            .Apply(*TAlter()
+                .AddTable("me_1", table)
+                .AddColumn(table, "key", 1, ETypes::Uint64, false)
+                .AddColumn(table, "val", 2, ETypes::Uint64, false, Cimple(0_u64))
+                .AddColumnToKey(table, 1))
+            .Commit();
+
+        ui64 count = 65537;
+
+        // Add 65537 rows, each in its own memtable
+        for (ui64 i = 1; i <= count; ++i) {
+            me.To(100000 + i)
+                .Begin()
+                .Put(table, *me.SchemedCookRow(table).Col(i, i))
+                .Commit();
+            // Simulate an unsuccessful compaction attempt
+            me.Snap(table);
+        }
+
+        // Check all rows exist on iteration
+        auto check = me.To(200000).IterData(table);
+        check.Seek({ }, ESeek::Lower);
+        for (ui64 i = 1; i <= count; ++i) {
+            check.To(200000 + i).Is(*me.SchemedCookRow(table).Col(i, i));
+            check.Next();
+        }
+        check.To(300000).Is(EReady::Gone);
     }
 
 }

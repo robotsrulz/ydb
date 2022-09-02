@@ -35,6 +35,7 @@
 #include <ydb/core/tablet_flat/tablet_flat_executed.h>
 #include <ydb/core/tablet_flat/tablet_flat_executor.h>
 #include <ydb/core/tablet_flat/flat_page_iface.h>
+#include <ydb/core/tx/long_tx_service/public/events.h>
 #include <ydb/core/tx/scheme_cache/scheme_cache.h>
 #include <ydb/core/protos/tx.pb.h>
 #include <ydb/core/protos/tx_datashard.pb.h>
@@ -54,6 +55,7 @@ extern TStringBuf SnapshotTransferReadSetMagic;
 
 using NTabletFlatExecutor::ITransaction;
 using NTabletFlatExecutor::TScanOptions;
+using NLongTxService::TEvLongTxService;
 
 // For CopyTable and MoveShadow
 class TTxTableSnapshotContext : public NTabletFlatExecutor::TTableSnapshotContext {
@@ -82,11 +84,15 @@ public:
     TSplitSnapshotContext(ui64 txId, TVector<ui32> &&tables,
                           TRowVersion completeEdge = TRowVersion::Min(),
                           TRowVersion incompleteEdge = TRowVersion::Min(),
-                          TRowVersion lowWatermark = TRowVersion::Min())
+                          TRowVersion immediateWriteEdge = TRowVersion::Min(),
+                          TRowVersion lowWatermark = TRowVersion::Min(),
+                          bool performedUnprotectedReads = false)
         : TxId(txId)
         , CompleteEdge(completeEdge)
         , IncompleteEdge(incompleteEdge)
+        , ImmediateWriteEdge(immediateWriteEdge)
         , LowWatermark(lowWatermark)
+        , PerformedUnprotectedReads(performedUnprotectedReads)
         , Tables(tables)
     {}
 
@@ -97,7 +103,9 @@ public:
     ui64 TxId;
     TRowVersion CompleteEdge;
     TRowVersion IncompleteEdge;
+    TRowVersion ImmediateWriteEdge;
     TRowVersion LowWatermark;
+    bool PerformedUnprotectedReads;
 
 private:
     TVector<ui32> Tables;
@@ -177,7 +185,6 @@ class TDataShard
     class TTxInitiateStatsUpdate;
     class TTxCheckInReadSets;
     class TTxRemoveOldInReadSets;
-    class TTxRead;
     class TTxReadContinue;
     class TTxReadColumns;
     class TTxGetInfo;
@@ -199,10 +206,14 @@ class TDataShard
     class TTxCompactBorrowed;
     class TTxCompactTable;
     class TTxPersistFullCompactionTs;
+    class TTxRemoveLock;
 
     template <typename T> friend class TTxDirectBase;
     class TTxUploadRows;
     class TTxEraseRows;
+
+    class TTxReadViaPipeline;
+    class TReadOperation;
 
     ITransaction *CreateTxMonitoring(TDataShard *self,
                                      NMon::TEvRemoteHttpInfo::TPtr ev);
@@ -1018,9 +1029,12 @@ class TDataShard
 
     void Handle(TEvDataShard::TEvApplyReplicationChanges::TPtr& ev, const TActorContext& ctx);
 
+    void Handle(TEvLongTxService::TEvLockStatus::TPtr& ev, const TActorContext& ctx);
+
     void HandleByReplicationSourceOffsetsServer(STATEFN_SIG);
 
     void DoPeriodicTasks(const TActorContext &ctx);
+    void DoPeriodicTasks(TEvPrivate::TEvPeriodicWakeup::TPtr&, const TActorContext &ctx);
 
     TDuration GetDataTxCompleteLag()
     {
@@ -1168,7 +1182,11 @@ public:
     ui64 TxPlanned() const { return TransQueue.TxPlanned(); }
     ui64 TxPlanWaiting() const { return TransQueue.TxPlanWaiting(); }
     ui64 ImmediateInFly() const { return Pipeline.ImmediateInFly(); }
-    ui64 TxWaiting() const { return Pipeline.WaitingTxs(); }
+    ui64 TxWaiting() const { return Pipeline.WaitingTxs() + Pipeline.WaitingReadIterators(); }
+
+    // note that not part of ImmediateInFly() to not block scheme ops:
+    // we rather abort iterator if scheme changes between iterations
+    ui64 ReadIteratorsInFly() const { return ReadIterators.size();}
 
     inline TRowVersion LastCompleteTxVersion() const {
         auto order = Pipeline.GetLastCompleteTx();
@@ -1258,6 +1276,14 @@ public:
         return BackupReadAheadHi;
     }
 
+    ui64 GetTtlReadAheadLoOverride() const {
+        return TtlReadAheadLo;
+    }
+
+    ui64 GetTtlReadAheadHiOverride() const {
+        return TtlReadAheadHi;
+    }
+
     bool GetEnablePrioritizedMvccSnapshotReads() const {
         ui64 value = EnablePrioritizedMvccSnapshotReads;
         return value != 0;
@@ -1265,6 +1291,11 @@ public:
 
     bool GetEnableUnprotectedMvccSnapshotReads() const {
         ui64 value = EnableUnprotectedMvccSnapshotReads;
+        return value != 0;
+    }
+
+    bool GetEnableLockedWrites() const {
+        ui64 value = EnableLockedWrites;
         return value != 0;
     }
 
@@ -1294,7 +1325,11 @@ public:
     void CompactionComplete(ui32 tableId, const TActorContext &ctx) override;
     void CompletedLoansChanged(const TActorContext &ctx) override;
 
-    void ReplyCompactionWaiters(ui32 tableId, ui64 edge, const TActorContext &ctx);
+    void ReplyCompactionWaiters(
+        ui32 tableId,
+        TLocalPathId localPathId,
+        const NTabletFlatExecutor::TFinishedCompactionInfo& compactionInfo,
+        const TActorContext &ctx);
 
     TUserTable::TSpecialUpdate SpecialUpdates(const NTable::TDatabase& db, const TTableId& tableId) const;
 
@@ -1416,6 +1451,8 @@ public:
     static THashMap<TPathId, TPathId> GetRemapIndexes(const NKikimrTxDataShard::TMoveTable& move);
     TUserTable::TPtr MoveUserTable(TOperation::TPtr op, const NKikimrTxDataShard::TMoveTable& move,
         const TActorContext& ctx, TTransactionContext& txc);
+    TUserTable::TPtr MoveUserIndex(TOperation::TPtr op, const NKikimrTxDataShard::TMoveIndex& move,
+        const TActorContext& ctx, TTransactionContext& txc);
     void DropUserTable(TTransactionContext& txc, ui64 tableId);
 
     ui32 GetLastLocalTid() const { return LastLocalTid; }
@@ -1429,6 +1466,7 @@ public:
     void CreateChangeSender(const TActorContext& ctx);
     void KillChangeSender(const TActorContext& ctx);
     void MaybeActivateChangeSender(const TActorContext& ctx);
+    void SuspendChangeSender(const TActorContext& ctx);
     const TActorId& GetChangeSender() const { return OutChangeSender; }
     bool LoadChangeRecords(NIceDb::TNiceDb& db, TVector<NMiniKQL::IChangeCollector::TChange>& records);
 
@@ -1477,8 +1515,17 @@ public:
     ui64 GetMaxObservedStep() const;
     void SendImmediateWriteResult(
             const TRowVersion& version, const TActorId& target, IEventBase* event, ui64 cookie = 0);
-    void SendImmediateReadResult(TMonotonic readTime, const TActorId& target, IEventBase* event, ui64 cookie = 0);
-    void SendImmediateReadResult(const TActorId& target, IEventBase* event, ui64 cookie = 0);
+    void SendImmediateReadResult(
+        TMonotonic readTime,
+        const TActorId& target,
+        IEventBase* event,
+        ui64 cookie = 0,
+        const TActorId& sessionId = {});
+    void SendImmediateReadResult(
+        const TActorId& target,
+        IEventBase* event,
+        ui64 cookie = 0,
+        const TActorId& sessionId = {});
     void SendAfterMediatorStepActivate(ui64 mediatorStep);
 
     void CheckMediatorStateRestored();
@@ -1504,6 +1551,13 @@ public:
     bool CheckTxNeedWait(const TEvDataShard::TEvProposeTransaction::TPtr& ev) const;
 
     bool CheckChangesQueueOverflow() const;
+
+    void DeleteReadIterator(const TReadIteratorId& readId);
+    void DeleteReadIterator(TReadIteratorsMap::iterator it);
+    void CancelReadIterators(Ydb::StatusIds::StatusCode code, const TString& issue, const TActorContext& ctx);
+    void ReadIteratorsOnNodeDisconnected(const TActorId& sessionId, const TActorContext &ctx);
+
+    void SubscribeNewLocks(const TActorContext &ctx);
 
 private:
     ///
@@ -1958,6 +2012,7 @@ private:
     ui64 CurrentSchemeShardId; // TabletID of SchemeShard wich manages the path right now
     ui64 LastKnownMediator;
     bool RegistrationSended;
+    bool PeriodicWakeupPending = false;
     std::unique_ptr<NKikimrSubDomains::TProcessingParams> ProcessingParams;
     TSchemeOpSeqNo LastSchemeOpSeqNo;
     TInstant LastDbStatsUpdateTime;
@@ -2084,8 +2139,12 @@ private:
     TControlWrapper BackupReadAheadLo;
     TControlWrapper BackupReadAheadHi;
 
+    TControlWrapper TtlReadAheadLo;
+    TControlWrapper TtlReadAheadHi;
+
     TControlWrapper EnablePrioritizedMvccSnapshotReads;
     TControlWrapper EnableUnprotectedMvccSnapshotReads;
+    TControlWrapper EnableLockedWrites;
 
     TControlWrapper EnableLeaderLeases;
     TControlWrapper MinLeaderLeaseDurationUs;
@@ -2178,12 +2237,13 @@ private:
     THashMap<ui64, TEnqueuedRecord> ChangesQueue; // ui64 is order
     ui64 ChangesQueueBytes = 0;
     TActorId OutChangeSender;
+    bool OutChangeSenderSuspended = false;
 
     // in
     THashMap<ui64, TInChangeSender> InChangeSenders; // ui64 is shard id
 
-    // compactionId, tableId/ownerId, actorId
-    using TCompactionWaiter = std::tuple<ui64, TPathId, TActorId>;
+    // compactionId, actorId
+    using TCompactionWaiter = std::tuple<ui64, TActorId>;
     using TCompactionWaiterList = TList<TCompactionWaiter>;
 
     // tableLocalTid -> waiters, note that compactionId is monotonically
@@ -2191,6 +2251,11 @@ private:
     // thus we always add waiters to the end of the list and remove
     // from the front
     THashMap<ui32, TCompactionWaiterList> CompactionWaiters;
+
+    using TCompactBorrowedWaiterList = TList<TActorId>;
+
+    // tableLocalTid -> waiters, similar to CompactionWaiters
+    THashMap<ui32, TCompactBorrowedWaiterList> CompactBorrowedWaiters;
 
     struct TReplicationSourceOffsetsReceiveState {
         // A set of tables for which we already received offsets
@@ -2212,6 +2277,7 @@ private:
     TReplicatedTableState* EnsureReplicatedTable(const TPathId& pathId);
 
     TReadIteratorsMap ReadIterators;
+    THashMap<TActorId, TReadIteratorSession> ReadIteratorSessions;
 
 protected:
     // Redundant init state required by flat executor implementation
@@ -2325,7 +2391,7 @@ protected:
             HFunc(TEvDataShard::TEvDiscardVolatileSnapshotRequest, Handle);
             HFuncTraced(TEvDataShard::TEvBuildIndexCreateRequest, Handle);
             HFunc(TEvPrivate::TEvAsyncJobComplete, Handle);
-            CFunc(TEvPrivate::EvPeriodicWakeup, DoPeriodicTasks);
+            HFunc(TEvPrivate::TEvPeriodicWakeup, DoPeriodicTasks);
             HFunc(TEvents::TEvUndelivered, Handle);
             IgnoreFunc(TEvInterconnect::TEvNodeConnected);
             HFunc(TEvInterconnect::TEvNodeDisconnected, Handle);
@@ -2350,6 +2416,7 @@ protected:
             fFunc(TEvDataShard::EvGetReplicationSourceOffsets, HandleByReplicationSourceOffsetsServer);
             fFunc(TEvDataShard::EvReplicationSourceOffsetsAck, HandleByReplicationSourceOffsetsServer);
             fFunc(TEvDataShard::EvReplicationSourceOffsetsCancel, HandleByReplicationSourceOffsetsServer);
+            HFunc(TEvLongTxService::TEvLockStatus, Handle);
         default:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_WARN_S(ctx, NKikimrServices::TX_DATASHARD,
@@ -2371,6 +2438,10 @@ protected:
             HFuncTraced(TEvDataShard::TEvReadColumnsRequest, Handle);
             HFuncTraced(TEvTabletPipe::TEvServerConnected, Handle);
             HFuncTraced(TEvTabletPipe::TEvServerDisconnected, Handle);
+            HFuncTraced(TEvDataShard::TEvRead, Handle);
+            HFuncTraced(TEvDataShard::TEvReadContinue, Handle);
+            HFuncTraced(TEvDataShard::TEvReadAck, Handle);
+            HFuncTraced(TEvDataShard::TEvReadCancel, Handle);
         default:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_WARN_S(ctx, NKikimrServices::TX_DATASHARD, "TDataShard::StateWorkAsFollower unhandled event type: " << ev->GetTypeRewrite()
@@ -2495,12 +2566,13 @@ protected:
             ev->Record.MutableTableStats()->SetTxRejectedByOverload(TabletCounters->Cumulative()[COUNTER_PREPARE_OVERLOADED].Get());
             ev->Record.MutableTableStats()->SetTxRejectedBySpace(TabletCounters->Cumulative()[COUNTER_PREPARE_OUT_OF_SPACE].Get());
             ev->Record.MutableTableStats()->SetTxCompleteLagMsec(TabletCounters->Simple()[COUNTER_TX_COMPLETE_LAG].Get());
-            ev->Record.MutableTableStats()->SetInFlightTxCount(TabletCounters->Simple()[COUNTER_TX_IN_FLY].Get() +
-                 TabletCounters->Simple()[COUNTER_IMMEDIATE_TX_IN_FLY].Get());
+            ev->Record.MutableTableStats()->SetInFlightTxCount(TabletCounters->Simple()[COUNTER_TX_IN_FLY].Get()
+                + TabletCounters->Simple()[COUNTER_IMMEDIATE_TX_IN_FLY].Get());
 
-            ev->Record.MutableTableStats()->SetRowUpdates(TabletCounters->Cumulative()[COUNTER_ENGINE_HOST_UPDATE_ROW].Get() +
-                                                          TabletCounters->Cumulative()[COUNTER_UPLOAD_ROWS].Get());
-            ev->Record.MutableTableStats()->SetRowDeletes(TabletCounters->Cumulative()[COUNTER_ENGINE_HOST_ERASE_ROW].Get());
+            ev->Record.MutableTableStats()->SetRowUpdates(TabletCounters->Cumulative()[COUNTER_ENGINE_HOST_UPDATE_ROW].Get()
+                + TabletCounters->Cumulative()[COUNTER_UPLOAD_ROWS].Get());
+            ev->Record.MutableTableStats()->SetRowDeletes(TabletCounters->Cumulative()[COUNTER_ENGINE_HOST_ERASE_ROW].Get()
+                + TabletCounters->Cumulative()[COUNTER_ERASE_ROWS].Get());
             ev->Record.MutableTableStats()->SetRowReads(TabletCounters->Cumulative()[COUNTER_ENGINE_HOST_SELECT_ROW].Get());
             ev->Record.MutableTableStats()->SetRangeReads(TabletCounters->Cumulative()[COUNTER_ENGINE_HOST_SELECT_RANGE].Get());
             ev->Record.MutableTableStats()->SetRangeReadRows(TabletCounters->Cumulative()[COUNTER_ENGINE_HOST_SELECT_RANGE_ROWS].Get());
@@ -2563,5 +2635,12 @@ void SetStatusError(T &rec,
     issue->set_severity(severity);
     issue->set_message(msg);
 }
+
+void SendViaSession(const TActorId& sessionId,
+                    const TActorId& target,
+                    const TActorId& src,
+                    IEventBase* event,
+                    ui32 flags = 0,
+                    ui64 cookie = 0);
 
 }}

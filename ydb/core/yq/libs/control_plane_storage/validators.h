@@ -83,8 +83,9 @@ TValidationQuery CreateRelatedBindingsValidator(const TString& scope,
 TValidationQuery CreateConnectionExistsValidator(const TString& scope,
                                                  const TString& connectionId,
                                                  const TString& error,
-                                                TPermissions permissions,
+                                                 TPermissions permissions,
                                                  const TString& user,
+                                                 YandexQuery::Acl::Visibility bindingVisibility,
                                                  const TString& tablePathPrefix);
 
 TValidationQuery CreateTtlValidator(const TString& tableName,
@@ -93,6 +94,12 @@ TValidationQuery CreateTtlValidator(const TString& tableName,
                                     const TString& id,
                                     const TString& error,
                                     const TString& tablePathPrefix);
+
+TValidationQuery CreateQueryComputeStatusValidator(const std::vector<YandexQuery::QueryMeta::ComputeStatus>& computeStatuses,
+                                                   const TString& scope,
+                                                   const TString& id,
+                                                   const TString& error,
+                                                   const TString& tablePathPrefix);
 
 template<typename T>
 TValidationQuery CreateIdempotencyKeyValidator(const TString& scope,

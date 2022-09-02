@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(out)
 
 add_library(ydb-core-protos)
 set_property(TARGET ydb-core-protos PROPERTY
@@ -32,6 +33,8 @@ target_proto_messages(ydb-core-protos PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/alloc.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/base.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/bind_channel_storage_pool.proto
+  ${CMAKE_SOURCE_DIR}/ydb/core/protos/blob_depot.proto
+  ${CMAKE_SOURCE_DIR}/ydb/core/protos/blob_depot_config.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/blobstorage.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/blobstorage_controller.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/blobstorage_disk.proto
@@ -89,6 +92,7 @@ target_proto_messages(ydb-core-protos PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/long_tx_service.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/metrics.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/minikql_engine.proto
+  ${CMAKE_SOURCE_DIR}/ydb/core/protos/mon.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/msgbus.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/msgbus_health.proto
   ${CMAKE_SOURCE_DIR}/ydb/core/protos/msgbus_kv.proto

@@ -183,9 +183,10 @@ TProgramPtr TProgramFactory::Create(
 TProgramPtr TProgramFactory::Create(
         const TString& filename,
         const TString& sourceCode,
-        const TString& sessionId)
+        const TString& sessionId,
+        EHiddenMode hiddenMode)
 {
-    auto randomProvider = UseRepeatableRandomAndTimeProviders_ && !UseUnrepeatableRandom ?
+    auto randomProvider = UseRepeatableRandomAndTimeProviders_ && !UseUnrepeatableRandom && hiddenMode == EHiddenMode::Disable ?
         CreateDeterministicRandomProvider(1) : CreateDefaultRandomProvider();
     auto timeProvider = UseRepeatableRandomAndTimeProviders_ ?
         CreateDeterministicTimeProvider(10000000) : CreateDefaultTimeProvider();
@@ -198,7 +199,7 @@ TProgramPtr TProgramFactory::Create(
     // make UserDataTable_ copy here
     return new TProgram(FunctionRegistry_, randomProvider, timeProvider, NextUniqueId_, DataProvidersInit_,
         UserDataTable_, CredentialTables_, UserCredentials_, moduleResolver, udfResolver, udfIndex, udfIndexPackageSet, FileStorage_,
-        GatewaysConfig_, filename, sourceCode, sessionId, Runner_, EnableRangeComputeFor_);
+        GatewaysConfig_, filename, sourceCode, sessionId, Runner_, EnableRangeComputeFor_, hiddenMode);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -223,7 +224,8 @@ TProgram::TProgram(
         const TString& sourceCode,
         const TString& sessionId,
         const TString& runner,
-        bool enableRangeComputeFor
+        bool enableRangeComputeFor,
+        EHiddenMode hiddenMode
     )
     : FunctionRegistry_(functionRegistry)
     , RandomProvider_(randomProvider)
@@ -249,6 +251,7 @@ TProgram::TProgram(
     , ResultFormat_(NYson::EYsonFormat::Binary)
     , OutputFormat_(NYson::EYsonFormat::Pretty)
     , EnableRangeComputeFor_(enableRangeComputeFor)
+    , HiddenMode_(hiddenMode)
 {
     if (SessionId_.empty()) {
         SessionId_ = CreateGuidAsString();
@@ -417,7 +420,7 @@ bool TProgram::ParseSql(const NSQLTranslation::TTranslationSettings& settings)
     return FillParseResult(SqlToYql(SourceCode_, settings, &warningRules), &warningRules);
 }
 
-bool TProgram::Compile(const TString& username) {
+bool TProgram::Compile(const TString& username, bool skipLibraries) {
     YQL_PROFILE_FUNC(TRACE);
 
     Y_ENSURE(AstRoot_, "Program not parsed yet");
@@ -429,7 +432,7 @@ bool TProgram::Compile(const TString& username) {
         return false;
     }
     TypeCtx_->IsReadOnly = true;
-    if (Modules_.get()) {
+    if (!skipLibraries && Modules_.get()) {
         auto libs = UserDataStorage_->GetLibraries();
         for (auto lib : libs) {
             if (!Modules_->AddFromFile(lib, *ExprCtx_, SyntaxVersion_, 0)) {
@@ -438,7 +441,7 @@ bool TProgram::Compile(const TString& username) {
         }
     }
 
-    if (!CompileExpr(*AstRoot_, ExprRoot_, *ExprCtx_, Modules_.get(), 0, SyntaxVersion_)) {
+    if (!CompileExpr(*AstRoot_, ExprRoot_, *ExprCtx_, skipLibraries ? nullptr : Modules_.get(), 0, SyntaxVersion_)) {
         return false;
     }
 
@@ -764,7 +767,7 @@ TProgram::TFutureStatus TProgram::RunAsync(
     if (!ProvideAnnotationContext(username)->Initialize(*ExprCtx_) || !CollectUsedClusters()) {
         return NThreading::MakeFuture<TStatus>(IGraphTransformer::TStatus::Error);
     }
-    TypeCtx_->IsReadOnly = false;
+    TypeCtx_->IsReadOnly = (HiddenMode_ != EHiddenMode::Disable);
 
     for (const auto& dp : DataProviders_) {
         if (!dp.RemoteClusterProvider || !dp.RemoteRun) {
@@ -838,7 +841,7 @@ TProgram::TFutureStatus TProgram::RunAsyncWithConfig(
     if (!ProvideAnnotationContext(username)->Initialize(*ExprCtx_) || !CollectUsedClusters()) {
         return NThreading::MakeFuture<TStatus>(IGraphTransformer::TStatus::Error);
     }
-    TypeCtx_->IsReadOnly = false;
+    TypeCtx_->IsReadOnly = (HiddenMode_ != EHiddenMode::Disable);
 
     for (const auto& dp : DataProviders_) {
         if (!dp.RemoteClusterProvider || !dp.RemoteRun) {
@@ -996,7 +999,11 @@ TFuture<IGraphTransformer::TStatus> TProgram::AsyncTransformWithFallback(bool ap
             FallbackCounter ++;
             // don't execute recapture again
             ExprCtx_->Step.Done(TExprStep::Recapture);
+            BeforeFallback();
             return AsyncTransformWithFallback(false);
+        }
+        if (status == IGraphTransformer::TStatus::Error && (TypeCtx_->DqFallbackPolicy == "never" || TypeCtx_->ForceDq)) {
+            YQL_LOG(DEBUG) << "Fallback skipped due to per query policy";
         }
         return res;
     });
@@ -1124,7 +1131,7 @@ TMaybe<TString> TProgram::GetTasksInfo() {
     }
 }
 
-TMaybe<TString> TProgram::GetStatistics(bool totalOnly) {
+TMaybe<TString> TProgram::GetStatistics(bool totalOnly, THashMap<TString, TStringBuf> extraYsons) {
     if (!TypeCtx_) {
         return Nothing();
     }
@@ -1173,6 +1180,13 @@ TMaybe<TString> TProgram::GetStatistics(bool totalOnly) {
         }
 
     writer.OnEndMap(); // system
+
+    // extra
+    for (const auto &[k, extraYson] : extraYsons) {
+        writer.OnKeyedItem(k);
+        writer.OnRaw(extraYson);
+        hasStatistics = true;
+    }
 
     // Footer
     writer.OnEndMap();
@@ -1273,6 +1287,7 @@ TTypeAnnotationContextPtr TProgram::BuildTypeAnnotationContext(const TString& us
     if (DiagnosticFormat_) {
         typeAnnotationContext->Diagnostics = true;
     }
+    typeAnnotationContext->HiddenMode = HiddenMode_;
 
     if (UdfIndex_ && UdfIndexPackageSet_) {
         // setup default versions at the beginning
@@ -1295,6 +1310,9 @@ TTypeAnnotationContextPtr TProgram::BuildTypeAnnotationContext(const TString& us
             ProgressWriter_,
             OperationOptions_
         );
+        if (HiddenMode_ != EHiddenMode::Disable && !dp.SupportsHidden) {
+            continue;
+        }
 
         providerNames.insert(dp.Names.begin(), dp.Names.end());
         DataProviders_.emplace_back(dp);
@@ -1353,7 +1371,7 @@ TTypeAnnotationContextPtr TProgram::BuildTypeAnnotationContext(const TString& us
     }
 
     {
-        auto configProvider = CreateConfigProvider(*typeAnnotationContext, GatewaysConfig_);
+        auto configProvider = CreateConfigProvider(*typeAnnotationContext, GatewaysConfig_, username);
         typeAnnotationContext->AddDataSource(ConfigProviderName, configProvider);
     }
 

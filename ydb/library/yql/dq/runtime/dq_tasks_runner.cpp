@@ -1,10 +1,12 @@
 #include "dq_tasks_runner.h"
 
+#include <ydb/library/yql/minikql/comp_nodes/mkql_multihopping.h>
+
 #include <ydb/library/yql/dq/expr_nodes/dq_expr_nodes.h>
 #include <ydb/library/yql/dq/runtime/dq_columns_resolve.h>
 #include <ydb/library/yql/dq/runtime/dq_input_channel.h>
 #include <ydb/library/yql/dq/runtime/dq_input_producer.h>
-#include <ydb/library/yql/dq/runtime/dq_source.h>
+#include <ydb/library/yql/dq/runtime/dq_async_input.h>
 #include <ydb/library/yql/dq/runtime/dq_transport.h>
 
 #include <ydb/library/yql/minikql/computation/mkql_computation_node.h>
@@ -16,8 +18,10 @@
 #include <ydb/library/yql/minikql/mkql_node_serialization.h>
 #include <ydb/library/yql/minikql/mkql_node_visitor.h>
 #include <ydb/library/yql/minikql/mkql_program_builder.h>
+#include <ydb/library/yql/providers/common/schema/mkql/yql_mkql_schema.h>
 
 #include <util/generic/scope.h>
+
 
 using namespace NKikimr;
 using namespace NKikimr::NMiniKQL;
@@ -146,7 +150,7 @@ NUdf::TUnboxedValue DqBuildInputValue(const NDqProto::TTaskInput& inputDesc, con
 }
 
 IDqOutputConsumer::TPtr DqBuildOutputConsumer(const NDqProto::TTaskOutput& outputDesc, const NMiniKQL::TType* type,
-    const NMiniKQL::TTypeEnvironment& typeEnv, TVector<IDqOutput::TPtr>&& outputs)
+    const NMiniKQL::TTypeEnvironment& /*typeEnv*/, TVector<IDqOutput::TPtr>&& outputs)
 {
     switch (outputDesc.GetTypeCase()) {
         case NDqProto::TTaskOutput::kSink:
@@ -158,7 +162,7 @@ IDqOutputConsumer::TPtr DqBuildOutputConsumer(const NDqProto::TTaskOutput& outpu
         }
 
         case NDqProto::TTaskOutput::kHashPartition: {
-            TVector<NUdf::TDataTypeId> keyColumnTypes;
+            TVector<TType*> keyColumnTypes;
             TVector<ui32> keyColumnIndices;
             GetColumnsInfo(type, outputDesc.GetHashPartition().GetKeyColumns(), keyColumnTypes, keyColumnIndices);
             YQL_ENSURE(!keyColumnTypes.empty());
@@ -170,7 +174,7 @@ IDqOutputConsumer::TPtr DqBuildOutputConsumer(const NDqProto::TTaskOutput& outpu
             }
 
             return CreateOutputHashPartitionConsumer(std::move(outputs), std::move(keyColumnTypes),
-                std::move(keyColumnIndices), typeEnv);
+                std::move(keyColumnIndices));
         }
 
         case NDqProto::TTaskOutput::kBroadcast: {
@@ -248,13 +252,15 @@ public:
         return TaskId;
     }
 
-    void BuildTask(const NDqProto::TDqTask& task, const TDqTaskRunnerParameterProvider& parameterProvider) {
+    void BuildTask(const NDqProto::TDqTask& task, const TDqTaskRunnerParameterProvider& parameterProvider,
+        const std::shared_ptr<TPatternWithEnv>& compPattern)
+    {
         LOG(TStringBuilder() << "Build task: " << TaskId);
         auto startTime = TInstant::Now();
 
         auto& typeEnv = TypeEnv();
 
-        auto& program = task.GetProgram();
+        const NDqProto::TProgram& program = task.GetProgram();
         YQL_ENSURE(program.GetRuntimeVersion());
         YQL_ENSURE(program.GetRuntimeVersion() <= NYql::NDqProto::ERuntimeVersion::RUNTIME_VERSION_YQL_1_0);
 
@@ -341,15 +347,42 @@ public:
         }
 
         auto validatePolicy = Settings.TerminateOnError ? NUdf::EValidatePolicy::Fail : NUdf::EValidatePolicy::Exception;
-        TComputationPatternOpts opts(Alloc().Ref(), typeEnv, Context.ComputationFactory, Context.FuncRegistry,
-            NUdf::EValidateMode::None, validatePolicy, Settings.OptLLVM,
-            EGraphPerProcess::Multi, ProgramParsed.StatsRegistry.Get());
-        SecureParamsProvider = MakeSimpleSecureParamsProvider(Settings.SecureParams);
-        opts.SecureParamsProvider = SecureParamsProvider.get();
-        ProgramParsed.CompPattern = MakeComputationPattern(programExplorer, programRoot, ProgramParsed.EntryPoints, opts);
 
-        ProgramParsed.CompGraph = ProgramParsed.CompPattern->Clone(
-            opts.ToComputationOptions(*Context.RandomProvider, *Context.TimeProvider));
+        auto& compPatternAlloc = compPattern ? compPattern->Alloc.Ref() : Alloc().Ref();
+        auto& compPatternEnv = compPattern ? compPattern->Env : typeEnv;
+
+        auto taskRunnerFactory = [this](TCallable& callable, const TComputationNodeFactoryContext& ctx) -> IComputationNode* {
+            auto& computationFactory = Context.ComputationFactory;
+            if (auto res = computationFactory(callable, ctx)) {
+                return res;
+            }
+            if (callable.GetType()->GetName() == "MultiHoppingCore") {
+                return WrapMultiHoppingCore(callable, ctx, Watermark);
+            }
+            return nullptr;
+        };
+
+        TComputationPatternOpts opts(compPatternAlloc, compPatternEnv, taskRunnerFactory,
+            Context.FuncRegistry, NUdf::EValidateMode::None, validatePolicy, Settings.OptLLVM, EGraphPerProcess::Multi,
+            ProgramParsed.StatsRegistry.Get());
+
+            SecureParamsProvider = MakeSimpleSecureParamsProvider(Settings.SecureParams);
+            opts.SecureParamsProvider = SecureParamsProvider.get();
+
+        if (compPattern) {
+            if (!compPattern->Pattern) {
+                auto guard = compPattern->Env.BindAllocator();
+                compPattern->Pattern = MakeComputationPattern(programExplorer, programRoot, ProgramParsed.EntryPoints, opts);
+            }
+            ProgramParsed.CompPattern = compPattern->Pattern;
+            // clone pattern using alloc from current scope
+            ProgramParsed.CompGraph = ProgramParsed.CompPattern->Clone(
+                opts.ToComputationOptions(*Context.RandomProvider, *Context.TimeProvider, &Alloc().Ref()));
+        } else {
+            ProgramParsed.CompPattern = MakeComputationPattern(programExplorer, programRoot, ProgramParsed.EntryPoints, opts);
+            ProgramParsed.CompGraph = ProgramParsed.CompPattern->Clone(
+                opts.ToComputationOptions(*Context.RandomProvider, *Context.TimeProvider));
+        }
 
         TBindTerminator term(ProgramParsed.CompGraph->GetTerminator());
 
@@ -395,10 +428,11 @@ public:
     }
 
     void Prepare(const NDqProto::TDqTask& task, const TDqTaskRunnerMemoryLimits& memoryLimits,
-        const IDqTaskRunnerExecutionContext& execCtx, const TDqTaskRunnerParameterProvider& parameterProvider) override
+        const IDqTaskRunnerExecutionContext& execCtx, const TDqTaskRunnerParameterProvider& parameterProvider,
+        const std::shared_ptr<TPatternWithEnv>& compPattern) override
     {
         TaskId = task.GetId();
-        BuildTask(task, parameterProvider);
+        BuildTask(task, parameterProvider, compPattern);
 
         LOG(TStringBuilder() << "Prepare task: " << TaskId);
         auto startTime = TInstant::Now();
@@ -413,9 +447,34 @@ public:
             auto& inputDesc = task.GetInputs(i);
 
             TVector<IDqInput::TPtr> inputs{Reserve(std::max<ui64>(inputDesc.ChannelsSize(), 1))}; // 1 is for "source" type of input.
+            TInputTransformInfo* transform = nullptr;
+            TType** inputType = &ProgramParsed.InputItemTypes[i];
+            if (inputDesc.HasTransform()) {
+                const auto& transformDesc = inputDesc.GetTransform();
+                transform = &InputTransforms[i];
+                Y_VERIFY(!transform->TransformInput);
+                Y_VERIFY(!transform->TransformOutput);
+
+                auto inputTypeNode = NMiniKQL::DeserializeNode(TStringBuf{transformDesc.GetInputType()}, typeEnv);
+                YQL_ENSURE(inputTypeNode, "Failed to deserialize transform input type");
+                transform->TransformInputType = static_cast<TType*>(inputTypeNode);
+
+                auto outputTypeNode = NMiniKQL::DeserializeNode(TStringBuf{transformDesc.GetOutputType()}, typeEnv);
+                YQL_ENSURE(outputTypeNode, "Failed to deserialize transform output type");
+                TType* outputType = static_cast<TType*>(outputTypeNode);
+                YQL_ENSURE(outputType->IsSameType(*ProgramParsed.InputItemTypes[i]));
+                LOG(TStringBuilder() << "Task: " << TaskId << " has transform by "
+                    << transformDesc.GetType() << " with input type: " << *transform->TransformInputType
+                    << " , output type: " << *outputType);
+
+                transform->TransformOutput = CreateDqAsyncInputBuffer(i, outputType,
+                    memoryLimits.ChannelBufferSize, Settings.CollectProfileStats);
+
+                inputType = &transform->TransformInputType;
+            }
 
             if (inputDesc.HasSource()) {
-                auto source = CreateDqSource(i, ProgramParsed.InputItemTypes[i],
+                auto source = CreateDqAsyncInputBuffer(i, *inputType,
                     memoryLimits.ChannelBufferSize, Settings.CollectProfileStats);
                 auto [_, inserted] = Sources.emplace(i, source);
                 Y_VERIFY(inserted);
@@ -423,7 +482,7 @@ public:
             } else {
                 for (auto& inputChannelDesc : inputDesc.GetChannels()) {
                     ui64 channelId = inputChannelDesc.GetId();
-                    auto inputChannel = CreateDqInputChannel(channelId, ProgramParsed.InputItemTypes[i],
+                    auto inputChannel = CreateDqInputChannel(channelId, *inputType,
                         memoryLimits.ChannelBufferSize, Settings.CollectProfileStats, typeEnv, holderFactory,
                         inputChannelDesc.GetTransportVersion());
                     auto ret = InputChannels.emplace(channelId, inputChannel);
@@ -433,30 +492,54 @@ public:
             }
 
             auto entryNode = ProgramParsed.CompGraph->GetEntryPoint(i, true);
-            entryNode->SetValue(ProgramParsed.CompGraph->GetContext(),
-                DqBuildInputValue(inputDesc, ProgramParsed.InputItemTypes[i], std::move(inputs), holderFactory));
+            if (transform) {
+                transform->TransformInput = DqBuildInputValue(inputDesc, transform->TransformInputType, std::move(inputs), holderFactory);
+                inputs.clear();
+                inputs.emplace_back(transform->TransformOutput);
+                entryNode->SetValue(ProgramParsed.CompGraph->GetContext(),
+                    CreateInputUnionValue(std::move(inputs), holderFactory));
+            } else {
+                entryNode->SetValue(ProgramParsed.CompGraph->GetContext(),
+                    DqBuildInputValue(inputDesc, ProgramParsed.InputItemTypes[i], std::move(inputs), holderFactory));
+            }
         }
 
         TVector<IDqOutputConsumer::TPtr> outputConsumers(task.OutputsSize());
         for (ui32 i = 0; i < task.OutputsSize(); ++i) {
-            auto& outputDesc = task.GetOutputs(i);
+            const auto& outputDesc = task.GetOutputs(i);
 
             if (outputDesc.GetTypeCase() == NDqProto::TTaskOutput::kEffects) {
                 TaskHasEffects = true;
             }
 
-            if (outputDesc.HasTransform()) {
-                auto transform = outputDesc.GetTransform();
-                auto outputType = NCommon::ParseTypeFromYson(TStringBuf{transform.GetOutputType()}, *pb, Cerr);
-                auto inputType = NCommon::ParseTypeFromYson(TStringBuf{transform.GetInputType()}, *pb, Cerr);
-                LOG(TStringBuilder() << "Task: " << TaskId << " has transform by "
-                    << transform.GetType() << " with input type: " << *inputType
-                    << " , output type: " << *outputType);
-            }
-
             TVector<IDqOutput::TPtr> outputs{Reserve(std::max<ui64>(outputDesc.ChannelsSize(), 1))};
+            TOutputTransformInfo* transform = nullptr;
+            TType** taskOutputType = &ProgramParsed.OutputItemTypes[i];
+            if (outputDesc.HasTransform()) {
+                const auto& transformDesc = outputDesc.GetTransform();
+                transform = &OutputTransforms[i];
+                Y_VERIFY(!transform->TransformInput);
+                Y_VERIFY(!transform->TransformOutput);
+
+                auto outputTypeNode = NMiniKQL::DeserializeNode(TStringBuf{transformDesc.GetOutputType()}, typeEnv);
+                YQL_ENSURE(outputTypeNode, "Failed to deserialize transform output type");
+                transform->TransformOutputType = static_cast<TType*>(outputTypeNode);
+
+                auto inputTypeNode = NMiniKQL::DeserializeNode(TStringBuf{transformDesc.GetInputType()}, typeEnv);
+                YQL_ENSURE(inputTypeNode, "Failed to deserialize transform input type");
+                TType* inputType = static_cast<TType*>(inputTypeNode);
+                YQL_ENSURE(inputType->IsSameType(*ProgramParsed.OutputItemTypes[i]));
+                LOG(TStringBuilder() << "Task: " << TaskId << " has transform by "
+                    << transformDesc.GetType() << " with input type: " << *inputType
+                    << " , output type: " << *transform->TransformOutputType);
+
+                transform->TransformInput = CreateDqAsyncOutputBuffer(i, ProgramParsed.OutputItemTypes[i], memoryLimits.ChannelBufferSize,
+                    Settings.CollectProfileStats);
+
+                taskOutputType = &transform->TransformOutputType;
+            }
             if (outputDesc.HasSink()) {
-                auto sink = CreateDqAsyncOutputBuffer(i, ProgramParsed.OutputItemTypes[i], memoryLimits.ChannelBufferSize,
+                auto sink = CreateDqAsyncOutputBuffer(i, *taskOutputType, memoryLimits.ChannelBufferSize,
                     Settings.CollectProfileStats);
                 auto [_, inserted] = Sinks.emplace(i, sink);
                 Y_VERIFY(inserted);
@@ -468,6 +551,7 @@ public:
                     TDqOutputChannelSettings settings;
                     settings.MaxStoredBytes = memoryLimits.ChannelBufferSize;
                     settings.MaxChunkBytes = memoryLimits.OutputChunkMaxSize;
+                    settings.ChunkSizeLimit = memoryLimits.ChunkSizeLimit;
                     settings.TransportVersion = outputChannelDesc.GetTransportVersion();
                     settings.CollectProfileStats = Settings.CollectProfileStats;
                     settings.AllowGeneratorsInUnboxedValues = Settings.AllowGeneratorsInUnboxedValues;
@@ -476,13 +560,21 @@ public:
                         settings.ChannelStorage = execCtx.CreateChannelStorage(channelId);
                     }
 
-                    auto outputChannel = CreateDqOutputChannel(channelId, ProgramParsed.OutputItemTypes[i], typeEnv,
+                    auto outputChannel = CreateDqOutputChannel(channelId, *taskOutputType, typeEnv,
                         holderFactory, settings, LogFunc);
 
                     auto ret = OutputChannels.emplace(channelId, outputChannel);
                     YQL_ENSURE(ret.second, "task: " << TaskId << ", duplicated output channelId: " << channelId);
                     outputs.emplace_back(outputChannel);
                 }
+            }
+
+            if (transform) {
+                transform->TransformOutput = execCtx.CreateOutputConsumer(outputDesc, transform->TransformOutputType,
+                    Context.ApplyCtx, typeEnv, std::move(outputs));
+
+                outputs.clear();
+                outputs.emplace_back(transform->TransformInput);
             }
 
             outputConsumers[i] = execCtx.CreateOutputConsumer(outputDesc, ProgramParsed.OutputItemTypes[i],
@@ -573,13 +665,17 @@ public:
         return TaskHasEffects;
     }
 
+    void SetWatermark(TInstant time) {
+        Watermark.WatermarkIn = std::move(time);
+    }
+
     IDqInputChannel::TPtr GetInputChannel(ui64 channelId) override {
         auto ptr = InputChannels.FindPtr(channelId);
         YQL_ENSURE(ptr, "task: " << TaskId << " does not have input channelId: " << channelId);
         return *ptr;
     }
 
-    IDqSource::TPtr GetSource(ui64 inputIndex) override {
+    IDqAsyncInputBuffer::TPtr GetSource(ui64 inputIndex) override {
         auto ptr = Sources.FindPtr(inputIndex);
         YQL_ENSURE(ptr, "task: " << TaskId << " does not have input index: " << inputIndex);
         return *ptr;
@@ -595,6 +691,18 @@ public:
         auto ptr = Sinks.FindPtr(outputIndex);
         YQL_ENSURE(ptr, "task: " << TaskId << " does not have output index: " << outputIndex);
         return *ptr;
+    }
+
+    std::pair<NUdf::TUnboxedValue, IDqAsyncInputBuffer::TPtr> GetInputTransform(ui64 inputIndex) override {
+        auto ptr = InputTransforms.FindPtr(inputIndex);
+        YQL_ENSURE(ptr, "task: " << TaskId << " does not have input index: " << inputIndex << " or such transform");
+        return {ptr->TransformInput, ptr->TransformOutput};
+    }
+
+    std::pair<IDqAsyncOutputBuffer::TPtr, IDqOutputConsumer::TPtr> GetOutputTransform(ui64 outputIndex) override {
+        auto ptr = OutputTransforms.FindPtr(outputIndex);
+        YQL_ENSURE(ptr, "task: " << TaskId << " does not have output index: " << outputIndex << " or such transform");
+        return {ptr->TransformInput, ptr->TransformOutput};
     }
 
     TGuard<NKikimr::NMiniKQL::TScopedAlloc> BindAllocator(TMaybe<ui64> memoryLimit) override {
@@ -623,6 +731,10 @@ public:
 
     const THashMap<TString, TString>& GetTaskParams() const override {
         return Settings.TaskParams;
+    }
+
+    IRandomProvider* GetRandomProvider() const override {
+        return Context.RandomProvider;
     }
 
     void UpdateStats() override {
@@ -711,6 +823,18 @@ private:
     std::unique_ptr<NKikimr::NMiniKQL::TScopedAlloc> SelfAlloc;       // if not set -> use Context.Alloc
     std::unique_ptr<NKikimr::NMiniKQL::TTypeEnvironment> SelfTypeEnv; // if not set -> use Context.TypeEnv
 
+    struct TInputTransformInfo {
+        NUdf::TUnboxedValue TransformInput;
+        IDqAsyncInputBuffer::TPtr TransformOutput;
+        TType* TransformInputType = nullptr;
+    };
+
+    struct TOutputTransformInfo {
+        IDqAsyncOutputBuffer::TPtr TransformInput;
+        IDqOutputConsumer::TPtr TransformOutput;
+        TType* TransformOutputType = nullptr;
+    };
+
     struct TProgramParsed {
         TRuntimeNode ProgramNode;
         TVector<TType*> InputItemTypes;
@@ -724,11 +848,14 @@ private:
     TProgramParsed ProgramParsed;
 
     THashMap<ui64, IDqInputChannel::TPtr> InputChannels; // Channel id -> Channel
-    THashMap<ui64, IDqSource::TPtr> Sources; // Input index -> Source
+    THashMap<ui64, IDqAsyncInputBuffer::TPtr> Sources; // Input index -> Source
+    THashMap<ui64, TInputTransformInfo> InputTransforms; // Output index -> Transform
     THashMap<ui64, IDqOutputChannel::TPtr> OutputChannels; // Channel id -> Channel
     THashMap<ui64, IDqAsyncOutputBuffer::TPtr> Sinks; // Output index -> Sink
+    THashMap<ui64, TOutputTransformInfo> OutputTransforms; // Output index -> Transform
     IDqOutputConsumer::TPtr Output;
     NUdf::TUnboxedValue ResultStream;
+    NKikimr::NMiniKQL::TWatermark Watermark;
 
     bool TaskHasEffects = false;
 

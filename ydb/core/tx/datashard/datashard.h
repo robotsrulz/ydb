@@ -299,6 +299,12 @@ struct TEvDataShard {
         EvReadAck,
         EvReadCancel,
 
+        EvCompactBorrowedResult,
+
+        EvTestLoadRequest,
+        EvTestLoadResponse,
+        EvTestLoadFinished,
+
         EvEnd
     };
 
@@ -821,6 +827,11 @@ struct TEvDataShard {
             Record.SetTableOwnerId(tableOwnerId);
             Record.SetTableLocalId(tableLocalId);
         }
+
+        TEvPeriodicTableStats(ui64 datashardId, ui64 tableLocalId) {
+            Record.SetDatashardId(datashardId);
+            Record.SetTableLocalId(tableLocalId);
+        }
     };
 
     struct TEvS3ListingRequest : public TEventPB<TEvS3ListingRequest,
@@ -946,7 +957,7 @@ struct TEvDataShard {
         // Arrow
 
         std::shared_ptr<arrow::RecordBatch> ArrowBatch;
-    
+
     private:
         // for local events
         TVector<TOwnedCellVec> Rows;
@@ -1396,21 +1407,45 @@ struct TEvDataShard {
 
     /**
      * This message is used to ask datashard to compact any borrowed parts it has
-     * for the specified user table. No reply is expected for this message,
-     * instead schemeshard expects to receive updated stats if and when
-     * such a compaction has finished.
+     * for the specified user table.
      */
-    struct TEvCompactBorrowed : public TEventPB<TEvCompactBorrowed, NKikimrTxDataShard::TEvCompactBorrowed, EvCompactBorrowed> {
+    struct TEvCompactBorrowed : public TEventPB<TEvCompactBorrowed,
+                                                NKikimrTxDataShard::TEvCompactBorrowed,
+                                                EvCompactBorrowed> {
         TEvCompactBorrowed() = default;
 
-        TEvCompactBorrowed(const TPathId& pathId) {
-            Record.MutablePathId()->SetOwnerId(pathId.OwnerId);
-            Record.MutablePathId()->SetLocalId(pathId.LocalPathId);
+        TEvCompactBorrowed(ui64 ownerId, ui64 localId) {
+            Record.MutablePathId()->SetOwnerId(ownerId);
+            Record.MutablePathId()->SetLocalId(localId);
         }
+
+        TEvCompactBorrowed(const TPathId& pathId)
+            : TEvCompactBorrowed(pathId.OwnerId, pathId.LocalPathId)
+        { }
 
         // Sanity check for safe merging to earlier versions
         static_assert(EvCompactBorrowed == EventSpaceBegin(TKikimrEvents::ES_TX_DATASHARD) + 7 * 512 + 60,
                     "EvCompactBorrowed event has an unexpected value");
+    };
+
+    struct TEvCompactBorrowedResult : public TEventPB<TEvCompactBorrowedResult,
+                                                      NKikimrTxDataShard::TEvCompactBorrowedResult,
+                                                      EvCompactBorrowedResult> {
+        TEvCompactBorrowedResult() = default;
+
+        TEvCompactBorrowedResult(ui64 tabletId, ui64 ownerId, ui64 localId) {
+            Record.SetTabletId(tabletId);
+            Record.MutablePathId()->SetOwnerId(ownerId);
+            Record.MutablePathId()->SetLocalId(localId);
+        }
+
+        TEvCompactBorrowedResult(ui64 tabletId, const TPathId& pathId)
+            : TEvCompactBorrowedResult(tabletId, pathId.OwnerId, pathId.LocalPathId)
+        {}
+
+        // Sanity check for safe merging to earlier versions
+        static_assert(EvCompactBorrowedResult == EventSpaceBegin(TKikimrEvents::ES_TX_DATASHARD) + 7 * 512 + 68,
+                    "EvCompactBorrowedResult event has an unexpected value");
     };
 
     struct TEvGetCompactTableStats : public TEventPB<TEvGetCompactTableStats, NKikimrTxDataShard::TEvGetCompactTableStats,
@@ -1536,6 +1571,22 @@ struct TEvDataShard {
         explicit TEvReplicationSourceOffsetsCancel(ui64 readId) {
             Record.SetReadId(readId);
         }
+    };
+
+    struct TEvTestLoadRequest
+        : public TEventPB<TEvTestLoadRequest,
+                          NKikimrTxDataShard::TEvTestLoadRequest,
+                          EvTestLoadRequest>
+    {
+        TEvTestLoadRequest() = default;
+    };
+
+    struct TEvTestLoadResponse
+        : public TEventPB<TEvTestLoadResponse,
+                          NKikimrTxDataShard::TEvTestLoadResponse,
+                          EvTestLoadResponse>
+    {
+        TEvTestLoadResponse() = default;
     };
 
 };

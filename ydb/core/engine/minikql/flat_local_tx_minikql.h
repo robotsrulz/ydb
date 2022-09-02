@@ -48,8 +48,9 @@ public:
                     const auto *columnInfo = tableInfo->Columns.FindPtr(*columnId);
                     Y_VERIFY(columnInfo);
 
+                    auto nullConstraint = columnInfo->NotNull ? EColumnTypeConstraint::NotNull : EColumnTypeConstraint::Nullable;
                     auto insertResult = result.Columns.insert(std::make_pair(column, IDbSchemeResolver::TTableResult::TColumn
-                    {*columnId, (i32)columnInfo->KeyOrder, columnInfo->PType, 0}));
+                    {*columnId, (i32)columnInfo->KeyOrder, columnInfo->PType, 0, nullConstraint}));
                     Y_VERIFY(insertResult.second);
                 }
             }
@@ -261,7 +262,10 @@ class TFlatLocalMiniKQL : public NTabletFlatExecutor::ITransaction {
 
             for (auto &key : proxyEngine->GetDbKeys()) {
                 key->Status = TKeyDesc::EStatus::Ok;
-                key->Partitions.push_back(TKeyDesc::TPartitionInfo(TabletId));
+
+                auto partitions = std::make_shared<TVector<TKeyDesc::TPartitionInfo>>();
+                partitions->push_back(TKeyDesc::TPartitionInfo(TabletId));
+                key->Partitioning = partitions;
 
                 for (const auto &x : key->Columns) {
                     key->ColumnInfos.push_back({x.Column, x.ExpectedType, 0, TKeyDesc::EStatus::Ok}); // type-check

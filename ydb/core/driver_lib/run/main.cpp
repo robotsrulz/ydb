@@ -142,6 +142,8 @@ int MainRun(const TKikimrRunConfig& runConfig, std::shared_ptr<TModuleFactories>
             return NDriverClient::PersQueueDiscoverClustersRequest(cmdConf, argc, argv);
         case EDM_LOAD_REQUEST:
             return NDriverClient::LoadRequest(cmdConf, argc, argv);
+        case EDM_DS_LOAD_REQUEST:
+            return NDriverClient::DsLoadRequest(cmdConf, argc, argv);
         case EDM_ACTORSYS_PERFTEST:
             return NDriverClient::ActorsysPerfTest(cmdConf, argc, argv);
         default:
@@ -175,7 +177,7 @@ int ParameterizedMain(int argc, char **argv, std::shared_ptr<NKikimr::TModuleFac
     try {
         return NKikimr::Main(argc, argv, std::move(factories));
     }
-    catch (const NYdb::NConsoleClient::TMissUseException& e) {
+    catch (const NYdb::NConsoleClient::TMisuseException& e) {
         Cerr << e.what() << Endl;
         Cerr << "Try \"--help\" option for more info." << Endl;
         return 1;

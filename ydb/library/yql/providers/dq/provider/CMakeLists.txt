@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(exec)
 
 add_library(providers-dq-provider)
 target_compile_options(providers-dq-provider PRIVATE
@@ -36,6 +37,7 @@ target_link_libraries(providers-dq-provider PUBLIC
   providers-dq-opt
   providers-dq-planner
   providers-result-expr_nodes
+  library-yql-minikql
 )
 target_sources(providers-dq-provider PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/providers/dq/provider/yql_dq_control.cpp

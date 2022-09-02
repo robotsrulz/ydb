@@ -134,8 +134,10 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
         }
 
         if (!KqpValidateLocks(tabletId, tx, DataShard.SysLocksTable())) {
+            KqpRollbackLockChanges(tabletId, tx, DataShard, txc);
             KqpEraseLocks(tabletId, tx, DataShard.SysLocksTable());
             DataShard.SysLocksTable().ApplyLocks();
+            DataShard.SubscribeNewLocks(ctx);
             return EExecutionStatus::Executed;
         }
 
@@ -161,6 +163,8 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
         dataTx->SetReadVersion(readVersion);
         dataTx->SetWriteVersion(writeVersion);
 
+        KqpCommitLockChanges(tabletId, tx, DataShard, txc);
+
         auto& computeCtx = tx->GetDataTx()->GetKqpComputeCtx();
 
         auto result = KqpCompleteTransaction(ctx, tabletId, op->GetTxId(),
@@ -178,7 +182,7 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
         KqpEraseLocks(tabletId, tx, DataShard.SysLocksTable());
 
         if (dataTx->GetCounters().InvisibleRowSkips) {
-            DataShard.SysLocksTable().BreakSetLocks(op->LockTxId());
+            DataShard.SysLocksTable().BreakSetLocks(op->LockTxId(), op->LockNodeId());
         }
 
         AddLocksToResult(op, ctx);
@@ -187,10 +191,7 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
 
         KqpUpdateDataShardStatCounters(DataShard, dataTx->GetCounters());
         auto statsMode = kqpTx.GetRuntimeSettings().GetStatsMode();
-        if (statsMode >= NYql::NDqProto::DQ_STATS_MODE_BASIC) {
-            KqpFillTxStats(DataShard, dataTx->GetCounters(), *op->Result());
-            KqpFillStats(DataShard, tasksRunner, computeCtx, statsMode, *op->Result());
-        }
+        KqpFillStats(DataShard, tasksRunner, computeCtx, statsMode, *op->Result());
     } catch (const TMemoryLimitExceededException&) {
         txc.NotEnoughMemory();
 
@@ -242,6 +243,7 @@ void TExecuteKqpDataTxUnit::AddLocksToResult(TOperation::TPtr op, const TActorCo
 
         LOG_T("add lock to result: " << op->Result()->Record.GetTxLocks().rbegin()->ShortDebugString());
     }
+    DataShard.SubscribeNewLocks(ctx);
 }
 
 EExecutionStatus TExecuteKqpDataTxUnit::OnTabletNotReady(TActiveTransaction& tx, TValidatedDataTx& dataTx,

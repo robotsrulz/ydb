@@ -36,7 +36,7 @@ class TOperationQueueWithTimer
 private:
     NKikimrServices::EServiceKikimr ServiceId = NKikimrServices::EServiceKikimr(LogServiceId);
     TActorId LongTimerId;
-    TInstant When;
+    TMonotonic When;
 
 public:
     TOperationQueueWithTimer(const typename TBase::TConfig& config,
@@ -60,31 +60,32 @@ public:
         TActorBase::PassAway();
     }
 
-    TInstant GetWakeupTime() const { return When; }
+    TDuration GetWakeupDelta() const { return When - const_cast<TThis*>(this)->Now(); }
 
 private:
     // ITimer, note that it is made private,
     // since it should be called only from TBase
-    void SetWakeupTimer(TInstant t) override {
-        if (When > t)
+    void SetWakeupTimer(TDuration delta) override {
+        if (LongTimerId)
             this->Send(LongTimerId, new TEvents::TEvPoison);
 
-        When = t;
-        auto delta = t - this->Now();
+        When = this->Now() + delta;
         auto ctx = TActivationContext::ActorContextFor(TActorBase::SelfId());
         LongTimerId = CreateLongTimer(ctx, delta,
             new IEventHandle(TActorBase::SelfId(), TActorBase::SelfId(), new TEvWakeupQueue));
 
         LOG_DEBUG_S(ctx, ServiceId,
-            "Operation queue set NextWakeup# " << When << ", delta# " << delta.Seconds() << " seconds");
+            "Operation queue set wakeup after delta# " << delta.Seconds() << " seconds");
     }
 
-    TInstant Now() override {
-        return AppData()->TimeProvider->Now();
+    TMonotonic Now() override {
+        return AppData()->MonotonicTimeProvider->Now();
     }
 
     void HandleWakeup(const TActorContext &ctx) {
-        LOG_DEBUG_S(ctx, ServiceId, "Operation queue wakeup# " << this->Now());
+        LOG_DEBUG_S(ctx, ServiceId, "Operation queue wakeup");
+        When = {};
+        LongTimerId = {};
         TBase::Wakeup();
     }
 
@@ -109,20 +110,18 @@ struct TShardCompactionInfo {
     ui64 RowDeletes = 0;
 
     ui64 PartCount = 0;
-    ui64 MemDataSize = 0;
 
     explicit TShardCompactionInfo(const TShardIdx& id)
         : ShardIdx(id)
     {}
 
-    TShardCompactionInfo(const TShardIdx& id, const TTableInfo::TPartitionStats& stats)
+    TShardCompactionInfo(const TShardIdx& id, const TPartitionStats& stats)
         : ShardIdx(id)
         , SearchHeight(stats.SearchHeight)
         , LastFullCompactionTs(stats.FullCompactionTs)
         , RowCount(stats.RowCount)
         , RowDeletes(stats.RowDeletes)
         , PartCount(stats.PartCount)
-        , MemDataSize(stats.MemDataSize)
     {}
 
     TShardCompactionInfo(const TShardCompactionInfo&) = default;
@@ -251,13 +250,14 @@ public:
     const TConfig& GetConfig() const { return Config; }
 
     bool Enqueue(const TShardCompactionInfo& info) {
-        // ignore empty shard, note that Config.RowDeletesThreshold == 0
-        // is expected in tests only
-        if (info.PartCount == 0 && info.MemDataSize == 0 && Config.RowCountThreshold != 0)
+        // ignore empty shard (we don't check memtable, because it's up to DS to compact it),
+        // note that Config.RowDeletesThreshold == 0 is expected in tests only
+        //
+        if (info.PartCount == 0 && Config.RowCountThreshold != 0)
             return false;
 
         // ignore single parted shard if needed
-        bool isSingleParted = info.PartCount == 1 && info.MemDataSize == 0;
+        bool isSingleParted = info.PartCount == 1;
         if (!Config.CompactSinglePartedShards && isSingleParted)
             return false;
 

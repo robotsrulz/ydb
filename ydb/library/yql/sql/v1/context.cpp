@@ -54,6 +54,9 @@ THashMap<TStringBuf, TPragmaField> CTX_PRAGMA_FIELDS = {
     {"UnorderedSubqueries", &TContext::UnorderedSubqueries},
     {"FlexibleTypes", &TContext::FlexibleTypes},
     {"AnsiCurrentRow", &TContext::AnsiCurrentRow},
+    {"EmitStartsWith", &TContext::EmitStartsWith},
+    {"EnforceAnsiOrderByLimitInUnionAll", &TContext::EnforceAnsiOrderByLimitInUnionAll},
+    {"EmitAggApply", &TContext::EmitAggApply},
 };
 
 typedef TMaybe<bool> TContext::*TPragmaMaybeField;
@@ -135,6 +138,21 @@ TString TContext::MakeName(const TString& name) {
     str << name << iter->second;
     ++iter->second;
     return str;
+}
+
+void TContext::PushCurrentBlocks(TBlocks* blocks) {
+    YQL_ENSURE(blocks);
+    CurrentBlocks.push_back(blocks);
+}
+
+void TContext::PopCurrentBlocks() {
+    YQL_ENSURE(!CurrentBlocks.empty());
+    CurrentBlocks.pop_back();
+}
+
+TBlocks& TContext::GetCurrentBlocks() const {
+    YQL_ENSURE(!CurrentBlocks.empty());
+    return *CurrentBlocks.back();
 }
 
 IOutputStream& TContext::Error(NYql::TIssueCode code) {
@@ -279,8 +297,13 @@ TNodePtr TContext::UniversalAlias(const TString& baseName, TNodePtr&& node) {
     return BuildAtom(node->GetPos(), alias, TNodeFlags::Default);
 }
 
+bool TContext::IsAlreadyDeclared(const TString& varName) const {
+    return Variables.find(varName) != Variables.end();
+}
+
 void TContext::DeclareVariable(const TString& varName, const TNodePtr& typeNode) {
-    Variables.emplace(varName, typeNode);
+    auto inserted = Variables.emplace(varName, typeNode);
+    YQL_ENSURE(inserted.second);
 }
 
 bool TContext::AddExport(TPosition pos, const TString& name) {

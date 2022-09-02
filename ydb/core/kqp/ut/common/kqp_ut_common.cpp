@@ -1,5 +1,6 @@
 #include "kqp_ut_common.h"
 
+#include <ydb/core/tx/schemeshard/schemeshard.h>
 #include <ydb/core/kqp/provider/yql_kikimr_results.h>
 #include <ydb/public/sdk/cpp/client/ydb_proto/accessor.h>
 
@@ -9,6 +10,7 @@
 #include <ydb/library/yql/public/udf/udf_value_builder.h>
 #include <ydb/library/yql/minikql/invoke_builtins/mkql_builtins.h>
 #include <ydb/library/yql/utils/yql_panic.h>
+#include <ydb/library/yql/udfs/common/re2/re2_udf.cpp>
 
 namespace NKikimr {
 namespace NKqp {
@@ -54,6 +56,7 @@ NMiniKQL::IFunctionRegistry* UdfFrFactory(const NScheme::TTypeRegistry& typeRegi
     Y_UNUSED(typeRegistry);
     auto funcRegistry = NMiniKQL::CreateFunctionRegistry(NMiniKQL::CreateBuiltinRegistry())->Clone();
     funcRegistry->AddModule("", "TestUdfs", new TTestUdfsModule());
+    funcRegistry->AddModule("re2_path", "Re2", new TRe2Module<true>());
     return funcRegistry.Release();
 }
 
@@ -97,7 +100,7 @@ TKikimrRunner::TKikimrRunner(const TKikimrSettings& settings) {
 
     effectiveKqpSettings.insert(effectiveKqpSettings.end(), settings.KqpSettings.begin(), settings.KqpSettings.end());
 
-    ServerSettings.Reset(MakeHolder<Tests::TServerSettings>(mbusPort));
+    ServerSettings.Reset(MakeHolder<Tests::TServerSettings>(mbusPort, NKikimrProto::TAuthConfig(), settings.PQConfig));
     ServerSettings->SetDomainName(settings.DomainRoot);
     ServerSettings->SetKqpSettings(effectiveKqpSettings);
     ServerSettings->SetAppConfig(settings.AppConfig);
@@ -108,6 +111,7 @@ TKikimrRunner::TKikimrRunner(const TKikimrSettings& settings) {
     ServerSettings->SetKeepSnapshotTimeout(settings.KeepSnapshotTimeout);
     ServerSettings->SetFrFactory(&UdfFrFactory);
     ServerSettings->SetEnableNotNullColumns(true);
+    ServerSettings->SetEnableMoveIndex(true);
     if (settings.LogStream)
         ServerSettings->SetLogBackend(new TStreamLogBackend(settings.LogStream));
 
@@ -378,7 +382,7 @@ void TKikimrRunner::Initialize(const TKikimrSettings& settings) {
     // Server->GetRuntime()->SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_DEBUG);
     // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_YQL, NActors::NLog::PRI_DEBUG);
     // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_YQL, NActors::NLog::PRI_INFO);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::TX_DATASHARD, NActors::NLog::PRI_DEBUG);
+    // Server->GetRuntime()->SetLogPriority(NKikimrServices::TX_DATASHARD, NActors::NLog::PRI_TRACE);
     // Server->GetRuntime()->SetLogPriority(NKikimrServices::TX_COORDINATOR, NActors::NLog::PRI_DEBUG);
     // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_COMPUTE, NActors::NLog::PRI_DEBUG);
     // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_TASKS_RUNNER, NActors::NLog::PRI_DEBUG);
@@ -685,6 +689,7 @@ TCollectedStreamResult CollectStreamResultImpl(TIterator& it) {
         if (streamPart.HasResultSet()) {
             auto resultSet = streamPart.ExtractResultSet();
             PrintResultSet(resultSet, resultSetWriter);
+            res.RowsCount += resultSet.RowsCount();
         }
 
         if constexpr (std::is_same_v<TIterator, NYdb::NTable::TScanQueryPartIterator>) {
@@ -820,6 +825,33 @@ NJson::TJsonValue FindPlanNodeByKv(const NJson::TJsonValue& plan, const TString&
     return NJson::TJsonValue();
 }
 
+void FindPlanNodesImpl(const NJson::TJsonValue& node, const TString& key, std::vector<NJson::TJsonValue>& results) {
+    if (node.IsArray()) {
+        for (const auto& item: node.GetArray()) {
+            FindPlanNodesImpl(item, key, results);
+        }
+    }
+
+    if (!node.IsMap()) {
+        return;
+    }
+
+    auto map = node.GetMap();
+    if (map.contains(key)) {
+        results.push_back(map.at(key));
+    }
+
+    for (const auto& [_, value]: map) {
+        FindPlanNodesImpl(value, key, results);
+    }
+}
+
+std::vector<NJson::TJsonValue> FindPlanNodes(const NJson::TJsonValue& plan, const TString& key) {
+    std::vector<NJson::TJsonValue> results;
+    FindPlanNodesImpl(plan, key, results);
+    return results;
+}
+
 void CreateSampleTablesWithIndex(TSession& session) {
     auto res = session.ExecuteSchemeQuery(R"(
         --!syntax_v1
@@ -908,6 +940,49 @@ void WaitForKqpProxyInit(const NYdb::TDriver& driver) {
             break;
         }
         Sleep(TDuration::MilliSeconds(100));
+    }
+}
+
+void InitRoot(Tests::TServer::TPtr server, TActorId sender) {
+    if (server->GetSettings().StoragePoolTypes.empty()) {
+        return;
+    }
+
+    auto &runtime = *server->GetRuntime();
+    auto &settings = server->GetSettings();
+
+    auto tid = Tests::ChangeStateStorage(Tests::SchemeRoot, settings.Domain);
+    const TDomainsInfo::TDomain& domain = runtime.GetAppData().DomainsInfo->GetDomain(settings.Domain);
+
+    auto evTx = MakeHolder<NSchemeShard::TEvSchemeShard::TEvModifySchemeTransaction>(1, tid);
+    auto transaction = evTx->Record.AddTransaction();
+    transaction->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpAlterSubDomain);
+    transaction->SetWorkingDir("/");
+    auto op = transaction->MutableSubDomain();
+    op->SetName(domain.Name);
+
+    for (const auto& [kind, pool] : settings.StoragePoolTypes) {
+        auto* p = op->AddStoragePools();
+        p->SetKind(kind);
+        p->SetName(pool.GetName());
+    }
+
+    runtime.SendToPipe(tid, sender, evTx.Release(), 0, GetPipeConfigWithRetries());
+
+    {
+        TAutoPtr<IEventHandle> handle;
+        auto event = runtime.GrabEdgeEvent<NSchemeShard::TEvSchemeShard::TEvModifySchemeTransactionResult>(handle);
+        UNIT_ASSERT_VALUES_EQUAL(event->Record.GetSchemeshardId(), tid);
+        UNIT_ASSERT_VALUES_EQUAL(event->Record.GetStatus(), NKikimrScheme::EStatus::StatusAccepted);
+    }
+
+    auto evSubscribe = MakeHolder<NSchemeShard::TEvSchemeShard::TEvNotifyTxCompletion>(1);
+    runtime.SendToPipe(tid, sender, evSubscribe.Release(), 0, GetPipeConfigWithRetries());
+
+    {
+        TAutoPtr<IEventHandle> handle;
+        auto event = runtime.GrabEdgeEvent<NSchemeShard::TEvSchemeShard::TEvNotifyTxCompletionResult>(handle);
+        UNIT_ASSERT_VALUES_EQUAL(event->Record.GetTxId(), 1);
     }
 }
 

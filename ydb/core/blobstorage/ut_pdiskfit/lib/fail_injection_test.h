@@ -17,7 +17,7 @@
 #include <library/cpp/testing/unittest/registar.h>
 
 #include <util/folder/tempdir.h>
-#include <util/system/atomic.h>
+#include <library/cpp/deprecated/atomic/atomic.h>
 #include <util/system/event.h>
 #include <util/random/fast.h>
 
@@ -109,7 +109,7 @@ struct TPDiskFailureInjectionTest {
     ui64 PDiskGuid;
     bool ErasureEncode = false;
 
-    TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters;
 
     TProgramShouldContinue KikimrShouldContinue;
     std::unique_ptr<NKikimr::TAppData> AppData;
@@ -166,7 +166,7 @@ struct TPDiskFailureInjectionTest {
         using namespace NActors;
 
         // create counters
-        Counters = new NMonitoring::TDynamicCounters;
+        Counters = new ::NMonitoring::TDynamicCounters;
 
         // initialize app data with pool ids and registries
         AppData.reset(new NKikimr::TAppData(0u, 1u, 2u, 3u, {}, nullptr, nullptr, nullptr, &KikimrShouldContinue));

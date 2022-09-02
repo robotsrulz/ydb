@@ -9,12 +9,12 @@ using namespace NYdb;
 using namespace NYdb::NTable;
 
 Y_UNIT_TEST_SUITE(KqpWrite) {
-    Y_UNIT_TEST_NEW_ENGINE(UpsertNullKey) {
+    Y_UNIT_TEST_QUAD(UpsertNullKey, UseNewEngine, UseSessionActor) {
         auto setting = NKikimrKqp::TKqpSetting();
         setting.SetName("_KqpYqlSyntaxVersion");
         setting.SetValue("1");
 
-        TKikimrRunner kikimr({setting});
+        auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor, {setting});
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -103,11 +103,11 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
 
             DECLARE $key AS Uint64;
 
-            $data = (SELECT Data FROM [/Root/EightShard] WHERE Key = $key);
+            $data = (SELECT Data FROM `/Root/EightShard` WHERE Key = $key);
             $newData = COALESCE($data, 0u) + 1;
             $tuple = (SELECT $key AS Key, $newData AS Data);
 
-            UPSERT INTO [/Root/EightShard]
+            UPSERT INTO `/Root/EightShard`
             SELECT * FROM $tuple;
         )", TTxControl::BeginTx().CommitTx(), params, execSettings).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
@@ -137,13 +137,13 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         )";
 
         auto readTemplate = R"(
-            $data%1$d = (SELECT Data FROM [/Root/EightShard] WHERE Key = $key%1$d);
+            $data%1$d = (SELECT Data FROM `/Root/EightShard` WHERE Key = $key%1$d);
             $newData%1$d = COALESCE($data%1$d, 0u) + 1;
             $tuple%1$d = (SELECT $key%1$d AS Key, $newData%1$d AS Data);
         )";
 
         auto writeTemplate = R"(
-            UPSERT INTO [/Root/EightShard]
+            UPSERT INTO `/Root/EightShard`
             SELECT * FROM $tuple%1$d;
         )";
 
@@ -194,7 +194,7 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-            CREATE TABLE [/Root/Temp] (
+            CREATE TABLE `/Root/Temp` (
                 Key Uint32,
                 Value1 String,
                 Value2 String,
@@ -203,7 +203,7 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         )").GetValueSync().IsSuccess());
 
         auto result = session.ExecuteDataQuery(R"(
-            REPLACE INTO [/Root/Temp] (Key, Value1) VALUES
+            REPLACE INTO `/Root/Temp` (Key, Value1) VALUES
                 (1u, "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890"),
                 (3u, "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890");
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
@@ -215,10 +215,10 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
 
             DECLARE $Key AS Uint32;
 
-            $value1 = (SELECT Value1 FROM [/Root/Temp] WHERE Key = $Key);
+            $value1 = (SELECT Value1 FROM `/Root/Temp` WHERE Key = $Key);
             $tuple = (SELECT $Key AS Key, $value1 AS Value1, $value1 AS Value2);
 
-            UPSERT INTO [/Root/Temp]
+            UPSERT INTO `/Root/Temp`
             SELECT * FROM $tuple;
         )");
 
@@ -235,7 +235,7 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         }));
 
         result = session.ExecuteDataQuery(R"(
-            SELECT Value2 FROM [/Root/Temp] ORDER BY Value2;
+            SELECT Value2 FROM `/Root/Temp` ORDER BY Value2;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
         CompareYson(R"([[#];[#]])", FormatResultSetYson(result.GetResultSet(0)));
@@ -245,7 +245,7 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
 
         result = session.ExecuteDataQuery(R"(
-            SELECT Value2 FROM [/Root/Temp] ORDER BY Value2;
+            SELECT Value2 FROM `/Root/Temp` ORDER BY Value2;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
         CompareYson(R"([
@@ -271,11 +271,11 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
 
             DECLARE $key AS Uint64;
 
-            $data = (SELECT Data FROM [/Root/EightShard] WHERE Key = $key);
+            $data = (SELECT Data FROM `/Root/EightShard` WHERE Key = $key);
             $newData = COALESCE($data, 0u) + 1;
             $tuple = (SELECT $key AS Key, $newData AS Data);
 
-            UPSERT INTO [/Root/EightShard]
+            UPSERT INTO `/Root/EightShard`
             SELECT * FROM $tuple;
         )", TTxControl::BeginTx().CommitTx(), params).ExtractValueSync();
 
@@ -284,13 +284,13 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::KIKIMR_BAD_OPERATION));
     }
 
-    Y_UNIT_TEST_NEW_ENGINE(Insert) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_QUAD(Insert, UseNewEngine, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor);
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         UNIT_ASSERT(session.ExecuteSchemeQuery(R"(
-            CREATE TABLE [/Root/TxCheck] (
+            CREATE TABLE `/Root/TxCheck` (
                 Id Uint32,
                 PRIMARY KEY (Id)
             );
@@ -401,8 +401,8 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         CompareYson(R"([[[3u]]])", FormatResultSetYson(result.GetResultSet(1)));
     }
 
-    Y_UNIT_TEST_NEW_ENGINE(InsertRevert) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_QUAD(InsertRevert, UseNewEngine, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor);
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -528,8 +528,8 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         CompareYson(R"([[[1u]];[[2u]];[[3u]]])", FormatResultSetYson(result.GetResultSet(1)));
     }
 
-    Y_UNIT_TEST_NEW_ENGINE(ProjectReplace) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_QUAD(ProjectReplace, UseNewEngine, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor);
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -622,8 +622,8 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         CompareYson(R"([[[127u]]])", FormatResultSetYson(result.GetResultSet(0)));
     }
 
-    Y_UNIT_TEST_NEW_ENGINE(CastValues) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_QUAD(CastValues, UseNewEngine, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor);
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -657,8 +657,8 @@ Y_UNIT_TEST_SUITE(KqpWrite) {
         ])", FormatResultSetYson(result.GetResultSet(0)));
     }
 
-    Y_UNIT_TEST_NEW_ENGINE(CastValuesOptional) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_QUAD(CastValuesOptional, UseNewEngine, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor);
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 

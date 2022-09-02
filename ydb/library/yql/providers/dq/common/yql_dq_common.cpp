@@ -100,7 +100,11 @@ bool IsRetriable(NYql::NDqProto::StatusIds::StatusCode statusCode) {
     case NYql::NDqProto::StatusIds::SUCCESS:
     case NYql::NDqProto::StatusIds::BAD_REQUEST:
     case NYql::NDqProto::StatusIds::LIMIT_EXCEEDED:
+    case NYql::NDqProto::StatusIds::UNSUPPORTED:
+    case NYql::NDqProto::StatusIds::ABORTED:
+    case NYql::NDqProto::StatusIds::CANCELLED:
         return false;
+    case NYql::NDqProto::StatusIds::UNAVAILABLE:
     default:
         return true;
     }
@@ -120,19 +124,14 @@ bool NeedFallback(NYql::NDqProto::StatusIds::StatusCode statusCode) {
     case NYql::NDqProto::StatusIds::PRECONDITION_FAILED:
         return false;
     case NYql::NDqProto::StatusIds::LIMIT_EXCEEDED:
+    case NYql::NDqProto::StatusIds::UNAVAILABLE:
     default:
         return true;
     }
 }
 
 bool NeedFallback(const NDq::TEvDq::TEvAbortExecution::TPtr& ev) {
-    const auto& issues = ev->Get()->GetIssues();
-    for (auto it = issues.begin(); it < issues.end(); it++) {
-        if (it->GetCode() == TIssuesIds::DQ_GATEWAY_NEED_FALLBACK_ERROR) {
-            return true;
-        }
-    }
-    return false;
+    return NeedFallback(ev->Get()->Record.GetStatusCode());
 }
 
 } // namespace NCommon

@@ -14,14 +14,10 @@ target_link_libraries(internal-proxies-sse41 PUBLIC
   argonish-internal-argon2
   argonish-internal-blake2b
 )
-target_sources(internal-proxies-sse41 PRIVATE
+target_sources_custom(internal-proxies-sse41
+  .sse41
+  SRCS
   ${CMAKE_SOURCE_DIR}/library/cpp/digest/argonish/internal/proxies/sse41/proxy_sse41.cpp
-)
-set_property(
-  SOURCE
-  ${CMAKE_SOURCE_DIR}/library/cpp/digest/argonish/internal/proxies/sse41/proxy_sse41.cpp
-  APPEND
-  PROPERTY
-  COMPILE_OPTIONS
+  CUSTOM_FLAGS
   -msse4.1
 )

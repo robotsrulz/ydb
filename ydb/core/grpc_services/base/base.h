@@ -100,8 +100,9 @@ struct TRpcServices {
         EvGetShardLocations,
         EvExperimentalStreamQuery,
         EvStreamPQWrite,
-        EvStreamPQRead,
         EvStreamPQMigrationRead,
+        EvStreamTopicWrite,
+        EvStreamTopicRead,
         EvPQReadInfo,
         EvListOperations,
         EvExportToYt,
@@ -127,6 +128,10 @@ struct TRpcServices {
         EvPQDescribeTopic,
         EvPQAddReadRule,
         EvPQRemoveReadRule,
+        EvDropTopic,
+        EvCreateTopic,
+        EvAlterTopic,
+        EvDescribeTopic,
         EvGetDiskSpaceUsage,
         EvStopServingDatabase,
         EvCoordinationSession,
@@ -209,7 +214,8 @@ struct TRpcServices {
         EvListYndxRateLimiterResources,
         EvDescribeYndxRateLimiterResource,
         EvAcquireYndxRateLimiterResource,
-        EvGrpcRuntimeRequest // !!! DO NOT ADD NEW REQUEST !!!
+        EvGrpcRuntimeRequest,
+        EvNodeCheckRequest // !!! DO NOT ADD NEW REQUEST !!!
     };
 
     struct TEvGrpcNextReply : public TEventLocal<TEvGrpcNextReply, TRpcServices::EvGrpcStreamIsReady> {
@@ -249,7 +255,7 @@ public:
     // Reply using YDB status code
     virtual void ReplyWithYdbStatus(Ydb::StatusIds::StatusCode status) = 0;
     // Reply using "transport error code"
-    virtual void ReplyWithRpcStatus(grpc::StatusCode code, const TString& msg = "") = 0;
+    virtual void ReplyWithRpcStatus(grpc::StatusCode code, const TString& msg = "", const TString& details = "") = 0;
     // Return address of the peer
     virtual TString GetPeerName() const = 0;
     // Return deadile of request execution, calculated from client timeout by grpc
@@ -263,6 +269,8 @@ public:
     virtual void RaiseIssues(const NYql::TIssues& issues) = 0;
     virtual TMaybe<TString> GetTraceId() const = 0;
     virtual const TString& GetRequestName() const = 0;
+    virtual void SetDiskQuotaExceeded(bool disk) = 0;
+    virtual bool GetDiskQuotaExceeded() const = 0;
 };
 
 class TRespHookCtx : public TThrRefBase {
@@ -307,6 +315,9 @@ enum class TRateLimiterMode : ui8 {
     RuOnProgress = 3,
 };
 
+#define RLSWITCH(mode) \
+    IsRlAllowed() ? mode : TRateLimiterMode::Off
+
 class ICheckerIface;
 
 // The way to pass some common data to request processing
@@ -347,7 +358,6 @@ public:
 
     // Pass request for next processing
     virtual void Pass(const IFacilityProvider& facility) = 0;
-
 };
 
 // Request context
@@ -368,7 +378,6 @@ public:
 
     virtual void SendSerializedResult(TString&& in, Ydb::StatusIds::StatusCode status) = 0;
 
-private:
     virtual void Reply(NProtoBuf::Message* resp, ui32 status = 0) = 0;
 };
 
@@ -470,7 +479,14 @@ public:
         return TMaybe<TString>{};
     }
 
-    void ReplyWithRpcStatus(grpc::StatusCode, const TString&) override {
+    void SetDiskQuotaExceeded(bool) override {
+    }
+
+    bool GetDiskQuotaExceeded() const override {
+        return false;
+    }
+
+    void ReplyWithRpcStatus(grpc::StatusCode, const TString&, const TString&) override {
         Y_FAIL("Unimplemented");
     }
 
@@ -551,20 +567,22 @@ inline TMaybe<TString> ToMaybe(const TVector<TStringBuf>& vec) {
     return TString{vec[0]};
 }
 
-template<ui32 TRpcId, typename TReq, typename TResp>
+template<ui32 TRpcId, typename TReq, typename TResp, TRateLimiterMode RlMode = TRateLimiterMode::Off>
 class TGRpcRequestBiStreamWrapper :
     public IRequestProxyCtx,
-    public TEventLocal<TGRpcRequestBiStreamWrapper<TRpcId, TReq, TResp>, TRpcId> {
+    public TEventLocal<TGRpcRequestBiStreamWrapper<TRpcId, TReq, TResp, RlMode>, TRpcId> {
 public:
     using TRequest = TReq;
     using TResponse = TResp;
     using IStreamCtx = NGRpcServer::IGRpcStreamingContext<TRequest, TResponse>;
-    TGRpcRequestBiStreamWrapper(TIntrusivePtr<IStreamCtx> ctx)
+    static constexpr TRateLimiterMode RateLimitMode = RlMode;
+    TGRpcRequestBiStreamWrapper(TIntrusivePtr<IStreamCtx> ctx, bool rlAllowed = true)
         : Ctx_(ctx)
+        , RlAllowed_(rlAllowed)
     { }
 
     TRateLimiterMode GetRlMode() const override {
-        return TRateLimiterMode::Off;
+        return RlAllowed_ ? RateLimitMode : TRateLimiterMode::Off;
     }
 
     bool TryCustomAttributeProcess(const TSchemeBoardEvents::TDescribeSchemeResult&, ICheckerIface*) override {
@@ -606,7 +624,7 @@ public:
         return Ctx_->GetAuthState();
     }
 
-    void ReplyWithRpcStatus(grpc::StatusCode, const TString&) override {
+    void ReplyWithRpcStatus(grpc::StatusCode, const TString&, const TString&) override {
         Y_FAIL("Unimplemented");
     }
 
@@ -623,14 +641,14 @@ public:
         Ctx_->Attach(TActorId());
         TResponse resp;
         FillYdbStatus(resp, IssueManager_.GetIssues(), Ydb::StatusIds::UNAVAILABLE);
-        Ctx_->WriteAndFinish(std::move(resp), grpc::Status());
+        Ctx_->WriteAndFinish(std::move(resp), grpc::Status::OK);
     }
 
     void ReplyWithYdbStatus(Ydb::StatusIds::StatusCode status) override {
         Ctx_->Attach(TActorId());
         TResponse resp;
         FillYdbStatus(resp, IssueManager_.GetIssues(), status);
-        Ctx_->WriteAndFinish(std::move(resp), grpc::Status());
+        Ctx_->WriteAndFinish(std::move(resp), grpc::Status::OK);
     }
 
     void RaiseIssue(const NYql::TIssue& issue) override {
@@ -701,6 +719,13 @@ public:
         return ToMaybe(Ctx_->GetPeerMetaValues(key));
     }
 
+    void SetDiskQuotaExceeded(bool) override {
+    }
+
+    bool GetDiskQuotaExceeded() const override {
+        return false;
+    }
+
     void RefreshToken(const TString& token, const TActorContext& ctx, TActorId id) {
         NGRpcService::RefreshToken(token, GetDatabaseName().GetOrElse(""), ctx, id);
     }
@@ -719,6 +744,7 @@ private:
     TString InternalToken_;
     NYql::TIssueManager IssueManager_;
     TMaybe<NRpcService::TRlPath> RlPath_;
+    bool RlAllowed_;
 };
 
 template <typename TDerived>
@@ -866,8 +892,8 @@ public:
         return Ctx_->GetAuthState();
     }
 
-    void ReplyWithRpcStatus(grpc::StatusCode code, const TString& reason) override {
-        Ctx_->ReplyError(code, reason);
+    void ReplyWithRpcStatus(grpc::StatusCode code, const TString& reason, const TString& details) override {
+        Ctx_->ReplyError(code, reason, details);
     }
 
     void ReplyUnauthenticated(const TString& in) override {
@@ -899,6 +925,17 @@ public:
 
     const TMaybe<TString> GetPeerMetaValues(const TString& key) const override {
         return ToMaybe(Ctx_->GetPeerMetaValues(key));
+    }
+
+    void SetDiskQuotaExceeded(bool disk) override {
+        if (!QuotaExceeded) {
+            QuotaExceeded = google::protobuf::Arena::CreateMessage<Ydb::QuotaExceeded>(GetArena());
+        }
+        QuotaExceeded->set_disk(disk);
+    }
+
+    bool GetDiskQuotaExceeded() const override {
+        return QuotaExceeded ? QuotaExceeded->disk() : false;
     }
 
     bool Validate(TString&) override {
@@ -1042,6 +1079,10 @@ public:
         Y_FAIL("unimplemented");
     }
 
+    void ReplyGrpcError(grpc::StatusCode code, const TString& msg, const TString& details = "") {
+        Ctx_->ReplyError(code, msg, details);
+    }
+
 private:
     void Reply(NProtoBuf::Message *resp, ui32 status) override {
         if (RespHook) {
@@ -1060,6 +1101,7 @@ private:
     TString InternalToken_;
     NYql::TIssueManager IssueManager;
     Ydb::CostInfo* CostInfo = nullptr;
+    Ydb::QuotaExceeded* QuotaExceeded = nullptr;
     ui64 Ru = 0;
     TRespHook RespHook;
     TMaybe<NRpcService::TRlPath> RlPath;
@@ -1214,12 +1256,13 @@ public:
     static IActor* CreateRpcActor(typename std::conditional<IsOperation, IRequestOpCtx, IRequestNoOpCtx>::type* msg);
     static constexpr bool IsOp = IsOperation;
     static constexpr TRateLimiterMode RateLimitMode = RlMode;
-    TGRpcRequestValidationWrapper(NGrpc::IRequestContextBase* ctx)
+    TGRpcRequestValidationWrapper(NGrpc::IRequestContextBase* ctx, bool rlAllowed = true)
         : TGRpcRequestWrapperImpl<TRpcId, TReq, TResp, IsOperation, TGRpcRequestValidationWrapper<TRpcId, TReq, TResp, IsOperation, RlMode>>(ctx)
+        , RlAllowed(rlAllowed)
     { }
 
     TRateLimiterMode GetRlMode() const override {
-        return RateLimitMode;
+        return RlAllowed ? RateLimitMode : TRateLimiterMode::Off;
     }
 
     bool TryCustomAttributeProcess(const TSchemeBoardEvents::TDescribeSchemeResult&, ICheckerIface*) override {
@@ -1229,6 +1272,8 @@ public:
     bool Validate(TString& error) override {
         return this->GetProtoRequest()->validate(error);
     }
+private:
+    bool RlAllowed;
 };
 
 } // namespace NGRpcService

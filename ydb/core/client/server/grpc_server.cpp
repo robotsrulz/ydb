@@ -94,6 +94,7 @@ public:
 
     void Start() {
         if (auto guard = Server->ProtectShutdown()) {
+            OnBeforeCall();
             (Service->*RequestCallback)(&Context, &Request, Writer.Get(), CQ, CQ, GetGRpcTag());
         } else {
             // Server is shutting down, new requests cannot be started
@@ -115,11 +116,27 @@ public:
     }
 
     void DestroyRequest() override {
+        Y_VERIFY(!CallInProgress_, "Unexpected DestroyRequest while another grpc call is still in progress");
+        RequestDestroyed_ = true;
         if (RequestRegistered_) {
             Server->DeregisterRequestCtx(this);
             RequestRegistered_ = false;
         }
         delete this;
+    }
+
+private:
+    void OnBeforeCall() {
+        Y_VERIFY(!RequestDestroyed_, "Cannot start grpc calls after request is already destroyed");
+        Y_VERIFY(!Finished_, "Cannot start grpc calls after request is finished");
+        bool wasInProgress = std::exchange(CallInProgress_, true);
+        Y_VERIFY(!wasInProgress, "Another grpc call is already in progress");
+    }
+
+    void OnAfterCall() {
+        Y_VERIFY(!RequestDestroyed_, "Finished grpc call after request is already destroyed");
+        bool wasInProgress = std::exchange(CallInProgress_, false);
+        Y_VERIFY(wasInProgress, "Finished grpc call that was not in progress");
     }
 
 public:
@@ -130,15 +147,23 @@ public:
 
     //! Send reply.
     void Reply(const NKikimrClient::TResponse& resp) override {
-        if (const TOut *x = dynamic_cast<const TOut *>(&resp)) {
+        if (const TOut* x = dynamic_cast<const TOut*>(&resp)) {
             Finish(*x, 0);
         } else {
             ReplyError(resp.GetErrorReason());
         }
     }
 
+    void Reply(const NKikimrClient::TDsTestLoadResponse& resp) override {
+        if (const TOut* x = dynamic_cast<const TOut*>(&resp)) {
+            Finish(*x, 0);
+        } else {
+            ReplyError("request failed");
+        }
+    }
+
     void Reply(const NKikimrClient::TBsTestLoadResponse& resp) override {
-        if (const TOut *x = dynamic_cast<const TOut *>(&resp)) {
+        if (const TOut* x = dynamic_cast<const TOut*>(&resp)) {
             Finish(*x, 0);
         } else {
             ReplyError("request failed");
@@ -262,6 +287,8 @@ private:
         ResponseSize = resp.ByteSize();
         ResponseStatus = status;
         StateFunc = &TSimpleRequest::FinishDone;
+        OnBeforeCall();
+        Finished_ = true;
         Writer->Finish(resp, Status::OK, GetGRpcTag());
     }
 
@@ -272,12 +299,16 @@ private:
             Name, Context.peer().c_str());
 
         StateFunc = &TSimpleRequest::FinishDoneWithoutProcessing;
+        OnBeforeCall();
+        Finished_ = true;
         Writer->Finish(resp,
                        grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, msg),
                        GetGRpcTag());
     }
 
     bool RequestDone(bool ok) {
+        OnAfterCall();
+
         auto makeRequestString = [&] {
             TString resp;
             if (ok) {
@@ -326,6 +357,7 @@ private:
     }
 
     bool FinishDone(bool ok) {
+        OnAfterCall();
         LOG_DEBUG(ActorSystem, NKikimrServices::GRPC_SERVER, "[%p] finished request Name# %s ok# %s peer# %s", this,
             Name, ok ? "true" : "false", Context.peer().c_str());
         Counters->FinishProcessing(RequestSize, ResponseSize, ok, ResponseStatus,
@@ -337,6 +369,7 @@ private:
     }
 
     bool FinishDoneWithoutProcessing(bool ok) {
+        OnAfterCall();
         LOG_DEBUG(ActorSystem, NKikimrServices::GRPC_SERVER, "[%p] finished request without processing Name# %s ok# %s peer# %s", this,
             Name, ok ? "true" : "false", Context.peer().c_str());
 
@@ -365,6 +398,9 @@ private:
     TMaybe<NMsgBusProxy::TBusMessageContext> BusContext;
     bool InProgress_;
     bool RequestRegistered_ = false;
+    bool RequestDestroyed_ = false;
+    bool CallInProgress_ = false;
+    bool Finished_ = false;
 };
 
 } // namespace
@@ -380,7 +416,7 @@ void TGRpcService::InitService(grpc::ServerCompletionQueue *cq, NGrpc::TLoggerPt
 }
 
 TFuture<void> TGRpcService::Prepare(TActorSystem* system, const TActorId& pqMeta, const TActorId& msgBusProxy,
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters) {
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters) {
     auto promise = NewPromise<void>();
     InitCb_ = [=]() mutable {
         try {
@@ -458,6 +494,7 @@ void TGRpcService::SetupIncomingRequests() {
     ADD_ACTOR_REQUEST(TabletKillRequest,         TTabletKillRequest,                MTYPE_CLIENT_TABLET_KILL_REQUEST)
     ADD_ACTOR_REQUEST(SchemeOperationStatus,     TSchemeOperationStatus,            MTYPE_CLIENT_FLAT_TX_STATUS_REQUEST)
     ADD_ACTOR_REQUEST(BlobStorageLoadRequest,    TBsTestLoadRequest,                MTYPE_CLIENT_LOAD_REQUEST)
+    ADD_ACTOR_REQUEST(DataShardLoadRequest,      TDsTestLoadRequest,                MTYPE_CLIENT_DS_LOAD_REQUEST)
     ADD_ACTOR_REQUEST(BlobStorageGetRequest,     TBsGetRequest,                     MTYPE_CLIENT_GET_REQUEST)
     ADD_ACTOR_REQUEST(ChooseProxy,               TChooseProxyRequest,               MTYPE_CLIENT_CHOOSE_PROXY)
     ADD_ACTOR_REQUEST(WhoAmI,                    TWhoAmI,                           MTYPE_CLIENT_WHOAMI)

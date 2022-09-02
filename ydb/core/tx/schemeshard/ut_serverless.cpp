@@ -104,6 +104,9 @@ Y_UNIT_TEST_SUITE(TSchemeShardServerLess) {
 
         SetAllowServerlessStorageBilling(&runtime, true);
 
+        // Set a large enough idle mem compaction interval, so data size and billing are predictable
+        runtime.GetAppData().DataShardConfig.SetIdleMemCompactionIntervalSeconds(600);
+
         TestCreateExtSubDomain(runtime, ++txId,  "/MyRoot",
                               "Name: \"ResourceDB\"");
         env.TestWaitNotification(runtime, txId);
@@ -215,7 +218,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardServerLess) {
         waitMeteringMessage();
 
         {
-            TString meteringData = R"({"usage":{"start":1600452120,"quantity":59,"finish":1600452179,"type":"delta","unit":"byte*second"},"tags":{"ydb_size":11728},"id":"8751008-3-1600452120-1600452179-11728","cloud_id":"CLOUD_ID_VAL","source_wt":1600452180,"source_id":"sless-docapi-ydb-storage","resource_id":"DATABASE_ID_VAL","schema":"ydb.serverless.v1","folder_id":"FOLDER_ID_VAL","version":"1.0.0"})";
+            TString meteringData = R"({"usage":{"start":1600452120,"quantity":59,"finish":1600452179,"type":"delta","unit":"byte*second"},"tags":{"ydb_size":11664},"id":"8751008-3-1600452120-1600452179-11664","cloud_id":"CLOUD_ID_VAL","source_wt":1600452180,"source_id":"sless-docapi-ydb-storage","resource_id":"DATABASE_ID_VAL","schema":"ydb.serverless.v1","folder_id":"FOLDER_ID_VAL","version":"1.0.0"})";
             meteringData += "\n";
             UNIT_ASSERT_NO_DIFF(meteringMessages, meteringData);
         }

@@ -29,6 +29,11 @@ namespace {
     }
 }
 
+static const THashSet<TString> AggApplyFuncs = {
+    "count_traits_factory",
+    "sum_traits_factory"
+};
+
 class TAggregationFactory : public IAggregation {
 public:
     TAggregationFactory(TPosition pos, const TString& name, const TString& func, EAggregateMode aggMode,
@@ -37,6 +42,10 @@ public:
             BuildBind(Pos, aggMode == EAggregateMode::OverWindow ? "window_module" : "aggregate_module", func) : nullptr),
         Multi(multi), ValidateArgs(validateArgs), DynamicFactory(!Factory)
     {
+        if (!func.empty() && AggApplyFuncs.contains(func)) {
+            AggApplyName = func.substr(0, func.size() - 15);
+        }
+
         if (!Factory) {
             FakeSource = BuildFakeSource(pos);
         }
@@ -44,6 +53,10 @@ public:
 
 protected:
     bool InitAggr(TContext& ctx, bool isFactory, ISource* src, TAstListNode& node, const TVector<TNodePtr>& exprs) override {
+        if (!ctx.EmitAggApply) {
+            AggApplyName = "";
+        }
+
         if (ValidateArgs || isFactory) {
             ui32 expectedArgs = ValidateArgs && !Factory ? 2 : (isFactory ? 0 : 1);
             if (!Factory && ValidateArgs) {
@@ -79,6 +92,9 @@ protected:
             Name = src->MakeLocalName(Name);
         }
 
+        if (Expr && Expr->IsAsterisk() && AggApplyName == "count") {
+            AggApplyName = "count_all";
+        }
 
         if (!Init(ctx, src)) {
             return false;
@@ -100,6 +116,10 @@ protected:
 
     TNodePtr GetApply(const TNodePtr& type) const override {
         if (!Multi) {
+            if (!DynamicFactory && !AggApplyName.empty()) {
+                return Y("AggApply", Q(AggApplyName), Y("ListItemType", type), BuildLambda(Pos, Y("row"), Y("PersistableRepr", Expr)));
+            }
+
             return Y("Apply", Factory, (DynamicFactory ? Y("ListItemType", type) : type),
               BuildLambda(Pos, Y("row"), Y("PersistableRepr", Expr)));
         }
@@ -183,6 +203,7 @@ protected:
     TNodePtr Expr;
     bool Multi;
     bool ValidateArgs;
+    TString AggApplyName;
     TVector<TNodePtr> Exprs;
 
 private:
@@ -210,6 +231,7 @@ class TKeyPayloadAggregationFactory final : public TAggregationFactory {
 public:
     TKeyPayloadAggregationFactory(TPosition pos, const TString& name, const TString& factory, EAggregateMode aggMode)
         : TAggregationFactory(pos, name, factory, aggMode)
+        , FakeSource(BuildFakeSource(pos))
     {}
 
 private:
@@ -279,6 +301,12 @@ private:
     }
 
     bool DoInit(TContext& ctx, ISource* src) final {
+        if (Limit) {
+            if (!Limit->Init(ctx, FakeSource.Get())) {
+                return false;
+            }
+        }
+
         if (!Key) {
             return true;
         }
@@ -289,11 +317,6 @@ private:
         if (!Payload->Init(ctx, src)) {
             return false;
         }
-        if (Limit) {
-            if (!Limit->Init(ctx, src)) {
-                return false;
-            }
-        }
 
         if (Key->IsAggregated()) {
             ctx.Error(Pos) << "Aggregation of aggregated values is forbidden";
@@ -302,6 +325,7 @@ private:
         return true;
     }
 
+    TSourcePtr FakeSource;
     TNodePtr Key, Payload, Limit;
 };
 
@@ -495,7 +519,7 @@ private:
                 break;
             case 3U:
                 if (!integer) {
-                    ctx.Error(Pos) << "Aggregation function " << Name << " for case with 3 argument should have second interger argument";
+                    ctx.Error(Pos) << "Aggregation function " << Name << " for case with 3 arguments should have third argument of integer type";
                     return false;
                 }
                 Weight = exprs[1];
@@ -1152,7 +1176,9 @@ private:
 
         Lambdas[0] = BuildLambda(Pos, Y("value", "parent"), Y("NamedApply", exprs[adjustArgsCount], Q(Y("value")), Y("AsStruct"), Y("DependsOn", "parent")));
         Lambdas[1] = BuildLambda(Pos, Y("value", "state", "parent"), Y("NamedApply", exprs[adjustArgsCount + 1], Q(Y("state", "value")), Y("AsStruct"), Y("DependsOn", "parent")));
-        Lambdas[2] = BuildLambda(Pos, Y("one", "two"), Y("Apply", exprs[adjustArgsCount + 2], "one", "two"));
+        Lambdas[2] = BuildLambda(Pos, Y("one", "two"), Y("IfType", exprs[adjustArgsCount + 2], Y("NullType"), 
+            BuildLambda(Pos, Y(), Y("Void")),
+            BuildLambda(Pos, Y(), Y("Apply", exprs[adjustArgsCount + 2], "one", "two"))));
 
         for (size_t i = 3U; i < Lambdas.size(); ++i) {
             const auto j = adjustArgsCount + i;

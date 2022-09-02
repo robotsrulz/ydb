@@ -255,10 +255,10 @@ public:
         for (const auto& tabletIdx : tabletIdIndex) {
             TTabletInfo& x = *tabletIdx.second;
             if (BadOnly) {
-                if (x.IsAlive() || x.GetLeader().IsExternalBoot()) {
+                if (x.IsAlive()) {
                     continue;
                 }
-                if (x.IsLeader() && x.AsLeader().Type == TTabletTypes::BlockStoreVolume && x.IsStopped()) {
+                if (x.IsLeader() && (x.AsLeader().IsLockedToActor() || x.AsLeader().IsExternalBoot())) {
                     continue;
                 }
             }
@@ -682,7 +682,8 @@ public:
              TTabletTypes::PersQueue,
              TTabletTypes::PersQueueReadBalancer,
              TTabletTypes::NodeBroker,
-             TTabletTypes::TestShard}) {
+             TTabletTypes::TestShard,
+             TTabletTypes::BlobDepot}) {
             if (shortType == LongToShortTabletName(TTabletTypes::TypeToStr(tabletType))) {
                 return tabletType;
             }
@@ -930,7 +931,8 @@ public:
              TTabletTypes::PersQueue,
              TTabletTypes::PersQueueReadBalancer,
              TTabletTypes::NodeBroker,
-             TTabletTypes::TestShard}) {
+             TTabletTypes::TestShard,
+             TTabletTypes::BlobDepot}) {
             const TVector<i64>& allowedMetrics = Self->GetTabletTypeAllowedMetricIds(tabletType);
             out << "<tr>"
                    "<td>" << LongToShortTabletName(TTabletTypes::TypeToStr(tabletType)) << "</td>";
@@ -1067,6 +1069,8 @@ public:
             return "H";
         case TTabletTypes::DataShard:
             return "DS";
+        case TTabletTypes::ColumnShard:
+            return "CS";
         case TTabletTypes::KeyValue:
             return "KV";
         case TTabletTypes::PersQueue:
@@ -1096,6 +1100,8 @@ public:
             return "S";
         case TTabletTypes::ReplicationController:
             return "RC";
+        case TTabletTypes::BlobDepot:
+            return "BD";
         default:
             return Sprintf("%d", (int)type);
         }
@@ -1113,6 +1119,10 @@ public:
             if (pr.second.IsRunning()) {
                 ++runningTablets;
                 ++tabletsByNodeByType[pr.second.NodeId][GetTabletType(pr.second.Type)];
+            }
+            if (pr.second.IsLockedToActor()) {
+                ++runningTablets;
+                ++tabletsByNodeByType[pr.second.LockedToActor.NodeId()][GetTabletType(pr.second.Type)];
             }
             for (const auto& sl : pr.second.Followers) {
                 if (sl.IsRunning()){
@@ -1757,6 +1767,10 @@ public:
                 ++runningTablets;
                 ++tabletsByNodeByType[pr.second.NodeId][TTxMonEvent_Landing::GetTabletType(pr.second.Type)];
             }
+            if (pr.second.IsLockedToActor()) {
+                ++runningTablets;
+                ++tabletsByNodeByType[pr.second.LockedToActor.NodeId()][TTxMonEvent_Landing::GetTabletType(pr.second.Type)];
+            }
             for (const auto& sl : pr.second.Followers) {
                 if (sl.IsRunning()) {
                     ++runningTablets;
@@ -2116,7 +2130,7 @@ public:
     TAutoPtr<NMon::TEvRemoteHttpInfo> Event;
     const TActorId Source;
     TTabletId TabletId = 0;
-    TTabletTypes::EType TabletType = TTabletTypes::TYPE_INVALID;
+    TTabletTypes::EType TabletType = TTabletTypes::TypeInvalid;
     TVector<ui32> TabletChannels;
     ui32 GroupId = 0;
     TVector<ui32> ForcedGroupIds;
@@ -2169,8 +2183,7 @@ public:
             if (tablet != nullptr) {
                 tablets.push_back(tablet);
             }
-        } else
-        if (TabletType != TTabletTypes::TYPE_INVALID) {
+        } else if (TabletType != TTabletTypes::TypeInvalid) {
             for (auto& pr : Self->Tablets) {
                 if (pr.second.Type == TabletType) {
                     tablets.push_back(&pr.second);
@@ -2642,7 +2655,7 @@ public:
     THolder<NMon::TEvRemoteHttpInfo> Event;
     const TActorId Source;
     TTabletId TabletId = 0;
-    TTabletTypes::EType TabletType = TTabletTypes::TYPE_INVALID;
+    TTabletTypes::EType TabletType = TTabletTypes::TypeInvalid;
     ui32 ChannelFrom = 0;
     ui32 ChannelTo = 255;
     ui32 GroupId = 0;
@@ -2688,7 +2701,7 @@ public:
             if (tablet != nullptr) {
                 tablets.push_back(tablet);
             }
-        } else if (TabletType != TTabletTypes::TYPE_INVALID) {
+        } else if (TabletType != TTabletTypes::TypeInvalid) {
             for (auto& pr : Self->Tablets) {
                 if (pr.second.Type == TabletType) {
                     tablets.push_back(&pr.second);

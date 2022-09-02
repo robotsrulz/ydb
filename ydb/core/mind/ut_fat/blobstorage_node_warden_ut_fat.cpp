@@ -137,7 +137,7 @@ void SetupServices(TTestActorRuntime &runtime) {
         app.SetChannels(std::move(channelProfiles));
     }
 
-    ui32 groupId = TGroupID(GroupConfigurationTypeStatic, DOMAIN_ID, 0).GetRaw();
+    ui32 groupId = TGroupID(EGroupConfigurationType::Static, DOMAIN_ID, 0).GetRaw();
     for (ui32 nodeIndex = 0; nodeIndex < runtime.GetNodeCount(); ++nodeIndex) {
         SetupStateStorage(runtime, nodeIndex, stateStorageGroup);
 
@@ -230,7 +230,7 @@ void SetupServices(TTestActorRuntime &runtime) {
 
     ui64 defaultStateStorageGroup = runtime.GetAppData(0).DomainsInfo->GetDefaultStateStorageGroup(DOMAIN_ID);
     CreateTestBootstrapper(runtime, CreateTestTabletInfo(MakeBSControllerID(defaultStateStorageGroup),
-        TTabletTypes::FLAT_BS_CONTROLLER, TBlobStorageGroupType::ErasureMirror3, groupId),
+        TTabletTypes::BSController, TBlobStorageGroupType::ErasureMirror3, groupId),
         &CreateFlatBsController);
 }
 

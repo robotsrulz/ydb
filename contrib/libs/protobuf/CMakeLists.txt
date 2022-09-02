@@ -13,11 +13,9 @@ target_compile_options(contrib-libs-protobuf PRIVATE
   -DHAVE_CONFIG_H
   -DHAVE_PTHREAD=1
   -DHAVE_ZLIB=1
+  -Wno-everything
 )
 target_include_directories(contrib-libs-protobuf PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src
-)
-target_include_directories(contrib-libs-protobuf PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src
 )
 target_link_libraries(contrib-libs-protobuf PUBLIC
@@ -40,13 +38,14 @@ target_sources(contrib-libs-protobuf PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/empty.pb.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/extension_set.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/extension_set_heavy.cc
-  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/field_access_listener.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/field_mask.pb.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/generated_enum_util.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/generated_message_bases.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/generated_message_reflection.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/generated_message_table_driven.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/generated_message_table_driven_lite.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/implicit_weak_message.cc
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/inlined_string_field.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/io/coded_stream.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/io/gzip_stream.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/io/io_win32.cc
@@ -108,17 +107,59 @@ target_sources(contrib-libs-protobuf PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/wire_format_lite.cc
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/wrappers.pb.cc
 )
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/any.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/any.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/api.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/api.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/descriptor.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/descriptor.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/duration.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/duration.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/empty.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/empty.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/field_mask.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/field_mask.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/source_context.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/source_context.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/struct.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/struct.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/timestamp.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/timestamp.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/type.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/type.proto
+)
+copy_file(
+  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src/google/protobuf/wrappers.proto
+  ${CMAKE_BINARY_DIR}/contrib/libs/protobuf/src/google/protobuf/wrappers.proto
+)
 
 add_global_library_for(contrib-libs-protobuf.global contrib-libs-protobuf)
 target_compile_options(contrib-libs-protobuf.global PRIVATE
   -DHAVE_CONFIG_H
   -DHAVE_PTHREAD=1
   -DHAVE_ZLIB=1
+  -Wno-everything
 )
 target_include_directories(contrib-libs-protobuf.global PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src
-)
-target_include_directories(contrib-libs-protobuf.global PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/protobuf/src
 )
 target_link_libraries(contrib-libs-protobuf.global PUBLIC

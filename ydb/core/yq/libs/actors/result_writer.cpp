@@ -27,6 +27,8 @@
     LOG_INFO_S(*TlsActivationContext, NKikimrServices::YQL_PROXY, "Writer: " << TraceId << ": " << stream)
 #define LOG_D(stream)                                                        \
     LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::YQL_PROXY, "Writer: " << TraceId << ": " << stream)
+#define LOG_T(stream)                                                        \
+    LOG_TRACE_S(*TlsActivationContext, NKikimrServices::YQL_PROXY, "Writer: " << TraceId << ": " << stream)
 
 namespace NYq {
 
@@ -42,14 +44,20 @@ public:
         const TResultId& resultId,
         const TVector<TString>& columns,
         const TString& traceId,
-        const TInstant& deadline)
+        const TInstant& deadline,
+        ui64 resultBytesLimit)
         : ExecuterId(executerId)
         , ResultBuilder(MakeHolder<TProtoBuilder>(resultType, columns))
         , ResultId({resultId})
         , TraceId(traceId)
         , Deadline(deadline)
-        , InternalServiceId(MakeInternalServiceActorId())
-    { }
+        , ResultBytesLimit(resultBytesLimit)
+        , InternalServiceId(NFq::MakeInternalServiceActorId())
+    {
+        if (!ResultBytesLimit) {
+            ResultBytesLimit = 20_MB;
+        }
+    }
 
     static constexpr char ActorName[] = "YQ_RESULT_WRITER";
 
@@ -67,17 +75,24 @@ private:
         HFunc(TEvReadyState, OnReadyState);
         HFunc(TEvQueryResponse, OnQueryResult);
 
-        hFunc(TEvInternalService::TEvWriteResultResponse, HandleResponse);
+        hFunc(NFq::TEvInternalService::TEvWriteResultResponse, HandleResponse);
     )
 
     void PassAway() {
         auto duration = (TInstant::Now()-StartTime);
-        LOG_I("FinishWrite, Records: " << RowIndex << " HasError: " << HasError << " Size: " << Size << " Rows: " << Rows << " FreeSpace: " << FreeSpace << " Duration: " << duration << " AvgSpeed: " << Size/(duration.Seconds()+1)/1024/1024);
+        LOG_I("FinishWrite, Records: " << RowIndex
+                << " HasError: " << HasError
+                << " Size: " << Size
+                << " Rows: " << Rows
+                << " FreeSpace: " << FreeSpace
+                << " Duration: " << duration
+                << " AvgSpeed: " << Size/(duration.Seconds()+1)/1024/1024
+                << " ResultChunks.size(): " << ResultChunks.size());
         NActors::IActor::PassAway();
     }
 
     void OnUndelivered(NActors::TEvents::TEvUndelivered::TPtr&, const NActors::TActorContext& ) {
-        auto req = MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNAVAILABLE, TIssue("Undelivered").SetCode(NYql::DEFAULT_ERROR, TSeverityIds::S_ERROR), true, /*needFallback=*/false);
+        auto req = MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::UNAVAILABLE, TIssue("Undelivered").SetCode(NYql::DEFAULT_ERROR, TSeverityIds::S_ERROR));
         Send(ExecuterId, req.Release());
         HasError = true;
     }
@@ -112,7 +127,7 @@ private:
 
     void OnReadyState(TEvReadyState::TPtr&, const TActorContext&) { }
 
-    void HandleResponse(TEvInternalService::TEvWriteResultResponse::TPtr& ev) {
+    void HandleResponse(NFq::TEvInternalService::TEvWriteResultResponse::TPtr& ev) {
         const auto& issues = ev->Get()->Status.GetIssues();
         if (issues) {
             SendIssuesAndSetErrorFlag(issues);
@@ -122,7 +137,7 @@ private:
         auto it = Requests.find(ev->Get()->Result.request_id());
         if (it == Requests.end()) {
             HasError = true;
-            auto req = MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, TIssue("Unknown RequestId").SetCode(NYql::DEFAULT_ERROR, TSeverityIds::S_ERROR), /*retriable=*/ false, /*needFallback=*/false);
+            auto req = MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::BAD_REQUEST, TIssue("Unknown RequestId").SetCode(NYql::DEFAULT_ERROR, TSeverityIds::S_ERROR));
             Send(ExecuterId, req.Release());
             return;
         }
@@ -145,7 +160,7 @@ private:
 
                 auto duration = (TInstant::Now()-StartTime);
 
-                LOG_D("ChannelData, Records: " << RowIndex
+                LOG_T("ChannelData, Records: " << RowIndex
                     << " HasError: " << HasError
                     << " Size: " << Size
                     << " Rows: " << Rows
@@ -169,8 +184,8 @@ private:
         Send(ev->Sender, res.Release());
     }
 
-    Yq::Private::WriteTaskResultRequest CreateProtoRequestWithoutResultSet(ui64 startRowIndex) {
-        Yq::Private::WriteTaskResultRequest protoReq;
+    Fq::Private::WriteTaskResultRequest CreateProtoRequestWithoutResultSet(ui64 startRowIndex) {
+        Fq::Private::WriteTaskResultRequest protoReq;
         protoReq.set_owner_id(ResultId.Owner);
         protoReq.mutable_result_id()->set_value(ResultId.Id);
         protoReq.set_offset(startRowIndex);
@@ -181,11 +196,44 @@ private:
     }
 
     void SendResult() {
-        if (InflightCounter || CurChunkInd >= ResultChunks.size()) {
+        if (InflightCounter || !ResultChunks) {
+            return;
+        }
+        while (ResultChunks) {
+            const auto& chunk = ResultChunks.front();
+            // if owner is not empty, then there is data to send to storage, otherwise just shift seqno
+            if (chunk.owner_id()) {
+                break;
+            }
+            const auto& request = Requests[chunk.request_id()];
+            auto res = MakeHolder<NDq::TEvDqCompute::TEvChannelDataAck>();
+            res->Record.SetChannelId(request.ChannelId);
+            res->Record.SetFreeSpace(FreeSpace);
+            res->Record.SetSeqNo(request.SeqNo);
+            res->Record.SetFinish(HasError);
+            Send(request.Sender, res.Release());
+            Requests.erase(chunk.request_id());
+
+            auto duration = (TInstant::Now()-StartTime);
+
+            LOG_T("ChannelData Shift, Records: " << RowIndex
+                << " HasError: " << HasError
+                << " Size: " << Size
+                << " Rows: " << Rows
+                << " FreeSpace: " << FreeSpace
+                << " Duration: " << duration
+                << " AvgSpeed: " << Size/(duration.Seconds()+1)/1024/1024);
+            ResultChunks.pop_front();
+        }
+
+        if (!ResultChunks) {
+            MaybeFinish();
             return;
         }
         ++InflightCounter;
-        Send(InternalServiceId, new TEvInternalService::TEvWriteResultRequest(std::move(ResultChunks[CurChunkInd++])));
+        auto chunk = std::move(ResultChunks.front());
+        ResultChunks.pop_front();
+        Send(InternalServiceId, new NFq::TEvInternalService::TEvWriteResultRequest(std::move(chunk)));
     }
 
     void ConstructResults(const Ydb::ResultSet& resultSet, ui64 startRowIndex) {
@@ -209,14 +257,27 @@ private:
     }
 
     void ProcessData(NDq::TEvDqCompute::TEvChannelData::TPtr& ev) {
+        if (!ev->Get()->Record.GetChannelData().HasData()) {
+            auto& request = Requests[Cookie];
+            request.Sender = ev->Sender;
+            request.ChannelId = ev->Get()->Record.GetChannelData().GetChannelId();
+            request.SeqNo = ev->Get()->Record.GetSeqNo();
+            request.Size = 0;
+            ResultChunks.emplace_back();
+            ResultChunks.back().set_request_id(Cookie);
+            SendResult();
+            Cookie++;
+            return;
+        }
+
         auto& data = ev->Get()->Record.GetChannelData().GetData();
         auto resultSet = ResultBuilder->BuildResultSet({data});
         FreeSpace -= data.GetRaw().size();
         OccupiedSpace += data.GetRaw().size();
 
-        if (OccupiedSpace > SpaceLimitPerQuery) {
+        if (OccupiedSpace > ResultBytesLimit) {
             TIssues issues;
-            issues.AddIssue(TStringBuilder() << "Can not write results with size > " << SpaceLimitPerQuery / (1024 * 1024) << "_MB");
+            issues.AddIssue(TStringBuilder() << "Can not write results with size > " << ResultBytesLimit << " byte(s)");
             SendIssuesAndSetErrorFlag(issues);
             return;
         }
@@ -255,30 +316,10 @@ private:
         }
 
         try {
-            if (ev->Get()->Record.GetChannelData().HasData()) {
-                ProcessData(ev);
-            } else {
-                auto res = MakeHolder<NDq::TEvDqCompute::TEvChannelDataAck>();
-                res->Record.SetChannelId(ev->Get()->Record.GetChannelData().GetChannelId());
-                res->Record.SetSeqNo(ev->Get()->Record.GetSeqNo());
-                res->Record.SetFreeSpace(FreeSpace);
-                res->Record.SetFinish(HasError);
-                Send(ev->Sender, res.Release());
-
-                auto duration = (TInstant::Now()-StartTime);
-
-                LOG_D("ChannelData, Records: " << RowIndex
-                    << " HasError: " << HasError
-                    << " Size: " << Size
-                    << " Rows: " << Rows
-                    << " FreeSpace: " << FreeSpace
-                    << " Duration: " << duration
-                    << " AvgSpeed: " << Size/(duration.Seconds()+1)/1024/1024);
-            }
+            ProcessData(ev);
         } catch (...) {
             LOG_E(CurrentExceptionMessage());
-            auto req = MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, TIssue("Internal error on data write").SetCode(NYql::DEFAULT_ERROR, TSeverityIds::S_ERROR), /*retriable=*/ false,
-                /*needFallback=*/false);
+            auto req = MakeHolder<TEvDqFailure>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, TIssue("Internal error on data write").SetCode(NYql::DEFAULT_ERROR, TSeverityIds::S_ERROR));
             Send(ExecuterId, req.Release());
             HasError = true;
         }
@@ -315,11 +356,10 @@ private:
     bool HasError = false;
     bool Finished = false;
     NYql::TIssues Issues;
-    ui64 SpaceLimitPerQuery = 20_MB;
+    ui64 ResultBytesLimit;
     ui64 OccupiedSpace = 0;
 
-    TVector<Yq::Private::WriteTaskResultRequest> ResultChunks;
-    size_t CurChunkInd = 0;
+    TDeque<Fq::Private::WriteTaskResultRequest> ResultChunks;
     ui32 InflightCounter = 0;
     TActorId InternalServiceId;
 };
@@ -330,9 +370,10 @@ NActors::IActor* CreateResultWriter(
     const TResultId& resultId,
     const TVector<TString>& columns,
     const TString& traceId,
-    const TInstant& deadline)
+    const TInstant& deadline,
+    ui64 resultBytesLimit)
 {
-    return new TResultWriter(executerId, resultType, resultId, columns, traceId, deadline);
+    return new TResultWriter(executerId, resultType, resultId, columns, traceId, deadline, resultBytesLimit);
 }
 
 } // namespace NYq

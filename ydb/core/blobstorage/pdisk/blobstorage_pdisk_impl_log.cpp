@@ -511,7 +511,7 @@ void TPDisk::WriteSysLogRestorePoint(TCompletionAction *action, TReqId reqId, NW
         if (ChunkState.size() > i
                 && (ChunkState[i].CommitState == TChunkState::DATA_COMMITTED
                     || ChunkState[i].CommitState == TChunkState::DATA_COMMITTED_DELETE_IN_PROGRESS
-                    || ChunkState[i].CommitState == TChunkState::DATA_COMMITTED_ON_QUARANTINE)
+                    || ChunkState[i].CommitState == TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE)
                 && IsOwnerUser(ChunkState[i].OwnerId)) {
             chunkOwners[i].OwnerId = ChunkState[i].OwnerId;
             chunkOwners[i].Nonce = ChunkState[i].Nonce;
@@ -866,41 +866,65 @@ NKikimrProto::EReplyStatus TPDisk::BeforeLoggingCommitRecord(const TLogWrite &lo
         }
         ++ChunkState[chunkIdx].CommitsInProgress;
     }
-    for (ui32 chunkIdx : logWrite.CommitRecord.DeleteChunks) {
-        TChunkState& state = ChunkState[chunkIdx];
-        if (state.HasAnyOperationsInProgress()) {
+    if (logWrite.CommitRecord.DeleteToDecommitted) {
+        for (ui32 chunkIdx : logWrite.CommitRecord.DeleteChunks) {
+            TChunkState& state = ChunkState[chunkIdx];
             switch (state.CommitState) {
             case TChunkState::DATA_RESERVED:
-                Mon.UncommitedDataChunks->Dec();
-                state.CommitState = TChunkState::DATA_ON_QUARANTINE;
+                state.CommitState = TChunkState::DATA_RESERVED_DECOMMIT_IN_PROGRESS;
                 break;
             case TChunkState::DATA_COMMITTED:
                 Mon.CommitedDataChunks->Dec();
-                LOG_DEBUG(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
-                        " Line# %" PRIu32 " --CommitedDataChunks# %" PRIi64 " chunkIdx# %" PRIu32 " Marker# BPD10",
-                        (ui32)PDiskId, (ui32)__LINE__, (i64)Mon.CommitedDataChunks->Val(), (ui32)chunkIdx);
-                state.CommitState = TChunkState::DATA_COMMITTED_ON_QUARANTINE;
+                Mon.UncommitedDataChunks->Inc();
+                state.CommitState = TChunkState::DATA_COMMITTED_DECOMMIT_IN_PROGRESS;
                 break;
             default:
-                state.CommitState = TChunkState::DATA_ON_QUARANTINE;
+                Y_FAIL_S("PDiskID# " << PDiskId << " can't delete to decomitted chunkIdx# " << chunkIdx
+                    << " request ownerId# " << logWrite.Owner
+                    << " as it is in unexpected CommitState# " << state.ToString());
                 break;
             }
-            QuarantineChunks.push_back(chunkIdx);
-            LOG_INFO_S(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# " << PDiskId
-                    << " push chunk on QuarantineChunks because it has operations in flight"
-                    << " chunkIdx# " << chunkIdx
-                    << " ownerId# " << logWrite.Owner
-                    << " state# " << state.ToString()
-                    << " Marker# BPD78");
-        } else if (state.CommitState == TChunkState::DATA_RESERVED) {
-            Mon.UncommitedDataChunks->Dec();
-            state.CommitState = TChunkState::DATA_RESERVED_DELETE_IN_PROGRESS;
-        } else if (state.CommitState == TChunkState::DATA_COMMITTED) {
-            Mon.CommitedDataChunks->Dec();
-            state.CommitState = TChunkState::DATA_COMMITTED_DELETE_IN_PROGRESS;
-        } else {
-            Y_FAIL_S("PDiskID# " << PDiskId << " can't delete chunkIdx# " << chunkIdx
+        }
+    } else {
+        for (ui32 chunkIdx : logWrite.CommitRecord.DeleteChunks) {
+            TChunkState& state = ChunkState[chunkIdx];
+            if (state.HasAnyOperationsInProgress()) {
+                switch (state.CommitState) {
+                case TChunkState::DATA_RESERVED:
+                    Mon.UncommitedDataChunks->Dec();
+                    state.CommitState = TChunkState::DATA_RESERVED_DELETE_ON_QUARANTINE;
+                    break;
+                case TChunkState::DATA_COMMITTED:
+                    Mon.CommitedDataChunks->Dec();
+                    LOG_DEBUG(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
+                            " Line# %" PRIu32 " --CommitedDataChunks# %" PRIi64 " chunkIdx# %" PRIu32 " Marker# BPD10",
+                            (ui32)PDiskId, (ui32)__LINE__, (i64)Mon.CommitedDataChunks->Val(), (ui32)chunkIdx);
+                    state.CommitState = TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE;
+                    break;
+                default:
+                    Y_FAIL_S("PDiskID# " << PDiskId << " can't delete chunkIdx# " << chunkIdx
+                        << " request ownerId# " << logWrite.Owner
+                        << " with operations in progress as it is in unexpected CommitState# " << state.ToString());
+                    break;
+                }
+                QuarantineChunks.push_back(chunkIdx);
+                LOG_INFO_S(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# " << PDiskId
+                        << " push chunk on QuarantineChunks because it has operations in flight"
+                        << " chunkIdx# " << chunkIdx
+                        << " ownerId# " << logWrite.Owner
+                        << " state# " << state.ToString()
+                        << " Marker# BPD78");
+            } else if (state.CommitState == TChunkState::DATA_RESERVED) {
+                Mon.UncommitedDataChunks->Dec();
+                state.CommitState = TChunkState::DATA_RESERVED_DELETE_IN_PROGRESS;
+            } else if (state.CommitState == TChunkState::DATA_COMMITTED) {
+                Mon.CommitedDataChunks->Dec();
+                state.CommitState = TChunkState::DATA_COMMITTED_DELETE_IN_PROGRESS;
+            } else {
+                Y_FAIL_S("PDiskID# " << PDiskId << " can't delete chunkIdx# " << chunkIdx
+                    << " request ownerId# " << logWrite.Owner
                     << " as it is in unexpected CommitState# " << state.ToString());
+            }
         }
     }
 
@@ -939,6 +963,7 @@ bool TPDisk::ValidateCommitChunk(ui32 chunkIdx, TOwner owner, TStringStream& out
     return true;
 }
 
+// Called when commit record is successfully saved to the disk.
 void TPDisk::CommitChunk(ui32 chunkIdx) {
     TGuard<TMutex> guard(StateMutex);
     TChunkState &state = ChunkState[chunkIdx];
@@ -951,8 +976,17 @@ void TPDisk::CommitChunk(ui32 chunkIdx) {
     case TChunkState::DATA_COMMITTED:
         state.CommitState = TChunkState::DATA_COMMITTED;
         break;
+    case TChunkState::DATA_RESERVED_DECOMMIT_IN_PROGRESS:
+        [[fallthrough]];
+    case TChunkState::DATA_COMMITTED_DECOMMIT_IN_PROGRESS:
+        [[fallthrough]];
+    case TChunkState::DATA_DECOMMITTED:
+        [[fallthrough]];
     case TChunkState::DATA_ON_QUARANTINE:
-    case TChunkState::DATA_COMMITTED_ON_QUARANTINE:
+        [[fallthrough]];
+    case TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE:
+        [[fallthrough]];
+    case TChunkState::DATA_RESERVED_DELETE_ON_QUARANTINE:
         // Do nothing
         break;
     default:
@@ -998,12 +1032,12 @@ bool TPDisk::ValidateDeleteChunk(ui32 chunkIdx, TOwner owner, TStringStream& out
 }
 
 // Marks chunk deleted but does not move it to the free list.
+// Called when commit record is successfully saved to the disk.
 void TPDisk::DeleteChunk(ui32 chunkIdx, TOwner owner) {
     TGuard<TMutex> guard(StateMutex);
     TChunkState &state = ChunkState[chunkIdx];
     switch (state.CommitState) {
     // Chunk will be freed in TPDisk::ForceDeleteChunk() and may be released already
-    case TChunkState::FREE:
     case TChunkState::DATA_ON_QUARANTINE:
         break;
     case TChunkState::DATA_RESERVED_DELETE_IN_PROGRESS:
@@ -1019,12 +1053,25 @@ void TPDisk::DeleteChunk(ui32 chunkIdx, TOwner owner) {
         state.CommitState = TChunkState::FREE;
         Keeper.PushFreeOwnerChunk(owner, chunkIdx);
         break;
-    case TChunkState::DATA_COMMITTED_ON_QUARANTINE:
+    case TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE:
         // Mark chunk as quarantine, so it will be released through default quarantine way
+        Y_VERIFY(state.OwnerId == owner); // TODO DELETE
         state.CommitState = TChunkState::DATA_ON_QUARANTINE;
         break;
+    case TChunkState::DATA_RESERVED_DELETE_ON_QUARANTINE:
+        // Mark chunk as quarantine, so it will be released through default quarantine way
+        Y_VERIFY(state.OwnerId == owner); // TODO DELETE
+        state.CommitState = TChunkState::DATA_ON_QUARANTINE;
+        break;
+    case TChunkState::DATA_COMMITTED_DECOMMIT_IN_PROGRESS:
+        [[fallthrough]];
+    case TChunkState::DATA_RESERVED_DECOMMIT_IN_PROGRESS:
+        state.CommitState = TChunkState::DATA_DECOMMITTED;
+        break;
+
     default:
         Y_FAIL_S("PDiskID# " << PDiskId << " can't delete chunkIdx# " << chunkIdx
+                << " requesting ownerId# " << owner
                 << " as it is in unexpected CommitState# " << state.ToString());
     }
 }

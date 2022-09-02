@@ -380,7 +380,7 @@ public:
         return DbKeys;
     }
 
-    EResult PrepareShardPrograms(const TShardLimits& limits) noexcept override {
+    EResult PrepareShardPrograms(const TShardLimits& limits, ui32* outRSCount) noexcept override {
         Y_VERIFY(!AreAffectedShardsPrepared, "PrepareShardPrograms is already called");
         TGuard<TScopedAlloc> allocGuard(Alloc);
         AffectedShards.clear();
@@ -455,7 +455,7 @@ public:
             for (auto& x : ProxyCallables) {
                 auto name = x.second.Node->GetType()->GetNameStr();
                 if (name == Strings.EraseRow || name == Strings.UpdateRow) {
-                    proxyShards[x.first] = &x.second.Key->Partitions;
+                    proxyShards[x.first] = &x.second.Key->GetPartitions();
                 }
             }
 
@@ -476,7 +476,7 @@ public:
         if (readsets.size() > limits.RSCount) {
             THashMap<ui64, TTableId> tableMap;
             for (auto& key : DbKeys) {
-                for (auto& partition : key->Partitions) {
+                for (auto& partition : key->GetPartitions()) {
                     tableMap[partition.ShardId] = key->TableId;
                 }
             }
@@ -495,6 +495,10 @@ public:
                 JoinStrings(srcTables.begin(), srcTables.end(), ",").c_str(),
                 JoinStrings(dstTables.begin(), dstTables.end(), ",").c_str()).data());
             return EResult::TooManyRS;
+        }
+
+        if (outRSCount) {
+            *outRSCount = readsets.size();
         }
 
         AreAffectedShardsPrepared = true;
@@ -1363,11 +1367,6 @@ public:
                     NUdf::TUnboxedValue replyValue = runValue.GetElement(0);
                     NUdf::TUnboxedValue writeValue = runValue.GetElement(1);
 
-                    TEngineFlatApplyContext applyCtx;
-                    applyCtx.Host = Settings.Host;
-                    applyCtx.Env = &Env;
-                    ApplyChanges(writeValue, applyCtx);
-
                     TCallableResults replyResults;
                     for (ui32 i = 0; i < replyStruct.GetValuesCount(); ++i) {
                         TRuntimeNode item = replyStruct.GetValue(i);
@@ -1383,6 +1382,13 @@ public:
                     }
 
                     auto replyStr = replyResults.ToString(holderFactory, Env);
+
+                    // Note: we must apply side effects even if we reply with an error below
+                    TEngineFlatApplyContext applyCtx;
+                    applyCtx.Host = Settings.Host;
+                    applyCtx.Env = &Env;
+                    ApplyChanges(writeValue, applyCtx);
+
                     if (replyStr.size() > MaxDatashardReplySize) {
                         TString error = TStringBuilder() << "Datashard " << pgm.first
                             << ": reply size limit exceeded. ("
@@ -1494,7 +1500,7 @@ private:
     };
 
     static void AddShards(TSet<ui64>& set, const TKeyDesc& key) {
-        for (auto& partition : key.Partitions) {
+        for (auto& partition : key.GetPartitions()) {
             Y_VERIFY(partition.ShardId);
             set.insert(partition.ShardId);
         }
@@ -1572,7 +1578,7 @@ private:
                 auto uniqueName = ToString(callable->GetUniqueId());
                 shardsForReadBuilder.Add(uniqueName, ctx.ShardsForRead);
 
-                for (auto& partition : ctx.Key->Partitions) {
+                for (auto& partition : ctx.Key->GetPartitions()) {
                     auto shardForRead = partition.ShardId;
                     if (shardForRead != shard) {
                         readsets.insert(std::make_pair(shardForRead, shard));
@@ -1585,7 +1591,7 @@ private:
             auto key = ctx.Key;
             Y_VERIFY(key);
 
-            for (auto& partition : key->Partitions) {
+            for (auto& partition : key->GetPartitions()) {
                 if (partition.ShardId == shard) {
                     return true;
                 }
@@ -2035,7 +2041,7 @@ private:
                 Y_VERIFY(key);
 
                 TListLiteralBuilder listOfShards(Env, Ui64Type);
-                for (auto& partition : key->Partitions) {
+                for (auto& partition : key->GetPartitions()) {
                     listOfShards.Add(TRuntimeNode(BuildDataLiteral(NUdf::TUnboxedValuePod(partition.ShardId),
                         NUdf::TDataType<ui64>::Id, Env), true));
                 }

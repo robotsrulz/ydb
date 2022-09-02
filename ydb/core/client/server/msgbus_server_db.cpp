@@ -195,7 +195,7 @@ protected:
     TActorId SchemeCache;
     TIntrusivePtr<TMessageBusDbOpsCounters> DbOperationsCounters;
 
-    NMon::THistogramCounterHelper* OperationHistogram;
+    NMonitoring::THistogramPtr OperationHistogram;
     TAutoPtr<NSchemeCache::TSchemeCacheNavigate> CacheNavigate;
     NJson::TJsonValue JSON;
     THPTimer StartTime;
@@ -207,10 +207,10 @@ protected:
 
     void CompleteRequest(const TActorContext& ctx) {
         TDuration duration(TDuration::MicroSeconds(StartTime.Passed() * 1000000/*us*/));
-        if (OperationHistogram != nullptr) {
-            OperationHistogram->Add(duration.MilliSeconds());
+        if (OperationHistogram) {
+            OperationHistogram->Collect(duration.MilliSeconds());
         }
-        DbOperationsCounters->RequestTotalTimeHistogram.Add(duration.MilliSeconds());
+        DbOperationsCounters->RequestTotalTimeHistogram->Collect(duration.MilliSeconds());
         Die(ctx);
     }
 
@@ -381,7 +381,8 @@ public:
     }
 
     void BuildProgram(const NJson::TJsonValue& json, NMiniKQL::TRuntimeNode& pgmReturn, NMiniKQL::TKikimrProgramBuilder& pgmBuilder, const NSchemeCache::TSchemeCacheNavigate::TEntry& tableInfo,
-                      const TVector<const NTxProxy::TTableColumnInfo*>& keys, const THashMap<TString, const NTxProxy::TTableColumnInfo*>& columnByName, TVector<NMiniKQL::TRuntimeNode>& result) {
+                      const TVector<const NTxProxy::TTableColumnInfo*>& keys, const THashMap<TString, const NTxProxy::TTableColumnInfo*>& columnByName, THashSet<TString> notNullColumns,
+                      TVector<NMiniKQL::TRuntimeNode>& result) {
         TVector<NMiniKQL::TRuntimeNode> keyColumns;
         TVector<ui32> keyTypes;
         keyTypes.reserve(keys.size());
@@ -427,10 +428,12 @@ public:
                     const TString& column = value.GetString();
                     auto itCol = columnByName.find(column);
                     if (itCol != columnByName.end()) {
-                        columnsToRead.emplace_back(itCol->second->Name, itCol->second->Id, itCol->second->PType);
+                        auto nullConstraint = notNullColumns.contains(column) ? EColumnTypeConstraint::NotNull : EColumnTypeConstraint::Nullable;
+                        columnsToRead.emplace_back(itCol->second->Name, itCol->second->Id, itCol->second->PType, nullConstraint);
                     } else if (column == "*") {
                         for (const auto& pr : columnByName) {
-                            columnsToRead.emplace_back(pr.second->Name, pr.second->Id, pr.second->PType);
+                            auto nullConstraint = notNullColumns.contains(pr.first) ? EColumnTypeConstraint::NotNull : EColumnTypeConstraint::Nullable;
+                            columnsToRead.emplace_back(pr.second->Name, pr.second->Id, pr.second->PType, nullConstraint);
                         }
                     } else {
                         throw yexception() << "Column \"" << value.GetString() << "\" not found";
@@ -438,7 +441,8 @@ public:
                 }
             } else if (jsonSelect.IsString() && jsonSelect.GetString() == "*") {
                 for (const auto& pr : columnByName) {
-                    columnsToRead.emplace_back(pr.second->Name, pr.second->Id, pr.second->PType);
+                    auto nullConstraint = notNullColumns.contains(pr.first) ? EColumnTypeConstraint::NotNull : EColumnTypeConstraint::Nullable;
+                    columnsToRead.emplace_back(pr.second->Name, pr.second->Id, pr.second->PType, nullConstraint);
                 }
             }
             if (keyColumns.size() == keyTypes.size()) {
@@ -453,7 +457,7 @@ public:
                 tableRangeOptions.FromColumns = keyFromColumns;
                 result.emplace_back(pgmBuilder.SelectRange(tableInfo.TableId, keyTypes, columnsToRead, tableRangeOptions, readTarget));
             }
-            OperationHistogram = &DbOperationsCounters->RequestSelectTimeHistogram;
+            OperationHistogram = DbOperationsCounters->RequestSelectTimeHistogram;
         }
 
         NJson::TJsonValue jsonUpdate;
@@ -469,22 +473,22 @@ public:
                     throw yexception() << "Column \"" << itVal->first << "\" not found";
                 }
             }
-            OperationHistogram = &DbOperationsCounters->RequestUpdateTimeHistogram;
+            OperationHistogram = DbOperationsCounters->RequestUpdateTimeHistogram;
         }
 
         NJson::TJsonValue jsonDelete;
         if (json.GetValue("Delete", &jsonDelete)) {
             pgmReturn = pgmBuilder.Append(pgmReturn, pgmBuilder.EraseRow(tableInfo.TableId, keyTypes, keyColumns));
-            OperationHistogram = &DbOperationsCounters->RequestUpdateTimeHistogram;
+            OperationHistogram = DbOperationsCounters->RequestUpdateTimeHistogram;
         }
 
         NJson::TJsonValue jsonBatch;
         if (json.GetValue("Batch", &jsonBatch)) {
             const NJson::TJsonValue::TArray& array = jsonBatch.GetArray();
             for (const NJson::TJsonValue& value : array) {
-                BuildProgram(value, pgmReturn, pgmBuilder, tableInfo, keys, columnByName, result);
+                BuildProgram(value, pgmReturn, pgmBuilder, tableInfo, keys, columnByName, notNullColumns, result);
             }
-            OperationHistogram = &DbOperationsCounters->RequestBatchTimeHistogram;
+            OperationHistogram = DbOperationsCounters->RequestBatchTimeHistogram;
         }
     }
 
@@ -511,7 +515,7 @@ public:
                 columnByName[itCol->second.Name] = &itCol->second;
             }
 
-            BuildProgram(JSON, pgmReturn, pgmBuilder, tableInfo, keys, columnByName, result);
+            BuildProgram(JSON, pgmReturn, pgmBuilder, tableInfo, keys, columnByName, tableInfo.NotNullColumns, result);
             if (JSON.Has("Batch")) {
                 pgmReturn = pgmBuilder.Append(pgmReturn, pgmBuilder.SetResult("Result", pgmBuilder.NewTuple(result)));
             } else {
@@ -523,7 +527,7 @@ public:
             NMiniKQL::TRuntimeNode node = pgmBuilder.Build(pgmReturn);
             TString bin = NMiniKQL::SerializeRuntimeNode(node, env);
 
-            DbOperationsCounters->RequestPrepareTimeHistogram.Add(StartTime.Passed() * 1000/*ms*/);
+            DbOperationsCounters->RequestPrepareTimeHistogram->Collect(StartTime.Passed() * 1000/*ms*/);
 
             TAutoPtr<TEvTxUserProxy::TEvProposeTransaction> Proposal(new TEvTxUserProxy::TEvProposeTransaction());
             NKikimrTxUserProxy::TEvProposeTransaction &record = Proposal->Record;
@@ -565,7 +569,6 @@ TServerDbOperation<TMessageBusInterface<TBusDbOperation>>::TServerDbOperation(
     , TxProxyId(txProxyId)
     , SchemeCache(schemeCache)
     , DbOperationsCounters(dbOperationsCounters)
-    , OperationHistogram(nullptr)
 {}
 
 template <>
@@ -581,7 +584,6 @@ TServerDbOperation<TActorInterface>::TServerDbOperation(
     , TxProxyId(txProxyId)
     , SchemeCache(schemeCache)
     , DbOperationsCounters(dbOperationsCounters)
-    , OperationHistogram(nullptr)
     , JSON(jsonValue)
     , SecurityToken(securityToken)
 {}
@@ -604,8 +606,8 @@ protected:
 
     void CompleteRequest(const TActorContext& ctx) {
         TDuration duration(TDuration::MicroSeconds(StartTime.Passed() * 1000000/*us*/));
-        DbOperationsCounters->RequestSchemaTimeHistogram.Add(duration.MilliSeconds());
-        DbOperationsCounters->RequestTotalTimeHistogram.Add(duration.MilliSeconds());
+        DbOperationsCounters->RequestSchemaTimeHistogram->Collect(duration.MilliSeconds());
+        DbOperationsCounters->RequestTotalTimeHistogram->Collect(duration.MilliSeconds());
         Die(ctx);
     }
 
@@ -872,7 +874,7 @@ public:
             }
         }
 
-        DbOperationsCounters->RequestPrepareTimeHistogram.Add(StartTime.Passed() * 1000/*ms*/);
+        DbOperationsCounters->RequestPrepareTimeHistogram->Collect(StartTime.Passed() * 1000/*ms*/);
         if (Requests.empty()) {
             return ReplyWithError(MSTATUS_ERROR, TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::WrongRequest, "No valid operations were found", ctx);
         }

@@ -308,16 +308,10 @@ bool TTxPartitionHistogram::Execute(TTransactionContext& txc, const TActorContex
         return true;
 
     auto shardIdx = Self->TabletIdToShardIdx[datashardId];
+    const auto forceShardSplitSettings = Self->SplitSettings.GetForceShardSplitSettings();
 
     ESplitReason splitReason = ESplitReason::NO_SPLIT;
-    if (table->CheckFastSplitForPartition(Self->SplitSettings, shardIdx, dataSize, rowCount)) {
-        const TTableInfo* parentTable = Self->GetMainTableForIndex(tableId);
-        if (parentTable && table->GetPartitions().size() < parentTable->GetPartitions().size()) {
-            splitReason = ESplitReason::FAST_SPLIT_INDEX;
-        }
-    }
-
-    if (splitReason == ESplitReason::NO_SPLIT && dataSize >= table->GetShardSizeToSplit()) {
+    if (table->ShouldSplitBySize(dataSize, forceShardSplitSettings)) {
         splitReason = ESplitReason::SPLIT_BY_SIZE;
     }
 
@@ -329,8 +323,7 @@ bool TTxPartitionHistogram::Execute(TTransactionContext& txc, const TActorContex
         return true;
     }
 
-
-    if (table->GetPartitions().size() >= table->GetMaxPartitionsCount()) {
+    if (splitReason != ESplitReason::SPLIT_BY_SIZE && table->GetPartitions().size() >= table->GetMaxPartitionsCount()) {
         return true;
     }
 

@@ -404,6 +404,10 @@ THolder<TProposeResponse> TAlterFileStore::Propose(
         result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
         return result;
     }
+    if (!context.SS->CheckInFlightLimit(TTxState::TxAlterFileStore, errStr)) {
+        result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+        return result;
+    }
 
     fs->PrepareAlter(*alterConfig);
 
@@ -538,7 +542,7 @@ bool TAlterFileStore::ProcessChannelProfiles(
 
     const auto storeChannelsResolved = context.SS->ResolveChannelsByPoolKinds(
         partitionPoolKinds,
-        path.DomainId(),
+        path.GetPathIdForDomain(),
         storeChannelsBinding);
 
     if (!storeChannelsResolved) {

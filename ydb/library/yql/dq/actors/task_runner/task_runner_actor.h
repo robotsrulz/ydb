@@ -26,7 +26,7 @@ struct ITaskRunnerActor {
 
     virtual ~ITaskRunnerActor() = default;
 
-    virtual void SourcePush(
+    virtual void AsyncInputPush(
         ui64 cookie,
         ui64 index,
         NKikimr::NMiniKQL::TUnboxedValueVector&& batch,
@@ -43,7 +43,8 @@ struct ITaskRunnerActorFactory {
 
     virtual std::tuple<ITaskRunnerActor*, NActors::IActor*> Create(
         ITaskRunnerActor::ICallbacks* parent,
-        const TString& traceId,
+        const TTxId& txId,
+        ui64 taskId,
         THashSet<ui32>&& inputChannelsWithDisabledCheckpoints = {},
         THolder<NYql::NDq::TDqMemoryQuota>&& memoryQuota = {}) = 0;
 };

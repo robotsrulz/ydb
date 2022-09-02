@@ -10,11 +10,9 @@
 add_library(libs-brotli-enc)
 target_compile_options(libs-brotli-enc PRIVATE
   -DBROTLI_BUILD_PORTABLE
+  -Wno-everything
 )
 target_include_directories(libs-brotli-enc PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/libs/brotli/include
-)
-target_include_directories(libs-brotli-enc PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/brotli/include
 )
 target_link_libraries(libs-brotli-enc PUBLIC

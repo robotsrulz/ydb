@@ -95,8 +95,8 @@ class TLogWriterTestLoadActor : public TActorBootstrapped<TLogWriterTestLoadActo
 
         const TDuration ExposePeriod = TDuration::Seconds(10);
 
-        TIntrusivePtr<NMonitoring::TDynamicCounters> TagCounters;
-        TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> TagCounters;
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters;
         TWakeupQueue& WakeupQueue;
         TQueryDispatcher& QueryDispatcher;
         const ui64 TabletId;
@@ -162,7 +162,7 @@ class TLogWriterTestLoadActor : public TActorBootstrapped<TLogWriterTestLoadActo
         TVector<TReqInfo> ScriptedRequests;
 
     public:
-        TTabletWriter(ui64 tag, TIntrusivePtr<NMonitoring::TDynamicCounters> counters,
+        TTabletWriter(ui64 tag, TIntrusivePtr<::NMonitoring::TDynamicCounters> counters,
                 TWakeupQueue& wakeupQueue, TQueryDispatcher& queryDispatcher, ui64 tabletId, ui32 channel,
                 TMaybe<ui32> generation, ui32 groupId, NKikimrBlobStorage::EPutHandleClass putHandleClass,
                 const TSizeGenerator& writeSizeGen, const TIntervalGenerator& writeIntervalGen,
@@ -249,7 +249,7 @@ class TLogWriterTestLoadActor : public TActorBootstrapped<TLogWriterTestLoadActo
         // Issue TEvDiscover
         void Bootstrap(const TActorContext& ctx) {
             NextWriteTimestamp = TAppData::TimeProvider->Now();
-            auto ev = std::make_unique<TEvBlobStorage::TEvDiscover>(TabletId, Generation, false, true, TInstant::Max(), 0);
+            auto ev = std::make_unique<TEvBlobStorage::TEvDiscover>(TabletId, Generation, false, true, TInstant::Max(), 0, true);
             LOG_DEBUG_S(ctx, NKikimrServices::BS_LOAD_TEST, PrintMe() << " is bootstrapped, going to send "
                     << ev->ToString());
             auto callback = [this] (IEventBase *event, const TActorContext& ctx) {
@@ -271,9 +271,9 @@ class TLogWriterTestLoadActor : public TActorBootstrapped<TLogWriterTestLoadActo
             auto callback = [this] (IEventBase *event, const TActorContext& ctx) {
                 auto *res = dynamic_cast<TEvBlobStorage::TEvBlockResult *>(event);
                 Y_VERIFY(res);
-                if (!CheckStatus(ctx, res, {NKikimrProto::EReplyStatus::OK, NKikimrProto::EReplyStatus::RACE})) {
+                if (!CheckStatus(ctx, res, {NKikimrProto::EReplyStatus::OK, NKikimrProto::EReplyStatus::ALREADY})) {
                     return;
-                } else if (res->Status == NKikimrProto::EReplyStatus::RACE && GroupBlockRetries-- > 0) {
+                } else if (res->Status == NKikimrProto::EReplyStatus::ALREADY && GroupBlockRetries-- > 0) {
                     LOG_INFO_S(ctx, NKikimrServices::BS_LOAD_TEST, PrintMe() << " recieved " << res->ToString());
                     IssueTEvBlock(ctx);
                     return;
@@ -761,7 +761,7 @@ class TLogWriterTestLoadActor : public TActorBootstrapped<TLogWriterTestLoadActo
 
     TQueryDispatcher QueryDispatcher;
 
-    NMonitoring::TDynamicCounters::TCounterPtr ScheduleCounter;
+    ::NMonitoring::TDynamicCounters::TCounterPtr ScheduleCounter;
 
     ui32 TestStoppedRecieved = 0;
 
@@ -771,7 +771,7 @@ public:
     }
 
     TLogWriterTestLoadActor(const NKikimrBlobStorage::TEvTestLoadRequest::TLoadStart& cmd, const TActorId& parent,
-            TIntrusivePtr<NMonitoring::TDynamicCounters> counters, ui64 tag)
+            TIntrusivePtr<::NMonitoring::TDynamicCounters> counters, ui64 tag)
         : Tag(tag)
         , Parent(parent)
         , ScheduleCounter(counters->GetSubgroup("subsystem", "scheduler")->GetCounter("ScheduleCounter", true))
@@ -971,7 +971,7 @@ public:
 };
 
 IActor *CreateWriterTestLoad(const NKikimrBlobStorage::TEvTestLoadRequest::TLoadStart& cmd, const TActorId& parent,
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters, ui64 tag) {
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters, ui64 tag) {
     return new TLogWriterTestLoadActor(cmd, parent, std::move(counters), tag);
 }
 

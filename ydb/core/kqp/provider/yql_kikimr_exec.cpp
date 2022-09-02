@@ -17,6 +17,12 @@ using namespace NCommon;
 using namespace NThreading;
 
 namespace {
+    NThreading::TFuture<IKikimrGateway::TGenericResult> CreateDummySuccess() {
+        IKikimrGateway::TGenericResult result;
+        result.SetSuccess();
+        return NThreading::MakeFuture(result);
+    }
+
     bool EnsureNotPrepare(const TString featureName, TPositionHandle pos, const TKikimrQueryContext& queryCtx,
         TExprContext& ctx)
     {
@@ -467,7 +473,8 @@ public:
                 return SyncError();
             }
 
-            auto future = Gateway->CreateTable(table.Metadata, true);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->CreateTable(table.Metadata, true);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -494,7 +501,8 @@ public:
                 return SyncError();
             }
 
-            auto future = Gateway->DropTable(table.Metadata->Cluster, table.Metadata->Name);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->DropTable(table.Metadata->Cluster, table.Metadata->Name);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -811,6 +819,88 @@ public:
                 } else if (name == "dropIndex") {
                     auto nameNode = action.Value().Cast<TCoAtom>();
                     alterTableRequest.add_drop_indexes(TString(nameNode.Value()));
+                } else if (name == "addChangefeed") {
+                    auto listNode = action.Value().Cast<TExprList>();
+                    auto add_changefeed = alterTableRequest.add_add_changefeeds();
+                    for (size_t i = 0; i < listNode.Size(); ++i) {
+                        auto item = listNode.Item(i);
+                        auto columnTuple = item.Cast<TExprList>();
+                        auto nameNode = columnTuple.Item(0).Cast<TCoAtom>();
+                        auto name = TString(nameNode.Value());
+                        if (name == "name") {
+                            add_changefeed->set_name(TString(columnTuple.Item(1).Cast<TCoAtom>().Value()));
+                        } else if (name == "settings") {
+                            for (const auto& setting : columnTuple.Item(1).Cast<TCoNameValueTupleList>()) {
+                                auto name = setting.Name().Value();
+                                if (name == "mode") {
+                                    auto mode = TString(
+                                        setting.Value().Cast<TCoDataCtor>().Literal().Cast<TCoAtom>().Value()
+                                    );
+
+                                    if (to_lower(mode) == "keys_only") {
+                                        add_changefeed->set_mode(Ydb::Table::ChangefeedMode::MODE_KEYS_ONLY);
+                                    } else if (to_lower(mode) == "updates") {
+                                        add_changefeed->set_mode(Ydb::Table::ChangefeedMode::MODE_UPDATES);
+                                    } else if (to_lower(mode) == "new_image") {
+                                        add_changefeed->set_mode(Ydb::Table::ChangefeedMode::MODE_NEW_IMAGE);
+                                    } else if (to_lower(mode) == "old_image") {
+                                        add_changefeed->set_mode(Ydb::Table::ChangefeedMode::MODE_OLD_IMAGE);
+                                    } else if (to_lower(mode) == "new_and_old_images") {
+                                        add_changefeed->set_mode(Ydb::Table::ChangefeedMode::MODE_NEW_AND_OLD_IMAGES);
+                                    } else {
+                                        ctx.AddError(TIssue(ctx.GetPosition(setting.Name().Pos()),
+                                            TStringBuilder() << "Unknown changefeed mode: " << mode));
+                                        return SyncError();
+                                    }
+                                } else if (name == "format") {
+                                    auto format = TString(
+                                        setting.Value().Cast<TCoDataCtor>().Literal().Cast<TCoAtom>().Value()
+                                    );
+
+                                    if (to_lower(format) == "json") {
+                                        add_changefeed->set_format(Ydb::Table::ChangefeedFormat::FORMAT_JSON);
+                                    } else {
+                                        ctx.AddError(TIssue(ctx.GetPosition(setting.Name().Pos()),
+                                            TStringBuilder() << "Unknown changefeed format: " << format));
+                                        return SyncError();
+                                    }
+                                } else if (name == "local") {
+                                    // nop
+                                } else {
+                                    ctx.AddError(TIssue(ctx.GetPosition(setting.Name().Pos()),
+                                        TStringBuilder() << "Unknown changefeed setting: " << name));
+                                    return SyncError();
+                                }
+                            }
+                        } else if (name == "state") {
+                            YQL_ENSURE(!columnTuple.Item(1).Maybe<TCoAtom>());
+                        } else {
+                            ctx.AddError(TIssue(ctx.GetPosition(nameNode.Pos()),
+                                TStringBuilder() << "Unknown add changefeed setting: " << name));
+                            return SyncError();
+                        }
+                    }
+                } else if (name == "dropChangefeed") {
+                    auto nameNode = action.Value().Cast<TCoAtom>();
+                    alterTableRequest.add_drop_changefeeds(TString(nameNode.Value()));
+                } else if (name == "renameIndexTo") {
+                    auto listNode = action.Value().Cast<TExprList>();
+                    auto renameIndexes = alterTableRequest.add_rename_indexes();
+                    for (size_t i = 0; i < listNode.Size(); ++i) {
+                        auto item = listNode.Item(i);
+                        auto columnTuple = item.Cast<TExprList>();
+                        auto nameNode = columnTuple.Item(0).Cast<TCoAtom>();
+                        auto name = TString(nameNode.Value());
+                        if (name == "src") {
+                            renameIndexes->set_source_name(columnTuple.Item(1).Cast<TCoAtom>().StringValue());
+                        } else if (name == "dst") {
+                            renameIndexes->set_destination_name(columnTuple.Item(1).Cast<TCoAtom>().StringValue());
+                        } else {
+                            ctx.AddError(TIssue(ctx.GetPosition(action.Name().Pos()),
+                                TStringBuilder() << "Unknown renameIndexTo param: " << name));
+                            return SyncError();
+                        }
+                    }
                 } else {
                     ctx.AddError(TIssue(ctx.GetPosition(action.Name().Pos()),
                         TStringBuilder() << "Unknown alter table action: " << name));
@@ -818,7 +908,8 @@ public:
                 }
             }
 
-            auto future = Gateway->AlterTable(std::move(alterTableRequest), cluster);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->AlterTable(std::move(alterTableRequest), cluster);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -842,7 +933,8 @@ public:
             auto cluster = TString(maybeCreateUser.Cast().DataSink().Cluster());
             TCreateUserSettings createUserSettings = ParseCreateUserSettings(maybeCreateUser.Cast());
 
-            auto future = Gateway->CreateUser(cluster, createUserSettings);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->CreateUser(cluster, createUserSettings);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -865,7 +957,8 @@ public:
             auto cluster = TString(maybeAlterUser.Cast().DataSink().Cluster());
             TAlterUserSettings alterUserSettings = ParseAlterUserSettings(maybeAlterUser.Cast());
 
-            auto future = Gateway->AlterUser(cluster, alterUserSettings);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->AlterUser(cluster, alterUserSettings);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -888,7 +981,8 @@ public:
             auto cluster = TString(maybeDropUser.Cast().DataSink().Cluster());
             TDropUserSettings dropUserSettings = ParseDropUserSettings(maybeDropUser.Cast());
 
-            auto future = Gateway->DropUser(cluster, dropUserSettings);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->DropUser(cluster, dropUserSettings);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -911,7 +1005,8 @@ public:
             auto cluster = TString(maybeCreateGroup.Cast().DataSink().Cluster());
             TCreateGroupSettings createGroupSettings = ParseCreateGroupSettings(maybeCreateGroup.Cast());
 
-            auto future = Gateway->CreateGroup(cluster, createGroupSettings);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->CreateGroup(cluster, createGroupSettings);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -934,7 +1029,8 @@ public:
             auto cluster = TString(maybeAlterGroup.Cast().DataSink().Cluster());
             TAlterGroupSettings alterGroupSettings = ParseAlterGroupSettings(maybeAlterGroup.Cast());
 
-            auto future = Gateway->AlterGroup(cluster, alterGroupSettings);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->AlterGroup(cluster, alterGroupSettings);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -957,7 +1053,8 @@ public:
             auto cluster = TString(maybeDropGroup.Cast().DataSink().Cluster());
             TDropGroupSettings dropGroupSettings = ParseDropGroupSettings(maybeDropGroup.Cast());
 
-            auto future = Gateway->DropGroup(cluster, dropGroupSettings);
+            bool prepareOnly = SessionCtx->Query().PrepareOnly;
+            auto future = prepareOnly ? CreateDummySuccess() : Gateway->DropGroup(cluster, dropGroupSettings);
 
             return WrapFuture(future,
                 [](const IKikimrGateway::TGenericResult& res, const TExprNode::TPtr& input, TExprContext& ctx) {
@@ -1022,7 +1119,7 @@ private:
             auto profile = config->Profile.Get(cluster);
             if (profile && *profile) {
                 // Do not disable profiling if it was enabled at request level
-                settings.StatsMode = EKikimrStatsMode::Profile;
+                settings.StatsMode = EKikimrStatsMode::Full;
             }
 
             asyncResult = runFunc(settings);
@@ -1101,10 +1198,10 @@ private:
 
         for (const auto& op : tableOps) {
             auto table = op.GetTable();
+            auto operation = static_cast<TYdbOperation>(op.GetOperation());
             const auto& desc = SessionCtx->Tables().GetTable(cluster, table);
             YQL_ENSURE(desc.Metadata);
-            tableInfo.push_back(NKqpProto::TKqpTableInfo());
-            TableDescriptionToTableInfo(desc, &tableInfo.back());
+            TableDescriptionToTableInfo(desc, operation, tableInfo);
         }
 
         if (!SessionCtx->HasTx()) {

@@ -1,11 +1,12 @@
 #pragma once
 
 #include <ydb/library/yql/minikql/computation/mkql_computation_node_holders.h>
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_sources.h>
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_output.h>
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io.h>
 #include <ydb/library/yql/dq/actors/protos/dq_events.pb.h>
 #include <ydb/library/yql/dq/proto/dq_checkpoint.pb.h>
+#include <ydb/library/yql/minikql/computation/mkql_value_builder.h>
 #include <ydb/library/yql/minikql/mkql_alloc.h>
+#include <ydb/library/yql/minikql/mkql_program_builder.h>
 
 #include <ydb/core/testlib/basics/runtime.h>
 
@@ -54,12 +55,12 @@ namespace {
     };
 }
 
-struct TSourcePromises {
-    NThreading::TPromise<void> NewSourceDataArrived = NThreading::NewPromise();
+struct TAsyncInputPromises {
+    NThreading::TPromise<void> NewAsyncInputDataArrived = NThreading::NewPromise();
     NThreading::TPromise<TIssues> FatalError = NThreading::NewPromise<TIssues>();
 };
 
-struct TSinkPromises {
+struct TAsyncOutputPromises {
     NThreading::TPromise<void> ResumeExecution = NThreading::NewPromise();
     NThreading::TPromise<TIssues> Issue = NThreading::NewPromise<TIssues>();
     NThreading::TPromise<NDqProto::TSinkState> StateSaved = NThreading::NewPromise<NDqProto::TSinkState>();
@@ -68,66 +69,70 @@ struct TSinkPromises {
 NYql::NDqProto::TCheckpoint CreateCheckpoint(ui64 id = 0);
 
 class TFakeActor : public NActors::TActor<TFakeActor> {
-    struct TSourceEvents {
-        explicit TSourceEvents(TFakeActor& parent) : Parent(parent) {}
+    struct TAsyncInputEvents {
+        explicit TAsyncInputEvents(TFakeActor& parent) : Parent(parent) {}
 
-        void OnNewSourceDataArrived(ui64) {
-            Parent.SourcePromises.NewSourceDataArrived.SetValue();
-            Parent.SourcePromises.NewSourceDataArrived = NThreading::NewPromise();
+        void OnNewAsyncInputDataArrived(ui64) {
+            Parent.AsyncInputPromises.NewAsyncInputDataArrived.SetValue();
+            Parent.AsyncInputPromises.NewAsyncInputDataArrived = NThreading::NewPromise();
         }
 
-        void OnSourceError(ui64, const TIssues& issues, bool isFatal) {
-            Y_UNUSED(isFatal);
-            Parent.SourcePromises.FatalError.SetValue(issues);
-            Parent.SourcePromises.FatalError = NThreading::NewPromise<TIssues>();
+        void OnAsyncInputError(ui64, const TIssues& issues, NYql::NDqProto::StatusIds::StatusCode fatalCode) {
+            Y_UNUSED(fatalCode);
+            Parent.AsyncInputPromises.FatalError.SetValue(issues);
+            Parent.AsyncInputPromises.FatalError = NThreading::NewPromise<TIssues>();
         }
 
         TFakeActor& Parent;
     };
 
-    struct TSinkCallbacks : public IDqComputeActorAsyncOutput::ICallbacks {
-        explicit TSinkCallbacks(TFakeActor& parent) : Parent(parent) {}
+    struct TAsyncOutputCallbacks : public IDqComputeActorAsyncOutput::ICallbacks {
+        explicit TAsyncOutputCallbacks(TFakeActor& parent) : Parent(parent) {}
 
         void ResumeExecution() override {
-            Parent.SinkPromises.ResumeExecution.SetValue();
-            Parent.SinkPromises.ResumeExecution = NThreading::NewPromise();
+            Parent.AsyncOutputPromises.ResumeExecution.SetValue();
+            Parent.AsyncOutputPromises.ResumeExecution = NThreading::NewPromise();
         };
 
-        void OnSinkError(ui64, const TIssues& issues, bool isFatal) override {
-            Y_UNUSED(isFatal);
-            Parent.SinkPromises.Issue.SetValue(issues);
-            Parent.SinkPromises.Issue = NThreading::NewPromise<TIssues>();
+        void OnAsyncOutputError(ui64, const TIssues& issues, NYql::NDqProto::StatusIds::StatusCode fatalCode) override {
+            Y_UNUSED(fatalCode);
+            Parent.AsyncOutputPromises.Issue.SetValue(issues);
+            Parent.AsyncOutputPromises.Issue = NThreading::NewPromise<TIssues>();
         };
 
-        void OnSinkStateSaved(NDqProto::TSinkState&& state, ui64 outputIndex, const NDqProto::TCheckpoint&) override {
+        void OnAsyncOutputStateSaved(NDqProto::TSinkState&& state, ui64 outputIndex, const NDqProto::TCheckpoint&) override {
             Y_UNUSED(outputIndex);
-            Parent.SinkPromises.StateSaved.SetValue(state);
-            Parent.SinkPromises.StateSaved = NThreading::NewPromise<NDqProto::TSinkState>();
+            Parent.AsyncOutputPromises.StateSaved.SetValue(state);
+            Parent.AsyncOutputPromises.StateSaved = NThreading::NewPromise<NDqProto::TSinkState>();
         };
+
+        void OnAsyncOutputFinished(ui64 outputIndex) override {
+            Y_UNUSED(outputIndex);
+        }
 
         TFakeActor& Parent;
     };
 
 public:
-    TFakeActor(TSourcePromises& sourcePromises, TSinkPromises& sinkPromises);
+    TFakeActor(TAsyncInputPromises& sourcePromises, TAsyncOutputPromises& asyncOutputPromises);
     ~TFakeActor();
 
-    void InitSink(IDqComputeActorAsyncOutput* dqSink, IActor* dqSinkAsActor);
-    void InitSource(IDqSourceActor* dqSource, IActor* dqSourceAsActor);
+    void InitAsyncOutput(IDqComputeActorAsyncOutput* dqAsyncOutput, IActor* dqAsyncOutputAsActor);
+    void InitAsyncInput(IDqComputeActorAsyncInput* dqAsyncInput, IActor* dqAsyncInputAsActor);
     void Terminate();
 
-    TSinkCallbacks& GetSinkCallbacks();
+    TAsyncOutputCallbacks& GetAsyncOutputCallbacks();
     NKikimr::NMiniKQL::THolderFactory& GetHolderFactory();
 
 public:
-    IDqSourceActor* DqSourceActor = nullptr;
-    IDqComputeActorAsyncOutput* DqSink = nullptr;
+    IDqComputeActorAsyncInput* DqAsyncInput = nullptr;
+    IDqComputeActorAsyncOutput* DqAsyncOutput = nullptr;
 
 private:
     STRICT_STFUNC(StateFunc,
         hFunc(TEvPrivate::TEvExecute, Handle);
-        hFunc(IDqSourceActor::TEvNewSourceDataArrived, Handle);
-        hFunc(IDqSourceActor::TEvSourceError, Handle);
+        hFunc(IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived, Handle);
+        hFunc(IDqComputeActorAsyncInput::TEvAsyncInputError, Handle);
     )
 
     void Handle(TEvPrivate::TEvExecute::TPtr& ev) {
@@ -140,29 +145,36 @@ private:
         ev->Get()->Promise.SetValue();
     }
 
-    void Handle(const IDqSourceActor::TEvNewSourceDataArrived::TPtr& ev) {
-        SourceEvents.OnNewSourceDataArrived(ev->Get()->InputIndex);
+    void Handle(const IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived::TPtr& ev) {
+        AsyncInputEvents.OnNewAsyncInputDataArrived(ev->Get()->InputIndex);
     }
 
-    void Handle(const IDqSourceActor::TEvSourceError::TPtr& ev) {
-        SourceEvents.OnSourceError(ev->Get()->InputIndex, ev->Get()->Issues, ev->Get()->IsFatal);
+    void Handle(const IDqComputeActorAsyncInput::TEvAsyncInputError::TPtr& ev) {
+        AsyncInputEvents.OnAsyncInputError(ev->Get()->InputIndex, ev->Get()->Issues, ev->Get()->FatalCode);
     }
-private:
+
+public:
     NKikimr::NMiniKQL::TScopedAlloc Alloc;
     NKikimr::NMiniKQL::TMemoryUsageInfo MemoryInfo;
     NKikimr::NMiniKQL::THolderFactory HolderFactory;
 
-    std::optional<NActors::TActorId> DqSourceActorId;
-    IActor* DqSourceActorAsActor = nullptr;
+    NKikimr::NMiniKQL::TTypeEnvironment TypeEnv;
+    TIntrusivePtr<NKikimr::NMiniKQL::IFunctionRegistry> FunctionRegistry;
+    NKikimr::NMiniKQL::TProgramBuilder ProgramBuilder;
+    NKikimr::NMiniKQL::TDefaultValueBuilder ValueBuilder;
 
-    std::optional<NActors::TActorId> DqSinkActorId;
-    IActor* DqSinkAsActor = nullptr;
+private:
+    std::optional<NActors::TActorId> DqAsyncInputActorId;
+    IActor* DqAsyncInputAsActor = nullptr;
 
-    TSourceEvents SourceEvents;
-    TSinkCallbacks SinkCallbacks;
+    std::optional<NActors::TActorId> DqAsyncOutputActorId;
+    IActor* DqAsyncOutputAsActor = nullptr;
 
-    TSourcePromises& SourcePromises;
-    TSinkPromises& SinkPromises;
+    TAsyncInputEvents AsyncInputEvents;
+    TAsyncOutputCallbacks AsyncOutputCallbacks;
+
+    TAsyncInputPromises& AsyncInputPromises;
+    TAsyncOutputPromises& AsyncOutputPromises;
 };
 
 struct TFakeCASetup {
@@ -170,12 +182,12 @@ struct TFakeCASetup {
     ~TFakeCASetup();
 
     template<typename T>
-    std::vector<T> SourceRead(const TReadValueParser<T> parser, i64 freeSpace = 12345) {
+    std::vector<T> AsyncInputRead(const TReadValueParser<T> parser, i64 freeSpace = 12345) {
         std::vector<T> result;
         Execute([&result, &parser, freeSpace](TFakeActor& actor) {
             NKikimr::NMiniKQL::TUnboxedValueVector buffer;
             bool finished = false;
-            actor.DqSourceActor->GetSourceData(buffer, finished, freeSpace);
+            actor.DqAsyncInput->GetAsyncInputData(buffer, finished, freeSpace);
 
             for (const auto& uv : buffer) {
                 for (const auto item : parser(uv)) {
@@ -188,7 +200,7 @@ struct TFakeCASetup {
     }
 
     template<typename T>
-    std::vector<T> SourceReadUntil(
+    std::vector<T> AsyncInputReadUntil(
         const TReadValueParser<T> parser,
         ui64 size,
         i64 eachReadFreeSpace = 1000,
@@ -196,13 +208,13 @@ struct TFakeCASetup {
     {
         std::vector<T> result;
         DoWithRetry([&](){
-                auto batch = SourceRead<T>(parser, eachReadFreeSpace);
+                auto batch = AsyncInputRead<T>(parser, eachReadFreeSpace);
                 for (const auto& item : batch) {
                     result.emplace_back(item);
                 }
 
                 if (result.size() < size) {
-                    SourcePromises.NewSourceDataArrived.GetFuture().Wait(timeout);
+                    AsyncInputPromises.NewAsyncInputDataArrived.GetFuture().Wait(timeout);
                     ythrow yexception() << "Not enough data";
                 }
             },
@@ -212,7 +224,7 @@ struct TFakeCASetup {
         return result;
     }
 
-    void SinkWrite(const TWriteValueProducer valueProducer, TMaybe<NDqProto::TCheckpoint> checkpoint = Nothing());
+    void AsyncOutputWrite(const TWriteValueProducer valueProducer, TMaybe<NDqProto::TCheckpoint> checkpoint = Nothing(), bool finish = false);
 
     void SaveSourceState(NDqProto::TCheckpoint checkpoint, NDqProto::TSourceState& state);
 
@@ -224,8 +236,8 @@ struct TFakeCASetup {
 public:
     TRuntimePtr Runtime;
     NActors::TActorId FakeActorId;
-    TSourcePromises SourcePromises;
-    TSinkPromises SinkPromises;
+    TAsyncInputPromises AsyncInputPromises;
+    TAsyncOutputPromises AsyncOutputPromises;
 };
 
 } // namespace NKikimr::NMiniKQL

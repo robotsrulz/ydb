@@ -9,22 +9,30 @@ import six
 
 _lock = threading.Lock()
 
+_config = None
+
+
+def _set_ya_config(config=None, ya=None):
+    global _config
+    if config:
+        _config = config
+    elif ya:
+        class Config:
+            def __init__(self):
+                self.ya = None
+        _config = Config()
+        _config.ya = ya
+
 
 def _get_ya_config():
-    try:
-        import library.python.pytest.plugins.ya as ya_plugin
-        if ya_plugin.pytest_config is not None:
-            return ya_plugin.pytest_config
-        import pytest
-        return pytest.config
-    except (ImportError, AttributeError):
+    if _config:
+        return _config
+    else:
         try:
-            import library.python.testing.recipe
-            if library.python.testing.recipe.ya:
-                return library.python.testing.recipe
+            import pytest
+            return pytest.config
         except (ImportError, AttributeError):
-            pass
-        raise NotImplementedError("yatest.common.* is only available from the testing runtime")
+            raise NotImplementedError("yatest.common.* is only available from the testing runtime")
 
 
 def _get_ya_plugin_instance():
@@ -131,6 +139,8 @@ def ram_drive_path(path=None):
     """
     if 'YA_TEST_RAM_DRIVE_PATH' in os.environ:
         return _join_path(os.environ['YA_TEST_RAM_DRIVE_PATH'], path)
+    elif get_param("ram_drive_path"):
+        return _join_path(get_param("ram_drive_path"), path)
 
 
 def output_ram_drive_path(path=None):
@@ -141,6 +151,8 @@ def output_ram_drive_path(path=None):
     """
     if 'YA_TEST_OUTPUT_RAM_DRIVE_PATH' in os.environ:
         return _join_path(os.environ['YA_TEST_OUTPUT_RAM_DRIVE_PATH'], path)
+    elif _get_ya_plugin_instance().get_context("test_output_ram_drive_path"):
+        return _join_path(_get_ya_plugin_instance().get_context("test_output_ram_drive_path"), path)
 
 
 def binary_path(path=None):
@@ -256,7 +268,10 @@ def cxx_compiler_path():
 
 def global_resources():
     try:
-        return json.loads(os.environ.get("YA_GLOBAL_RESOURCES"))
+        if "YA_GLOBAL_RESOURCES" in os.environ:
+            return json.loads(os.environ.get("YA_GLOBAL_RESOURCES"))
+        else:
+            return _get_ya_plugin_instance().get_context("ya_global_resources")
     except (TypeError, ValueError):
         return {}
 
@@ -314,6 +329,10 @@ class Context(object):
     @property
     def test_name(self):
         return _get_ya_config().current_test_name
+
+    @property
+    def test_tool_path(self):
+        return _get_ya_plugin_instance().get_context("test_tool_path")
 
     @property
     def sanitize(self):

@@ -12,7 +12,7 @@ namespace NKikimr::NGRpcProxy::V1 {
 TReadInitAndAuthActor::TReadInitAndAuthActor(
         const TActorContext& ctx, const TActorId& parentId, const TString& clientId, const ui64 cookie,
         const TString& session, const NActors::TActorId& metaCache, const NActors::TActorId& newSchemeCache,
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters, TIntrusivePtr<NACLib::TUserToken> token,
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters, TIntrusivePtr<NACLib::TUserToken> token,
         const NPersQueue::TTopicsToConverter& topics, const TString& localCluster
 )
     : ParentId(parentId)
@@ -50,13 +50,17 @@ void TReadInitAndAuthActor::DescribeTopics(const NActors::TActorContext& ctx, bo
     }
 
     //LOG_DEBUG_S(ctx, NKikimrServices::PQ_READ_PROXY, PQ_LOG_PREFIX << " describe topics: " << JoinSeq(", ", topicNames));
-    ctx.Send(MetaCacheId, new TEvDescribeTopicsRequest(topics, showPrivate));
+    ctx.Send(MetaCacheId, new TEvDescribeTopicsRequest(topics, true, showPrivate));
 }
 
 void TReadInitAndAuthActor::Die(const TActorContext& ctx) {
     for (auto& [_, holder] : Topics) {
         if (holder.PipeClient)
             NTabletPipe::CloseClient(ctx, holder.PipeClient);
+
+        // In case of cdc, primary path (actual cdc stream path) was overwritten, so restore previous value
+        if (holder.CdcStreamPath)
+            holder.DiscoveryConverter->RestorePrimaryPath();
     }
 
     LOG_DEBUG_S(ctx, NKikimrServices::PQ_READ_PROXY, PQ_LOG_PREFIX << " auth is DEAD");
@@ -93,9 +97,18 @@ bool TReadInitAndAuthActor::ProcessTopicSchemeCacheResponse(
     topicsIter->second.CloudId = pqDescr.GetPQTabletConfig().GetYcCloudId();
     topicsIter->second.DbId = pqDescr.GetPQTabletConfig().GetYdbDatabaseId();
     topicsIter->second.FolderId = pqDescr.GetPQTabletConfig().GetYcFolderId();
+    if (!topicsIter->second.DiscoveryConverter->IsValid()) {
+        TString errorReason = Sprintf("Internal server error with topic '%s', Marker# PQ503",
+                                      topicsIter->second.DiscoveryConverter->GetPrintableString().c_str());
+        CloseSession(errorReason, PersQueue::ErrorCode::ERROR, ctx);
+        return false;
+    }
     topicsIter->second.FullConverter = topicsIter->second.DiscoveryConverter->UpgradeToFullConverter(
-            pqDescr.GetPQTabletConfig()
+        pqDescr.GetPQTabletConfig(),
+        AppData(ctx)->PQConfig.GetTestDatabaseRoot(),
+        topicsIter->second.CdcStreamPath
     );
+    Y_VERIFY(topicsIter->second.FullConverter->IsValid());
     return CheckTopicACL(entry, topicsIter->first, ctx);
 }
 
@@ -107,7 +120,7 @@ void TReadInitAndAuthActor::HandleTopicsDescribeResponse(TEvDescribeTopicsRespon
     auto i = 0u;
     auto& topicsRequested = ev->Get()->TopicsRequested;
     for (const auto& entry : ev->Get()->Result->ResultSet) {
-        const auto& path = topicsRequested[i++]->GetInternalName();
+        const auto& path = topicsRequested[i++]->GetOriginalPath();
         auto it = Topics.find(path);
         Y_VERIFY(it != Topics.end());
 
@@ -115,9 +128,12 @@ void TReadInitAndAuthActor::HandleTopicsDescribeResponse(TEvDescribeTopicsRespon
             Y_VERIFY(entry.ListNodeEntry->Children.size() == 1);
             const auto& topic = entry.ListNodeEntry->Children.at(0);
 
+            // primary path used to re-describe
             it->second.DiscoveryConverter->SetPrimaryPath(JoinPath(ChildPath(entry.Path, topic.Name)));
-            Topics[it->second.DiscoveryConverter->GetInternalName()] = it->second;
-            Topics.erase(it);
+            it->second.CdcStreamPath = CanonizePath(entry.Path);
+
+//            Topics[it->second.DiscoveryConverter->GetInternalName()] = it->second;
+//            Topics.erase(it);
 
             reDescribe = true;
             continue;
@@ -178,6 +194,7 @@ bool TReadInitAndAuthActor::CheckTopicACL(
                 break;
             }
         }
+        //TODO : add here checking of client-service-type password. Provide it via API-call.
         if (!found) {
             CloseSession(
                     TStringBuilder() << "no read rule provided for consumer '" << ClientPath << "' in topic '" << topic << "' in current cluster '" << LocalCluster,
@@ -241,9 +258,9 @@ bool TReadInitAndAuthActor::CheckACLPermissionsForNavigate(
 
 
 void TReadInitAndAuthActor::FinishInitialization(const TActorContext& ctx) {
-    TTopicTabletsPairs res;
-    for (auto& [_, holder] : Topics) {
-        res.emplace_back(decltype(res)::value_type({
+    TTopicInitInfoMap res;
+    for (auto& [name, holder] : Topics) {
+        res.insert(std::make_pair(name, TTopicInitInfo{
             holder.FullConverter, holder.TabletID, holder.CloudId, holder.DbId, holder.FolderId
         }));
     }

@@ -89,7 +89,10 @@ namespace NSQLTranslationV1 {
 
         const NYql::TPosition& Pos() const;
 
-        void ClearBlockScope();
+        void PushCurrentBlocks(TBlocks* blocks);
+        void PopCurrentBlocks();
+        TBlocks& GetCurrentBlocks() const;
+
         TString MakeName(const TString& name);
 
         IOutputStream& Error(NYql::TIssueCode code = NYql::TIssuesIds::DEFAULT_ERROR);
@@ -159,6 +162,7 @@ namespace NSQLTranslationV1 {
             return IntoHeading;
         }
 
+        bool IsAlreadyDeclared(const TString& varName) const;
         void DeclareVariable(const TString& varName, const TNodePtr& typeNode);
 
         bool AddExport(TPosition symbolPos, const TString& symbolName);
@@ -206,6 +210,7 @@ namespace NSQLTranslationV1 {
         EColumnRefState ColumnReferenceState = EColumnRefState::Deny;
         EColumnRefState TopLevelColumnReferenceState = EColumnRefState::Deny;
         TString NoColumnErrorContext = "in current scope";
+        TVector<TBlocks*> CurrentBlocks;
 
     public:
         THashMap<TString, TNodePtr> Variables;
@@ -248,6 +253,7 @@ namespace NSQLTranslationV1 {
         TMaybe<bool> AnsiInForEmptyOrNullableItemsCollections;
         TMaybe<bool> AnsiRankForNullableKeys = true;
         TMaybe<bool> AnsiOrderByLimitInUnionAll = true;
+        bool EnforceAnsiOrderByLimitInUnionAll = false;
         const bool AnsiQuotedIdentifiers;
         bool AnsiOptionalAs = true;
         bool OrderedColumns = false;
@@ -264,10 +270,13 @@ namespace NSQLTranslationV1 {
         bool FlexibleTypes = false;
         // see YQL-10265
         bool AnsiCurrentRow = false;
+        TMaybe<bool> YsonCastToString;
         THashMap<TString, TMaybe<TString>> Libraries; // alias -> optional file
         THashMap<TString, ui32> PackageVersions;
         NYql::TWarningPolicy WarningPolicy;
         TString PqReadByRtmrCluster;
+        bool EmitStartsWith = true;
+        bool EmitAggApply = false;
     };
 
     class TColumnRefScope {

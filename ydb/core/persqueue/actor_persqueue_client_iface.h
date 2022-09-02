@@ -13,6 +13,8 @@
 
 namespace NKikimr::NPQ {
 
+constexpr ui64 MaxMessageSize = 150_MB;
+
 class IPersQueueMirrorReaderFactory {
 public:
     IPersQueueMirrorReaderFactory()
@@ -27,6 +29,7 @@ public:
         ActorSystemPtr->store(actorSystem, std::memory_order_relaxed);
 
         auto driverConfig = NYdb::TDriverConfig()
+            .SetMaxMessageSize(MaxMessageSize)
             .SetNetworkThreadsNum(settings.GetThreadsCount());
         Driver = std::make_shared<NYdb::TDriver>(driverConfig);
     }
@@ -78,6 +81,7 @@ public:
     ) const override {
         NYdb::NPersQueue::TPersQueueClientSettings clientSettings = NYdb::NPersQueue::TPersQueueClientSettings()
             .DiscoveryEndpoint(TStringBuilder() << config.GetEndpoint() << ":" << config.GetEndpointPort())
+            .DiscoveryMode(NYdb::EDiscoveryMode::Async)
             .CredentialsProviderFactory(credentialsProviderFactory)
             .EnableSsl(config.GetUseSecureConnection());
         if (config.HasDatabase()) {

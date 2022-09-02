@@ -1,4 +1,5 @@
 #include "interconnect_handshake.h"
+#include "handshake_broker.h"
 #include "interconnect_tcp_proxy.h"
 
 #include <library/cpp/actors/core/actor_coroutine.h>
@@ -96,6 +97,7 @@ namespace NActors {
         THashMap<ui32, TInstant> LastLogNotice;
         const TDuration MuteDuration = TDuration::Seconds(15);
         TInstant Deadline;
+        TActorId HandshakeBroker;
 
     public:
         static constexpr IActor::EActivityType ActorActivityType() {
@@ -117,6 +119,7 @@ namespace NActors {
             Y_VERIFY(SelfVirtualId);
             Y_VERIFY(SelfVirtualId.NodeId());
             Y_VERIFY(PeerNodeId);
+            HandshakeBroker = MakeHandshakeBrokerOutId();
         }
 
         THandshakeActor(TInterconnectProxyCommon::TPtr common, TSocketPtr socket)
@@ -132,6 +135,7 @@ namespace NActors {
             } else {
                 PeerAddr.clear();
             }
+            HandshakeBroker = MakeHandshakeBrokerInId();
         }
 
         void UpdatePrefix() {
@@ -141,45 +145,64 @@ namespace NActors {
         void Run() override {
             UpdatePrefix();
 
-            // set up overall handshake process timer
-            TDuration timeout = Common->Settings.Handshake;
-            if (timeout == TDuration::Zero()) {
-                timeout = DEFAULT_HANDSHAKE_TIMEOUT;
+            bool isBrokerActive = false;
+
+            if (Send(HandshakeBroker, new TEvHandshakeBrokerTake())) {
+                isBrokerActive = true;
+                WaitForSpecificEvent<TEvHandshakeBrokerPermit>("HandshakeBrokerPermit");
             }
-            timeout += ResolveTimeout * 2;
-            Deadline = Now() + timeout;
-            Schedule(Deadline, new TEvents::TEvWakeup);
 
             try {
-                if (Socket) {
-                    PerformIncomingHandshake();
-                } else {
-                    PerformOutgoingHandshake();
+                // set up overall handshake process timer
+                TDuration timeout = Common->Settings.Handshake;
+                if (timeout == TDuration::Zero()) {
+                    timeout = DEFAULT_HANDSHAKE_TIMEOUT;
                 }
+                timeout += ResolveTimeout * 2;
+                Deadline = Now() + timeout;
+                Schedule(Deadline, new TEvents::TEvWakeup);
 
-                // establish encrypted channel, or, in case when encryption is disabled, check if it matches settings
-                if (ProgramInfo) {
-                    if (Params.Encryption) {
-                        EstablishSecureConnection();
-                    } else if (Common->Settings.EncryptionMode == EEncryptionMode::REQUIRED && !Params.AuthOnly) {
-                        Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "Peer doesn't support encryption, which is required");
+                try {
+                    if (Socket) {
+                        PerformIncomingHandshake();
+                    } else {
+                        PerformOutgoingHandshake();
                     }
+
+                    // establish encrypted channel, or, in case when encryption is disabled, check if it matches settings
+                    if (ProgramInfo) {
+                        if (Params.Encryption) {
+                            EstablishSecureConnection();
+                        } else if (Common->Settings.EncryptionMode == EEncryptionMode::REQUIRED && !Params.AuthOnly) {
+                            Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "Peer doesn't support encryption, which is required");
+                        }
+                    }
+                } catch (const TExHandshakeFailed&) {
+                    ProgramInfo.Clear();
                 }
-            } catch (const TExHandshakeFailed&) {
-                ProgramInfo.Clear();
+
+                if (ProgramInfo) {
+                    LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICH04", NLog::PRI_INFO, "handshake succeeded");
+                    Y_VERIFY(NextPacketFromPeer);
+                    if (PollerToken) {
+                        Y_VERIFY(PollerToken->RefCount() == 1);
+                        PollerToken.Reset(); // ensure we are going to destroy poller token here as we will re-register the socket within other actor
+                    }
+                    SendToProxy(MakeHolder<TEvHandshakeDone>(std::move(Socket), PeerVirtualId, SelfVirtualId,
+                        *NextPacketFromPeer, ProgramInfo->Release(), std::move(Params)));
+                }
+            } catch (const TDtorException&) {
+                throw; // we can't use actor system when handling this exception
+            } catch (...) {
+                if (isBrokerActive) {
+                    Send(HandshakeBroker, new TEvHandshakeBrokerFree());
+                }
+                throw;
             }
 
-            if (ProgramInfo) {
-                LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICH04", NLog::PRI_INFO, "handshake succeeded");
-                Y_VERIFY(NextPacketFromPeer);
-                if (PollerToken) {
-                    Y_VERIFY(PollerToken->RefCount() == 1);
-                    PollerToken.Reset(); // ensure we are going to destroy poller token here as we will re-register the socket within other actor
-                }
-                SendToProxy(MakeHolder<TEvHandshakeDone>(std::move(Socket), PeerVirtualId, SelfVirtualId,
-                    *NextPacketFromPeer, ProgramInfo->Release(), std::move(Params)));
+            if (isBrokerActive) {
+                Send(HandshakeBroker, new TEvHandshakeBrokerFree());
             }
-
             Socket.Reset();
         }
 
@@ -496,6 +519,7 @@ namespace NActors {
 
                 request.SetRequestModernFrame(true);
                 request.SetRequestAuthOnly(Common->Settings.TlsAuthOnly);
+                request.SetRequestExtendedTraceFmt(true);
 
                 SendExBlock(request, "ExRequest");
 
@@ -526,6 +550,7 @@ namespace NActors {
                 Params.Encryption = success.GetStartEncryption();
                 Params.UseModernFrame = success.GetUseModernFrame();
                 Params.AuthOnly = Params.Encryption && success.GetAuthOnly();
+                Params.UseExtendedTraceFmt = success.GetUseExtendedTraceFmt();
                 if (success.HasServerScopeId()) {
                     ParsePeerScopeId(success.GetServerScopeId());
                 }
@@ -549,6 +574,7 @@ namespace NActors {
 
             // set up incoming socket
             SetupSocket();
+            RegisterInPoller();
 
             // wait for initial request packet
             TInitialPacket request;
@@ -681,6 +707,7 @@ namespace NActors {
 
                 Params.UseModernFrame = request.GetRequestModernFrame();
                 Params.AuthOnly = Params.Encryption && request.GetRequestAuthOnly() && Common->Settings.TlsAuthOnly;
+                Params.UseExtendedTraceFmt = request.GetRequestExtendedTraceFmt();
 
                 if (request.HasClientScopeId()) {
                     ParsePeerScopeId(request.GetClientScopeId());
@@ -706,6 +733,7 @@ namespace NActors {
                     }
                     success.SetUseModernFrame(Params.UseModernFrame);
                     success.SetAuthOnly(Params.AuthOnly);
+                    success.SetUseExtendedTraceFmt(Params.UseExtendedTraceFmt);
                     SendExBlock(record, "ExReply");
 
                     // extract sender actor id (self virtual id)
@@ -828,59 +856,71 @@ namespace NActors {
                 Now() + ResolveTimeout);
 
             // extract address from the result
-            NInterconnect::TAddress address;
+            std::vector<NInterconnect::TAddress> addresses;
             if (!ev) {
                 ResolveTimedOut = true;
                 if (auto peerNodeInfo = GetPeerNodeInfo(); peerNodeInfo && peerNodeInfo->Address) {
-                    address = {peerNodeInfo->Address, peerNodeInfo->Port};
+                    addresses.emplace_back(peerNodeInfo->Address, peerNodeInfo->Port);
                 } else {
                     Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "DNS resolve timed out and no static address defined", true);
                 }
             } else if (auto *p = ev->CastAsLocal<TEvLocalNodeInfo>()) {
-                if (!p->Address) {
+                addresses = std::move(p->Addresses);
+                if (addresses.empty()) {
                     Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "DNS resolve error: no address returned", true);
                 }
-                address = {*p->Address};
             } else if (auto *p = ev->CastAsLocal<TEvInterconnect::TEvNodeAddress>()) {
                 const auto& r = p->Record;
                 if (!r.HasAddress() || !r.HasPort()) {
                     Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "DNS resolve error: no address returned", true);
                 }
-                address = {r.GetAddress(), static_cast<ui16>(r.GetPort())};
+                addresses.emplace_back(r.GetAddress(), static_cast<ui16>(r.GetPort()));
             } else {
                 Y_VERIFY(ev->GetTypeRewrite() == ui32(ENetwork::ResolveError));
-                Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "DNS resolve error: " + ev->Get<TEvResolveError>()->Explain, true);
+                Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "DNS resolve error: " + ev->Get<TEvResolveError>()->Explain 
+                    + ", Unresolved host# " + ev->Get<TEvResolveError>()->Host, true);
             }
 
-            // create the socket with matching address family
-            Socket = NInterconnect::TStreamSocket::Make(address.GetFamily());
-            if (*Socket == -1) {
-                Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "System error: failed to create socket");
-            }
+            for (const NInterconnect::TAddress& address : addresses) {
+                // create the socket with matching address family
+                int err = 0;
+                Socket = NInterconnect::TStreamSocket::Make(address.GetFamily(), &err);
+                if (err == EAFNOSUPPORT) {
+                    Socket.Reset();
+                    continue;
+                } else if (*Socket == -1) {
+                    Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "System error: failed to create socket");
+                }
 
-            // extract peer address
-            if (updatePeerAddr) {
-                PeerAddr = address.ToString();
-            }
+                // extract peer address
+                if (updatePeerAddr) {
+                    PeerAddr = address.ToString();
+                }
 
-            // set up socket parameters
-            SetupSocket();
+                // set up socket parameters
+                SetupSocket();
 
-            // start connecting
-            switch (int err = -Socket->Connect(address)) {
-                case 0: // successful connection
-                    break;
-
-                case EINPROGRESS: // connection in progress
+                // start connecting
+                err = -Socket->Connect(address);
+                if (err == EINPROGRESS) {
+                    RegisterInPoller();
                     WaitPoller(false, true, "WaitConnect");
                     err = Socket->GetConnectStatus();
-                    if (err) {
-                        Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, Sprintf("Connection failed: %s", strerror(err)), true);
-                    }
-                    break;
+                } else if (!err) {
+                    RegisterInPoller();
+                }
 
-                default:
+                // check if connection succeeded
+                if (err) {
+                    Socket.Reset();
+                    PollerToken.Reset();
+                } else {
                     break;
+                }
+            }
+
+            if (!Socket) {
+                Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "Couldn't connect to any resolved address", true);
             }
 
             auto it = LastLogNotice.find(PeerNodeId);
@@ -903,9 +943,6 @@ namespace NActors {
 
             // setup send buffer size
             Socket->SetSendBufferSize(Common->Settings.GetSendBufferSize());
-
-            // register in poller
-            RegisterInPoller();
         }
 
         void RegisterInPoller() {

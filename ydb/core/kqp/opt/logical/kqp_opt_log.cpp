@@ -19,13 +19,12 @@ class TKqpLogicalOptTransformer : public TOptimizeTransformerBase {
 public:
     TKqpLogicalOptTransformer(TTypeAnnotationContext& typesCtx, const TIntrusivePtr<TKqpOptimizeContext>& kqpCtx,
         const TKikimrConfiguration::TPtr& config)
-        : TOptimizeTransformerBase(nullptr, NLog::EComponent::ProviderKqp, {})
+        : TOptimizeTransformerBase(nullptr, NYql::NLog::EComponent::ProviderKqp, {})
         , TypesCtx(typesCtx)
         , KqpCtx(*kqpCtx)
         , Config(config)
     {
 #define HNDL(name) "KqpLogical-"#name, Hndl(&TKqpLogicalOptTransformer::name)
-        AddHandler(0, &TCoFlatMap::Match, HNDL(PushExtractedPredicateToReadTable));
         AddHandler(0, &TCoFlatMap::Match, HNDL(PushPredicateToReadTable));
         AddHandler(0, &TCoAggregate::Match, HNDL(RewriteAggregate));
         AddHandler(0, &TCoTake::Match, HNDL(RewriteTakeSortToTopSort));
@@ -45,9 +44,12 @@ public:
         AddHandler(0, &TKqlReadTableRangesBase::Match, HNDL(ApplyExtractMembersToReadTableRanges<false>));
         AddHandler(0, &TKqpReadOlapTableRangesBase::Match, HNDL(ApplyExtractMembersToReadOlapTable<false>));
         AddHandler(0, &TKqlLookupTableBase::Match, HNDL(ApplyExtractMembersToLookupTable<false>));
+        AddHandler(0, &TCoTopSort::Match, HNDL(TopSortOverExtend));
 
+        AddHandler(1, &TCoFlatMap::Match, HNDL(PushExtractedPredicateToReadTable));
         AddHandler(1, &TKqlReadTableIndex::Match, HNDL(RewriteIndexRead));
         AddHandler(1, &TKqlLookupIndex::Match, HNDL(RewriteLookupIndex));
+        AddHandler(1, &TKqlStreamLookupIndex::Match, HNDL(RewriteStreamLookupIndex));
 
         AddHandler(2, &TKqlReadTableBase::Match, HNDL(ApplyExtractMembersToReadTable<true>));
         AddHandler(2, &TKqlReadTableRangesBase::Match, HNDL(ApplyExtractMembersToReadTableRanges<true>));
@@ -73,7 +75,7 @@ protected:
     }
 
     TMaybeNode<TExprBase> RewriteAggregate(TExprBase node, TExprContext& ctx) {
-        TExprBase output = DqRewriteAggregate(node, ctx);
+        TExprBase output = DqRewriteAggregate(node, ctx, TypesCtx, false);
         DumpAppliedRule("RewriteAggregate", node.Ptr(), output.Ptr(), ctx);
         return output;
     }
@@ -144,6 +146,12 @@ protected:
         return output;
     }
 
+    TMaybeNode<TExprBase> RewriteStreamLookupIndex(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpRewriteStreamLookupIndex(node, ctx, KqpCtx);
+        DumpAppliedRule("RewriteStreamLookupIndex", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
     TMaybeNode<TExprBase> DeleteOverLookup(TExprBase node, TExprContext& ctx) {
         TExprBase output = KqpDeleteOverLookup(node, ctx, KqpCtx);
         DumpAppliedRule("DeleteOverLookup", node.Ptr(), output.Ptr(), ctx);
@@ -159,6 +167,12 @@ protected:
     TMaybeNode<TExprBase> DropTakeOverLookupTable(TExprBase node, TExprContext& ctx) {
         TExprBase output = KqpDropTakeOverLookupTable(node, ctx, KqpCtx);
         DumpAppliedRule("DropTakeOverLookupTable", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
+    TMaybeNode<TExprBase> TopSortOverExtend(TExprBase node, TExprContext& ctx, const TGetParents& getParents) {
+        auto output = KqpTopSortOverExtend(node, ctx, *getParents());
+        DumpAppliedRule("TopSortOverExtend", node.Ptr(), output.Ptr(), ctx);
         return output;
     }
 

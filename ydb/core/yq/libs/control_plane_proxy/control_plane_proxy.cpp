@@ -6,6 +6,7 @@
 #include <ydb/core/yq/libs/control_plane_storage/control_plane_storage.h>
 #include <ydb/core/yq/libs/control_plane_storage/events/events.h>
 #include <ydb/core/yq/libs/control_plane_storage/util.h>
+#include <ydb/core/yq/libs/quota_manager/quota_manager.h>
 #include <ydb/core/yq/libs/test_connection/test_connection.h>
 #include <ydb/core/yq/libs/test_connection/events/events.h>
 #include <ydb/core/yq/libs/ydb/util.h>
@@ -51,18 +52,18 @@ LWTRACE_USING(YQ_CONTROL_PLANE_PROXY_PROVIDER);
 struct TRequestCounters: public virtual TThrRefBase {
     const TString Name;
 
-    NMonitoring::TDynamicCounters::TCounterPtr InFly;
-    NMonitoring::TDynamicCounters::TCounterPtr Ok;
-    NMonitoring::TDynamicCounters::TCounterPtr Error;
-    NMonitoring::TDynamicCounters::TCounterPtr Timeout;
-    NMonitoring::THistogramPtr LatencyMs;
+    ::NMonitoring::TDynamicCounters::TCounterPtr InFly;
+    ::NMonitoring::TDynamicCounters::TCounterPtr Ok;
+    ::NMonitoring::TDynamicCounters::TCounterPtr Error;
+    ::NMonitoring::TDynamicCounters::TCounterPtr Timeout;
+    ::NMonitoring::THistogramPtr LatencyMs;
 
     explicit TRequestCounters(const TString& name)
         : Name(name)
     { }
 
-    void Register(const NMonitoring::TDynamicCounterPtr& counters) {
-        NMonitoring::TDynamicCounterPtr subgroup = counters->GetSubgroup("request", Name);
+    void Register(const ::NMonitoring::TDynamicCounterPtr& counters) {
+        ::NMonitoring::TDynamicCounterPtr subgroup = counters->GetSubgroup("request", Name);
         InFly = subgroup->GetCounter("InFly", false);
         Ok = subgroup->GetCounter("Ok", true);
         Error = subgroup->GetCounter("Error", true);
@@ -71,12 +72,57 @@ struct TRequestCounters: public virtual TThrRefBase {
     }
 
 private:
-    static NMonitoring::IHistogramCollectorPtr GetLatencyHistogramBuckets() {
-        return NMonitoring::ExplicitHistogram({0, 1, 2, 5, 10, 20, 50, 100, 500, 1000, 2000, 5000, 10000, 30000, 50000, 500000});
+    static ::NMonitoring::IHistogramCollectorPtr GetLatencyHistogramBuckets() {
+        return ::NMonitoring::ExplicitHistogram({0, 1, 2, 5, 10, 20, 50, 100, 500, 1000, 2000, 5000, 10000, 30000, 50000, 500000});
     }
 };
 
 using TRequestCountersPtr = TIntrusivePtr<TRequestCounters>;
+
+template<class TEventRequest, class TResponseProxy>
+class TGetQuotaActor : public NActors::TActorBootstrapped<TGetQuotaActor<TEventRequest, TResponseProxy>> {
+    using TBase = NActors::TActorBootstrapped<TGetQuotaActor<TEventRequest, TResponseProxy>>;
+    using TBase::SelfId;
+    using TBase::Send;
+    using TBase::PassAway;
+    using TBase::Become;
+
+    TActorId Sender;
+    TEventRequest Event;
+    ui32 Cookie;
+
+public:
+    TGetQuotaActor(TActorId sender, TEventRequest event, ui32 cookie)
+        : Sender(sender)
+        , Event(event)
+        , Cookie(cookie)
+    {}
+
+    static constexpr char ActorName[] = "YQ_CONTROL_PLANE_PROXY_GET_QUOTA";
+
+    void Bootstrap() {
+        CPP_LOG_T("Get quotas bootstrap. Cloud id: " << Event->Get()->CloudId << " Actor id: " << SelfId());
+        Become(&TGetQuotaActor::StateFunc, TDuration::Seconds(10), new NActors::TEvents::TEvWakeup());
+        Send(MakeQuotaServiceActorId(SelfId().NodeId()), new TEvQuotaService::TQuotaGetRequest(SUBJECT_TYPE_CLOUD, Event->Get()->CloudId));
+    }
+
+    STRICT_STFUNC(StateFunc,
+        hFunc(TEvQuotaService::TQuotaGetResponse, Handle);
+        cFunc(NActors::TEvents::TSystem::Wakeup, HandleTimeout);
+    )
+
+    void Handle(TEvQuotaService::TQuotaGetResponse::TPtr& ev) {
+        Event->Get()->Quotas = ev->Get()->Quotas;
+        CPP_LOG_T("Cloud id: " << Event->Get()->CloudId << " Quota count: " << Event->Get()->Quotas.size());
+        TActivationContext::Send(Event->Forward(ControlPlaneProxyActorId()));
+        PassAway();
+    }
+
+    void HandleTimeout() {
+        CPP_LOG_D("Quota request timeout. Cloud id: " << Event->Get()->CloudId << " Actor id: " << SelfId());
+        Send(MakeQuotaServiceActorId(SelfId().NodeId()), new TEvQuotaService::TQuotaGetRequest(SUBJECT_TYPE_CLOUD, Event->Get()->CloudId, true));
+    }
+};
 
 template<class TEventRequest, class TResponseProxy>
 class TResolveFolderActor : public NActors::TActorBootstrapped<TResolveFolderActor<TEventRequest, TResponseProxy>> {
@@ -85,6 +131,7 @@ class TResolveFolderActor : public NActors::TActorBootstrapped<TResolveFolderAct
     using TBase::Send;
     using TBase::PassAway;
     using TBase::Become;
+    using TBase::Register;
 
     NConfig::TControlPlaneProxyConfig Config;
     TActorId Sender;
@@ -95,6 +142,7 @@ class TResolveFolderActor : public NActors::TActorBootstrapped<TResolveFolderAct
     TEventRequest Event;
     ui32 Cookie;
     TInstant StartTime;
+    bool GetQuotas;
 
 public:
     TResolveFolderActor(const TRequestCountersPtr& counters,
@@ -102,7 +150,7 @@ public:
                         const TString& folderId, const TString& token,
                         const std::function<void(const TDuration&, bool, bool)>& probe,
                         TEventRequest event,
-                        ui32 cookie)
+                        ui32 cookie, bool getQuotas)
         : Config(config)
         , Sender(sender)
         , Counters(counters)
@@ -112,6 +160,7 @@ public:
         , Event(event)
         , Cookie(cookie)
         , StartTime(TInstant::Now())
+        , GetQuotas(getQuotas)
     {}
 
     static constexpr char ActorName[] = "YQ_CONTROL_PLANE_PROXY_RESOLVE_FOLDER";
@@ -169,7 +218,12 @@ public:
         TString cloudId = response.folder().cloud_id();
         Event->Get()->CloudId = cloudId;
         CPP_LOG_T("Cloud id: " << cloudId << " Folder id: " << FolderId);
-        TActivationContext::Send(Event->Forward(ControlPlaneProxyActorId()));
+
+        if (GetQuotas) {
+            Register(new TGetQuotaActor<TEventRequest, TResponseProxy>(Sender, Event, Cookie));
+        } else {
+            TActivationContext::Send(Event->Forward(ControlPlaneProxyActorId()));
+        }
         PassAway();
     }
 };
@@ -196,6 +250,7 @@ class TRequestActor : public NActors::TActorBootstrapped<TRequestActor<TRequestP
     std::function<void(const TDuration&, bool, bool)> Probe;
     TPermissions Permissions;
     TString CloudId;
+    TQuotaMap Quotas;
 
 public:
     static constexpr char ActorName[] = "YQ_CONTROL_PLANE_PROXY_REQUEST_ACTOR";
@@ -207,7 +262,7 @@ public:
                            const TRequestCountersPtr& counters,
                            const std::function<void(const TDuration&, bool, bool)>& probe,
                            TPermissions permissions,
-                           const TString& cloudId)
+                           const TString& cloudId, const TQuotaMap& quotas = {})
         : Config(config)
         , RequestProto(std::forward<TRequestProto>(requestProto))
         , Scope(scope)
@@ -222,6 +277,7 @@ public:
         , Probe(probe)
         , Permissions(permissions)
         , CloudId(cloudId)
+        , Quotas(quotas)
     {
         Counters->InFly->Inc();
         FillDefaultParameters(Config);
@@ -232,7 +288,7 @@ public:
     void Bootstrap() {
         CPP_LOG_T("Request actor. Actor id: " << SelfId());
         Become(&TRequestActor::StateFunc, GetDuration(Config.GetRequestTimeout(), TDuration::Seconds(30)), new NActors::TEvents::TEvWakeup());
-        Send(ServiceId, new TRequest(Scope, RequestProto, User, Token, CloudId, Permissions), 0, Cookie);
+        Send(ServiceId, new TRequest(Scope, RequestProto, User, Token, CloudId, Permissions, Quotas), 0, Cookie);
     }
 
     STRICT_STFUNC(StateFunc,
@@ -356,10 +412,10 @@ class TControlPlaneProxyActor : public NActors::TActorBootstrapped<TControlPlane
         });
 
         TMap<TMetricsScope, TScopeCountersPtr> ScopeCounters;
-        NMonitoring::TDynamicCounterPtr Counters;
+        ::NMonitoring::TDynamicCounterPtr Counters;
 
     public:
-        explicit TCounters(const NMonitoring::TDynamicCounterPtr& counters)
+        explicit TCounters(const ::NMonitoring::TDynamicCounterPtr& counters)
             : Counters(counters)
         {
             for (auto& request: CommonRequests) {
@@ -417,11 +473,13 @@ class TControlPlaneProxyActor : public NActors::TActorBootstrapped<TControlPlane
 
     TCounters Counters;
     NConfig::TControlPlaneProxyConfig Config;
+    bool GetQuotas;
 
 public:
-    TControlPlaneProxyActor(const NConfig::TControlPlaneProxyConfig& config, const NMonitoring::TDynamicCounterPtr& counters)
+    TControlPlaneProxyActor(const NConfig::TControlPlaneProxyConfig& config, const ::NMonitoring::TDynamicCounterPtr& counters, bool getQuotas)
         : Counters(counters)
         , Config(config)
+        , GetQuotas(getQuotas)
     {
     }
 
@@ -434,7 +492,7 @@ public:
 
         NActors::TMon* mon = AppData()->Mon;
         if (mon) {
-            NMonitoring::TIndexMonPage* actorsMonPage = mon->RegisterIndexPage("actors", "Actors");
+            ::NMonitoring::TIndexMonPage* actorsMonPage = mon->RegisterIndexPage("actors", "Actors");
             mon->RegisterActorPage(actorsMonPage, "yq_control_plane_proxy", "YQ Control Plane Proxy", false,
                 TlsActivationContext->ExecutorThread.ActorSystem, SelfId());
         }
@@ -531,7 +589,7 @@ private:
                                              TEvControlPlaneProxy::TEvCreateQueryResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -562,7 +620,7 @@ private:
                                     std::move(request), std::move(user), std::move(token),
                                     ControlPlaneStorageServiceActorId(),
                                     requestCounters,
-                                    probe, ExtractPermissions(ev, availablePermissions), cloudId));
+                                    probe, ExtractPermissions(ev, availablePermissions), cloudId, ev->Get()->Quotas));
     }
 
     void Handle(TEvControlPlaneProxy::TEvListQueriesRequest::TPtr& ev) {
@@ -587,7 +645,7 @@ private:
                                              TEvControlPlaneProxy::TEvListQueriesResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -643,7 +701,7 @@ private:
                                              TEvControlPlaneProxy::TEvDescribeQueryResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -700,7 +758,7 @@ private:
                                              TEvControlPlaneProxy::TEvGetQueryStatusResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -756,7 +814,7 @@ private:
                                              TEvControlPlaneProxy::TEvModifyQueryResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -815,7 +873,7 @@ private:
                                              TEvControlPlaneProxy::TEvDeleteQueryResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -871,7 +929,7 @@ private:
                                              TEvControlPlaneProxy::TEvControlQueryResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -930,7 +988,7 @@ private:
                                              TEvControlPlaneProxy::TEvGetResultDataResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -986,7 +1044,7 @@ private:
                                              TEvControlPlaneProxy::TEvListJobsResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1042,7 +1100,7 @@ private:
                                              TEvControlPlaneProxy::TEvDescribeJobResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1097,7 +1155,7 @@ private:
                                              TEvControlPlaneProxy::TEvCreateConnectionResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1155,7 +1213,7 @@ private:
                                              TEvControlPlaneProxy::TEvListConnectionsResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1211,7 +1269,7 @@ private:
                                              TEvControlPlaneProxy::TEvDescribeConnectionResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1267,7 +1325,7 @@ private:
                                              TEvControlPlaneProxy::TEvModifyConnectionResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1328,7 +1386,7 @@ private:
                                              TEvControlPlaneProxy::TEvDeleteConnectionResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1383,7 +1441,7 @@ private:
                                              TEvControlPlaneProxy::TEvTestConnectionResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1437,7 +1495,7 @@ private:
                                              TEvControlPlaneProxy::TEvCreateBindingResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1490,7 +1548,7 @@ private:
                                              TEvControlPlaneProxy::TEvListBindingsResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1546,7 +1604,7 @@ private:
                                              TEvControlPlaneProxy::TEvDescribeBindingResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1602,7 +1660,7 @@ private:
                                              TEvControlPlaneProxy::TEvModifyBindingResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1658,7 +1716,7 @@ private:
                                              TEvControlPlaneProxy::TEvDeleteBindingResponse>
                                              (Counters.GetCommonCounters(RTC_RESOLVE_FOLDER), sender,
                                               Config, folderId, token,
-                                              probe, ev, cookie));
+                                              probe, ev, cookie, GetQuotas));
             return;
         }
 
@@ -1711,8 +1769,8 @@ TActorId ControlPlaneProxyActorId() {
     return NActors::TActorId(0, name);
 }
 
-IActor* CreateControlPlaneProxyActor(const NConfig::TControlPlaneProxyConfig& config, const NMonitoring::TDynamicCounterPtr& counters) {
-    return new TControlPlaneProxyActor(config, counters);
+IActor* CreateControlPlaneProxyActor(const NConfig::TControlPlaneProxyConfig& config, const ::NMonitoring::TDynamicCounterPtr& counters, bool getQuotas) {
+    return new TControlPlaneProxyActor(config, counters, getQuotas);
 }
 
 }  // namespace NYq

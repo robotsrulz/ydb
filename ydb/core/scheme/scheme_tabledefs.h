@@ -17,6 +17,11 @@ namespace NKikimr {
 
 using TSchemaVersion = ui64;
 
+enum class EColumnTypeConstraint {
+    Nullable,
+    NotNull,
+};
+
 // ident for table, must be unique in selected scope
 // for global transactions ownerid is tabletid of owning schemeshard and tableid is counter designated by schemeshard
 // SysViewInfo is not empty for system views attached to corresponding table
@@ -175,6 +180,7 @@ public:
     }
 
     bool IsEmptyRange(TConstArrayRef<const NScheme::TTypeId> cellTypeIds) const;
+    bool IsFullRange(ui32 columnsCount) const;
 };
 
 class TSerializedTableRange {
@@ -675,10 +681,11 @@ public:
     // out
     EStatus Status;
     TVector<TColumnInfo> ColumnInfos;
-    TVector<TPartitionInfo> Partitions;
+    std::shared_ptr<const TVector<TKeyDesc::TPartitionInfo>> Partitioning;
     TIntrusivePtr<TSecurityObject> SecurityObject;
 
-    bool IsSystemView() const { return Partitions.empty(); }
+    const TVector<TKeyDesc::TPartitionInfo>& GetPartitions() const { Y_VERIFY(Partitioning); return *Partitioning; }
+    bool IsSystemView() const { return GetPartitions().empty(); }
 
     template<typename TKeyColumnTypes, typename TColumns>
     TKeyDesc(const TTableId& tableId, const TTableRange& range, ERowOperation rowOperation,
@@ -692,6 +699,7 @@ public:
         , Columns(columns.begin(), columns.end())
         , Reverse(reverse)
         , Status(EStatus::Unknown)
+        , Partitioning(std::make_shared<TVector<TKeyDesc::TPartitionInfo>>())
     {}
 };
 

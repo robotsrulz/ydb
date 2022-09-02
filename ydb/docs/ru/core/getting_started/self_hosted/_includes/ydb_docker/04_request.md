@@ -1,6 +1,6 @@
 ## Выполнение запросов {#request}
 
-Установите YDB CLI и выполните запросы, как описано в статье [YDB CLI - Начало работы](../../../cli.md), используя эндпоинт и размещение базы данных в начале данной статьи, например:
+Установите YDB CLI и выполните запросы, как описано в статье [YDB CLI - Начало работы](../../../cli.md), используя эндпоинт и путь базы данных в начале данной статьи, например:
 
 ```bash
 ydb -e grpc://localhost:2136 -d /local scheme ls
@@ -15,7 +15,7 @@ ydb -e grpcs://localhost:2135 --ca-file ydb_certs/ca.pem -d /local scheme ls
 Предсобранная версия [YDB CLI](../../../../reference/ydb-cli/index.md) также доступа внутри образа:
 
 ```bash
-docker exec <container_id> /ydb -e localhost:2136 -d /local scheme ls
+docker exec <container_id> /ydb -e grpc://localhost:2136 -d /local scheme ls
 ```
 
 , где

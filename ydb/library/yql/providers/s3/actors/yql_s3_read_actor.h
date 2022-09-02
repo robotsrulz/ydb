@@ -1,6 +1,6 @@
 #pragma once
 
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_sources.h>
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io.h>
 #include <ydb/library/yql/providers/common/http_gateway/yql_http_gateway.h>
 #include <ydb/library/yql/providers/s3/proto/retry_config.pb.h>
 #include <ydb/library/yql/providers/s3/proto/source.pb.h>
@@ -9,16 +9,15 @@
 
 namespace NYql::NDq {
 
-std::pair<NYql::NDq::IDqSourceActor*, NActors::IActor*> CreateS3ReadActor(
+std::pair<NYql::NDq::IDqComputeActorAsyncInput*, NActors::IActor*> CreateS3ReadActor(
     const NKikimr::NMiniKQL::TTypeEnvironment& typeEnv,
-    const NKikimr::NMiniKQL::IFunctionRegistry& functionRegistry,
+    const NKikimr::NMiniKQL::THolderFactory& holderFactory,
     IHTTPGateway::TPtr gateway,
     NS3::TSource&& params,
     ui64 inputIndex,
     const THashMap<TString, TString>& secureParams,
     const THashMap<TString, TString>& taskParams,
     const NActors::TActorId& computeActorId,
-    ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
-    const std::shared_ptr<NYql::NS3::TRetryConfig>& retryConfig = nullptr);
+    ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory);
 
 } // namespace NYql::NDq

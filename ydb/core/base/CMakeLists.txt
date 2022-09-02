@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(services)
+add_subdirectory(ut)
 
 add_library(ydb-core-base)
 target_link_libraries(ydb-core-base PUBLIC
@@ -15,6 +17,7 @@ target_link_libraries(ydb-core-base PUBLIC
   cpp-actors-helpers
   cpp-actors-interconnect
   cpp-actors-protos
+  cpp-actors-wilson
   cpp-deprecated-enum_codegen
   library-cpp-logger
   library-cpp-lwtrace
@@ -30,10 +33,9 @@ target_link_libraries(ydb-core-base PUBLIC
   ydb-library-login
   ydb-library-pdisk_io
   library-pretty_types_print-protobuf
-  library-pretty_types_print-wilson
-  ydb-library-wilson
   api-protos-out
   library-yql-minikql
+  cpp-deprecated-atomic
   library-cpp-resource
   tools-enum_parser-enum_serialization_runtime
 )
@@ -89,6 +91,7 @@ target_link_libraries(ydb-core-base.global PUBLIC
   cpp-actors-helpers
   cpp-actors-interconnect
   cpp-actors-protos
+  cpp-actors-wilson
   cpp-deprecated-enum_codegen
   library-cpp-logger
   library-cpp-lwtrace
@@ -104,10 +107,9 @@ target_link_libraries(ydb-core-base.global PUBLIC
   ydb-library-login
   ydb-library-pdisk_io
   library-pretty_types_print-protobuf
-  library-pretty_types_print-wilson
-  ydb-library-wilson
   api-protos-out
   library-yql-minikql
+  cpp-deprecated-atomic
   library-cpp-resource
   tools-enum_parser-enum_serialization_runtime
 )

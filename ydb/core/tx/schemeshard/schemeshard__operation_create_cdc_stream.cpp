@@ -224,6 +224,10 @@ public:
             result->SetError(NKikimrScheme::StatusMultipleModifications, errStr);
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxCreateCdcStream, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         auto stream = TCdcStreamInfo::Create(streamDesc);
         Y_VERIFY(stream);
@@ -233,7 +237,7 @@ public:
         context.MemChanges.GrabNewPath(context.SS, pathId);
         context.MemChanges.GrabPath(context.SS, tablePath.Base()->PathId);
         context.MemChanges.GrabNewTxState(context.SS, OperationId);
-        context.MemChanges.GrabDomain(context.SS, streamPath.DomainId());
+        context.MemChanges.GrabDomain(context.SS, streamPath.GetPathIdForDomain());
         context.MemChanges.GrabNewCdcStream(context.SS, pathId);
 
         context.DbChanges.PersistPath(pathId);
@@ -449,6 +453,10 @@ public:
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxCreateCdcStreamAtTable, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         context.DbChanges.PersistTxState(OperationId);
 
@@ -607,6 +615,11 @@ TVector<ISubOperationBase::TPtr> CreateNewCdcStream(TOperationId opId, const TTx
             << ", intention to create new children: " << aliveStreams + 1)};
     }
 
+    if (!AppData()->PQConfig.GetEnableProtoSourceIdInfo()) {
+        return {CreateReject(opId, NKikimrScheme::EStatus::StatusPreconditionFailed, TStringBuilder()
+            << "Changefeeds require proto source id info to be enabled")};
+    }
+
     TString errStr;
     if (!context.SS->CheckApplyIf(tx, errStr)) {
         return {CreateReject(opId, NKikimrScheme::StatusPreconditionFailed, errStr)};
@@ -650,6 +663,8 @@ TVector<ISubOperationBase::TPtr> CreateNewCdcStream(TOperationId opId, const TTx
         auto& pqConfig = *desc.MutablePQTabletConfig();
         pqConfig.SetTopicName(streamName);
         pqConfig.SetTopicPath(streamPath.Child("streamImpl").PathString());
+        pqConfig.SetMeteringMode(NKikimrPQ::TPQTabletConfig::METERING_MODE_REQUEST_UNITS);
+
         auto& partitionConfig = *pqConfig.MutablePartitionConfig();
         partitionConfig.SetLifetimeSeconds(retentionPeriod.Seconds());
 

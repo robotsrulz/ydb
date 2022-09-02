@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(blobstorage-vdisk-synclog)
 target_link_libraries(blobstorage-vdisk-synclog PUBLIC
@@ -15,6 +16,7 @@ target_link_libraries(blobstorage-vdisk-synclog PUBLIC
   cpp-actors-interconnect
   library-cpp-blockcodecs
   library-cpp-codecs
+  cpp-containers-intrusive_avl_tree
   monlib-service-pages
   ydb-core-base
   core-blobstorage-base

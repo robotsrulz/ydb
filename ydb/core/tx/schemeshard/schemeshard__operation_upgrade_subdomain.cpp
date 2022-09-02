@@ -351,6 +351,7 @@ public:
             case NKikimrSchemeOp::EPathType::EPathTypeCdcStream:
             case NKikimrSchemeOp::EPathType::EPathTypeSequence:
             case NKikimrSchemeOp::EPathType::EPathTypeReplication:
+            case NKikimrSchemeOp::EPathType::EPathTypeBlobDepot:
                 Y_FAIL("UNIMPLEMENTED");
             case NKikimrSchemeOp::EPathType::EPathTypeInvalid:
                 Y_UNREACHABLE();
@@ -1230,6 +1231,10 @@ public:
             result->SetError(NKikimrScheme::StatusMultipleModifications, msg);
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxUpgradeSubDomain, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         TSubDomainInfo::TPtr alterData = new TSubDomainInfo(*subDomain,
                                                             subDomain->GetPlanResolution(),
@@ -1495,6 +1500,10 @@ public:
             result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
             return result;
         };
+        if (!context.SS->CheckInFlightLimit(TTxState::TxUpgradeSubDomainDecision, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxUpgradeSubDomainDecision, path.Base()->PathId);
         txState.State = TTxState::Waiting;

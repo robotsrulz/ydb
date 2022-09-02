@@ -1,11 +1,9 @@
-# Управление кластером YDB
+# Управление кластером {{ ydb-short-name }}
 
-В данном разделе находятся статьи для системных администраторов, отвечающих за работоспособность кластеров YDB, на которых разворачиваются прикладные базы данных.
+В этом разделе описано развертывание, конфигурирование, обслуживание, мониторинг и диагностика многоузловых [кластеров {{ ydb-short-name }}](../concepts/cluster/index.md).
 
-{% include [addition_overlay](_includes/addition_overlay.md) %}
-
-{% note warning "Предупреждение" %}
-
-Раздел находится в стадии разработки.
-
-{% endnote %}
+* [{#T}](../deploy/index.md).
+* [{#T}](../maintenance/embedded_monitoring/index.md).
+* [{#T}](../maintenance/manual/index.md).
+* [{#T}](../troubleshooting/system_views_cluster.md).
+* [{#T}](../administration/monitoring.md).

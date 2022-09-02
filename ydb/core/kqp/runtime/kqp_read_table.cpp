@@ -70,69 +70,44 @@ void BuildKeyTupleCells(const TTupleType* tupleType, const TUnboxedValue& tupleV
 }
 
 void ParseReadColumns(const TType* readType, const TRuntimeNode& tagsNode,
-    TSmallVec<TKqpComputeContextBase::TColumn>& columns, TSmallVec<TKqpComputeContextBase::TColumn>& systemColumns)
+    TSmallVec<NTable::TTag>& columns, TSmallVec<NTable::TTag>& systemColumns)
 {
-    MKQL_ENSURE_S(readType);
+    MKQL_ENSURE_S(readType);		
     MKQL_ENSURE_S(readType->GetKind() == TType::EKind::Flow);
 
     auto tags = AS_VALUE(TStructLiteral, tagsNode);
     MKQL_ENSURE_S(tags);
 
-    auto itemType = AS_TYPE(TFlowType, readType)->GetItemType();
-    MKQL_ENSURE_S(itemType->GetKind() == TType::EKind::Struct);
 
-    auto structType = AS_TYPE(TStructType, itemType);
-    MKQL_ENSURE_S(tags->GetValuesCount() == structType->GetMembersCount());
+    columns.reserve(tags->GetValuesCount());
 
-    columns.reserve(structType->GetMembersCount());
-
-    for (ui32 i = 0; i < structType->GetMembersCount(); ++i) {
-        auto memberType = structType->GetMemberType(i);
-        if (memberType->GetKind() == TType::EKind::Optional) {
-            memberType = AS_TYPE(TOptionalType, memberType)->GetItemType();
-        }
-        MKQL_ENSURE_S(memberType->GetKind() == TType::EKind::Data);
+    for (ui32 i = 0; i < tags->GetValuesCount(); ++i) {
         NTable::TTag columnId = AS_VALUE(TDataLiteral, tags->GetValue(i))->AsValue().Get<ui32>();
         if (IsSystemColumn(columnId)) {
-            systemColumns.push_back({columnId, AS_TYPE(TDataType, memberType)->GetSchemeType()});
+            systemColumns.push_back(columnId);
         } else {
-            columns.push_back({columnId, AS_TYPE(TDataType, memberType)->GetSchemeType()});
+            columns.push_back(columnId);
         }
     }
 }
 
-void ParseWideReadColumns(const TCallable& callable, const TRuntimeNode& tagsNode,
-    TSmallVec<TKqpComputeContextBase::TColumn>& columns, TSmallVec<TKqpComputeContextBase::TColumn>& systemColumns)
+void ParseWideReadColumns(const TRuntimeNode& tagsNode,
+    TSmallVec<NTable::TTag>& columns, TSmallVec<NTable::TTag>& systemColumns)
 {
     auto tags = AS_VALUE(TStructLiteral, tagsNode);
     MKQL_ENSURE_S(tags);
 
-    TType* returnType = callable.GetType()->GetReturnType();
-    MKQL_ENSURE_S(returnType->GetKind() == TType::EKind::Flow);
+    columns.reserve(tags->GetValuesCount());
 
-    auto itemType = AS_TYPE(TFlowType, returnType)->GetItemType();
-    MKQL_ENSURE_S(itemType->GetKind() == TType::EKind::Tuple);
+    for (ui32 i = 0; i < tags->GetValuesCount(); ++i) {
 
-    auto tupleType = AS_TYPE(TTupleType, itemType);
-    MKQL_ENSURE_S(tags->GetValuesCount() == tupleType->GetElementsCount());
 
-    columns.reserve(tupleType->GetElementsCount());
-
-    for (ui32 i = 0; i < tupleType->GetElementsCount(); ++i) {
-        auto memberType = tupleType->GetElementType(i);
-
-        if (memberType->GetKind() == TType::EKind::Optional) {
-            memberType = AS_TYPE(TOptionalType, memberType)->GetItemType();
-        }
-
-        MKQL_ENSURE_S(memberType->GetKind() == TType::EKind::Data);
-
-        NTable::TTag columnId = AS_VALUE(TDataLiteral, tags->GetValue(i))->AsValue().Get<ui32>();
+        NTable::TTag columnId = AS_VALUE(TDataLiteral, tags->GetValue(i))->AsValue().Get<ui32>();;
 
         if (IsSystemColumn(columnId)) {
-            systemColumns.push_back({columnId, AS_TYPE(TDataType, memberType)->GetSchemeType()});
-        } else {
-            columns.push_back({columnId, AS_TYPE(TDataType, memberType)->GetSchemeType()});
+            systemColumns.push_back(columnId);
+        } else if (columnId != TKeyDesc::EColumnIdInvalid) {
+            columns.push_back(columnId);
         }
     }
 }
@@ -161,7 +136,7 @@ TParseReadTableResult ParseWideReadTable(TCallable& callable) {
     MKQL_ENSURE_S(result.ToTuple);
     result.ToInclusive = AS_VALUE(TDataLiteral, range->GetValue(3))->AsValue().Get<bool>();
 
-    ParseWideReadColumns(callable, tagsNode, result.Columns, result.SystemColumns);
+    ParseWideReadColumns(tagsNode, result.Columns, result.SystemColumns);
 
     auto skipNullKeys = AS_VALUE(TListLiteral, callable.GetInput(3));
     result.SkipNullKeys.reserve(skipNullKeys->GetItemsCount());
@@ -210,7 +185,7 @@ TParseReadTableRangesResult ParseWideReadTableRanges(TCallable& callable) {
     MKQL_ENSURE_S(result.Ranges);
     MKQL_ENSURE_S(result.Ranges->GetValuesCount() == 1);
 
-    ParseWideReadColumns(callable, tagsNode, result.Columns, result.SystemColumns);
+    ParseWideReadColumns(tagsNode, result.Columns, result.SystemColumns);
 
     auto limitNode = limit.GetNode();
 
@@ -246,8 +221,7 @@ public:
     TKqpScanWideReadTableWrapperBase(TKqpScanComputeContext& computeCtx, std::vector<EValueRepresentation>&& representations)
         : TBase(this)
         , ComputeCtx(computeCtx)
-        , Representations(std::move(representations))
-    {}
+        , Representations(std::move(representations)) {}
 
     EFetchResult DoCalculate(TComputationContext& ctx, NUdf::TUnboxedValue* const* output) const {
         Y_UNUSED(ctx);
@@ -262,45 +236,43 @@ public:
 #ifndef MKQL_DISABLE_CODEGEN
     ICodegeneratorInlineWideNode::TGenerateResult DoGenGetValues(const TCodegenContext& ctx, BasicBlock*& block) const {
         auto& context = ctx.Codegen->GetContext();
-        const auto size = GetAllColumnsSize();
-        ICodegeneratorInlineWideNode::TGettersList getters(size);
+        const auto size = Representations.size();
+
+        Row.resize(size);
 
         const auto valueType = Type::getInt128Ty(context);
-        const auto valuesType = ArrayType::get(valueType, size);
-        const auto values = new AllocaInst(valuesType, 0U, "values", &ctx.Func->getEntryBlock().back());
+        const auto valuePtrType = PointerType::getUnqual(valueType);
+        const auto valuesPtr = CastInst::Create(Instruction::IntToPtr,
+            ConstantInt::get(Type::getInt64Ty(context), uintptr_t(Row.data())),
+            valuePtrType, "values", &ctx.Func->getEntryBlock().back());
 
-        const auto fieldsType = ArrayType::get(PointerType::getUnqual(valueType), size);
-        const auto fields = new AllocaInst(fieldsType, 0U, "fields", &ctx.Func->getEntryBlock().back());
-
+        ICodegeneratorInlineWideNode::TGettersList getters(size);
         const auto indexType = Type::getInt32Ty(context);
-        Value* init = UndefValue::get(fieldsType);
         for (auto i = 0U; i < size; ++i) {
-            const auto pointer = GetElementPtrInst::CreateInBounds(values,
-                    {ConstantInt::get(indexType, 0), ConstantInt::get(indexType, i)},
-                    (TString("ptr_") += ToString(i)).c_str(),
-                    &ctx.Func->getEntryBlock().back());
-            init = InsertValueInst::Create(init, pointer, {i}, (TString("insert_") += ToString(i)).c_str(), &ctx.Func->getEntryBlock().back());
-
-            new StoreInst(ConstantInt::get(valueType, 0), pointer, &ctx.Func->getEntryBlock().back());
-
-            getters[i] = [i, indexType, values] (const TCodegenContext&, BasicBlock*& block) {
-                const auto loadPtr = GetElementPtrInst::CreateInBounds(values,
-                        {ConstantInt::get(indexType, 0), ConstantInt::get(indexType, i)},
-                        (TString("loadPtr_") += ToString(i)).c_str(),
-                        block);
+            getters[i] = [i, valueType, valuesPtr, indexType] (const TCodegenContext&, BasicBlock*& block) {
+                const auto loadPtr = GetElementPtrInst::Create(valueType, valuesPtr,
+                    {ConstantInt::get(indexType, i)},
+                    (TString("loadPtr_") += ToString(i)).c_str(),
+                    block);
                 return new LoadInst(loadPtr, "load", block);
             };
         }
 
-        new StoreInst(init, fields, &ctx.Func->getEntryBlock().back());
+        const auto fieldsType = ArrayType::get(valuePtrType, size);
+        const auto fields = new AllocaInst(fieldsType, 0U, "fields", &ctx.Func->getEntryBlock().back());
 
-        for (ui32 i = 0U; i < size; ++i) {
-            const auto pointer = GetElementPtrInst::CreateInBounds(values,
-                {ConstantInt::get(indexType, 0), ConstantInt::get(indexType, i)},
-                (TString("ptr_") += ToString(i)).c_str(), block);
-            ValueCleanup(Representations[i], pointer, ctx, block);
-            new StoreInst(ConstantInt::get(valueType, 0), pointer, block);
+        Value* init = UndefValue::get(fieldsType);
+        for (auto i = 0U; i < size; ++i) {
+            const auto pointer = GetElementPtrInst::Create(valueType, valuesPtr,
+                    {ConstantInt::get(indexType, i)},
+                    (TString("ptr_") += ToString(i)).c_str(),
+                    &ctx.Func->getEntryBlock().back());
+
+            init = InsertValueInst::Create(init, pointer, {i}, (TString("insert_") += ToString(i)).c_str(),
+                &ctx.Func->getEntryBlock().back());
         }
+
+        new StoreInst(init, fields, &ctx.Func->getEntryBlock().back());
 
         const auto ptrType = PointerType::getUnqual(StructType::get(context));
         const auto func = ConstantInt::get(Type::getInt64Ty(context), GetMethodPtr(&TKqpScanWideReadTableWrapperBase::DoCalculate));
@@ -308,13 +280,6 @@ public:
         const auto funcType = FunctionType::get(Type::getInt32Ty(context), { self->getType(), ctx.Ctx->getType(), fields->getType() }, false);
         const auto funcPtr = CastInst::Create(Instruction::IntToPtr, func, PointerType::getUnqual(funcType), "fetch_func", block);
         const auto result = CallInst::Create(funcPtr, { self, ctx.Ctx, fields }, "fetch", block);
-
-        for (ui32 i = 0U; i < size; ++i) {
-            const auto pointer = GetElementPtrInst::CreateInBounds(values,
-                {ConstantInt::get(indexType, 0), ConstantInt::get(indexType, i)},
-                (TString("ptr_") += ToString(i)).c_str(), block);
-            ValueRelease(Representations[i], pointer, ctx, block);
-        }
 
         return {result, std::move(getters)};
     }
@@ -327,6 +292,7 @@ private:
     TKqpScanComputeContext& ComputeCtx;
     mutable TIntrusivePtr<IKqpTableReader> TableReader;
     const std::vector<EValueRepresentation> Representations;
+    mutable std::vector<NUdf::TUnboxedValue> Row;
 };
 
 class TKqpScanWideReadTableWrapper : public TKqpScanWideReadTableWrapperBase {

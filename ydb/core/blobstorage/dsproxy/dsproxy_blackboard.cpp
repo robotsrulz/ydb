@@ -101,7 +101,7 @@ bool TBlobState::Restore(const TBlobStorageGroupInfo &info) {
 }
 
 void TBlobState::AddResponseData(const TBlobStorageGroupInfo &info, const TLogoBlobID &id, ui32 orderNumber,
-        ui32 shift, TString &data) {
+        ui32 shift, TString &data, bool keep, bool doNotKeep) {
     // Add actual data to Parts
     Y_VERIFY(id.PartId() != 0);
     ui32 partIdx = id.PartId() - 1;
@@ -129,6 +129,8 @@ void TBlobState::AddResponseData(const TBlobStorageGroupInfo &info, const TLogoB
         }
     }
     Y_VERIFY(isFound);
+    Keep |= keep;
+    DoNotKeep |= doNotKeep;
 }
 
 void TBlobState::AddNoDataResponse(const TBlobStorageGroupInfo &info, const TLogoBlobID &id, ui32 orderNumber) {
@@ -196,7 +198,8 @@ void TBlobState::AddErrorResponse(const TBlobStorageGroupInfo &info, const TLogo
     Y_VERIFY(isFound);
 }
 
-void TBlobState::AddNotYetResponse(const TBlobStorageGroupInfo &info, const TLogoBlobID &id, ui32 orderNumber) {
+void TBlobState::AddNotYetResponse(const TBlobStorageGroupInfo &info, const TLogoBlobID &id, ui32 orderNumber,
+        bool keep, bool doNotKeep) {
     Y_UNUSED(info);
     Y_VERIFY(id.PartId() != 0);
     ui32 partIdx = id.PartId() - 1;
@@ -216,6 +219,8 @@ void TBlobState::AddNotYetResponse(const TBlobStorageGroupInfo &info, const TLog
         }
     }
     Y_VERIFY(isFound);
+    Keep |= keep;
+    DoNotKeep |= doNotKeep;
 }
 
 ui64 TBlobState::GetPredictedDelayNs(const TBlobStorageGroupInfo &info, TGroupQueues &groupQueues,
@@ -346,9 +351,11 @@ void TGroupDiskRequests::AddGet(const ui32 diskOrderNumber, const TLogoBlobID &i
 }
 
 void TGroupDiskRequests::AddPut(const ui32 diskOrderNumber, const TLogoBlobID &id, TString buffer,
-        TDiskPutRequest::EPutReason putReason, bool isHandoff, ui8 blobIdx) {
+        TDiskPutRequest::EPutReason putReason, bool isHandoff, std::vector<std::pair<ui64, ui32>> *extraBlockChecks,
+        NWilson::TSpan *span, ui8 blobIdx) {
     Y_VERIFY(diskOrderNumber < DiskRequestsForOrderNumber.size());
-    DiskRequestsForOrderNumber[diskOrderNumber].PutsToSend.emplace_back(id, buffer, putReason, isHandoff, blobIdx);
+    DiskRequestsForOrderNumber[diskOrderNumber].PutsToSend.emplace_back(id, buffer, putReason, isHandoff,
+        extraBlockChecks, span, blobIdx);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -365,11 +372,7 @@ void TBlackboard::AddNeeded(const TLogoBlobID &id, ui32 inShift, ui32 inSize) {
     ui64 size = (inSize ? Min(ui64(inSize), maxSize) : maxSize);
     //Cerr << "size " << size << " shift " << shift << Endl;
     if (size > 0) {
-        TBlobState &state = BlobStates[id];;
-        if (!bool(state.Id)) {
-            state.Init(id, *Info);
-        }
-        state.AddNeeded(shift, size);
+        (*this)[id].AddNeeded(shift, size);
     } else {
         TStringStream str;
         str << "It is impossible to read 0 bytes! Do not send such requests.";
@@ -382,22 +385,14 @@ void TBlackboard::AddPartToPut(const TLogoBlobID &id, ui32 partIdx, TString &par
     Y_VERIFY(bool(id));
     Y_VERIFY(id.PartId() == 0);
     Y_VERIFY(id.BlobSize() != 0);
-    TBlobState &state = BlobStates[id];
-    if (!bool(state.Id)) {
-        state.Init(id, *Info);
-    }
-    state.AddPartToPut(partIdx, partData);
+    (*this)[id].AddPartToPut(partIdx, partData);
 }
 
 void TBlackboard::MarkBlobReadyToPut(const TLogoBlobID &id, ui8 blobIdx) {
     Y_VERIFY(bool(id));
     Y_VERIFY(id.PartId() == 0);
     Y_VERIFY(id.BlobSize() != 0);
-    TBlobState &state = BlobStates[id];;
-    if (!bool(state.Id)) {
-        state.Init(id, *Info);
-    }
-    state.MarkBlobReadyToPut(blobIdx);
+    (*this)[id].MarkBlobReadyToPut(blobIdx);
 }
 
 void TBlackboard::MoveBlobStateToDone(const TLogoBlobID &id) {
@@ -428,11 +423,11 @@ void TBlackboard::AddPutOkResponse(const TLogoBlobID &id, ui32 orderNumber) {
     state.AddPutOkResponse(*Info, id, orderNumber);
 }
 
-void TBlackboard::AddResponseData(const TLogoBlobID &id, ui32 orderNumber, ui32 shift, TString &data) {
+void TBlackboard::AddResponseData(const TLogoBlobID &id, ui32 orderNumber, ui32 shift, TString &data, bool keep, bool doNotKeep) {
     Y_VERIFY(bool(id));
     Y_VERIFY(id.PartId() != 0);
     TBlobState &state = GetState(id);
-    state.AddResponseData(*Info, id, orderNumber, shift, data);
+    state.AddResponseData(*Info, id, orderNumber, shift, data, keep, doNotKeep);
 }
 
 void TBlackboard::AddNoDataResponse(const TLogoBlobID &id, ui32 orderNumber) {
@@ -442,11 +437,11 @@ void TBlackboard::AddNoDataResponse(const TLogoBlobID &id, ui32 orderNumber) {
     state.AddNoDataResponse(*Info, id, orderNumber);
 }
 
-void TBlackboard::AddNotYetResponse(const TLogoBlobID &id, ui32 orderNumber) {
+void TBlackboard::AddNotYetResponse(const TLogoBlobID &id, ui32 orderNumber, bool keep, bool doNotKeep) {
     Y_VERIFY(bool(id));
     Y_VERIFY(id.PartId() != 0);
     TBlobState &state = GetState(id);
-    state.AddNotYetResponse(*Info, id, orderNumber);
+    state.AddNotYetResponse(*Info, id, orderNumber, keep, doNotKeep);
 }
 
 void TBlackboard::AddErrorResponse(const TLogoBlobID &id, ui32 orderNumber) {
@@ -573,6 +568,30 @@ void TBlackboard::GetWorstPredictedDelaysNs(const TBlobStorageGroupInfo &info, T
             *outNextToWorstNs = predictedNs;
         }
     }
+}
+
+void TBlackboard::RegisterBlobForPut(const TLogoBlobID& id, std::vector<std::pair<ui64, ui32>> *extraBlockChecks,
+        NWilson::TSpan *span) {
+    TBlobState& state = (*this)[id];
+    if (!state.ExtraBlockChecks) {
+        state.ExtraBlockChecks = extraBlockChecks;
+    } else {
+        Y_VERIFY(state.ExtraBlockChecks == extraBlockChecks);
+    }
+    if (!state.Span) {
+        state.Span = span;
+    } else {
+        Y_VERIFY(state.Span == span);
+    }
+}
+
+TBlobState& TBlackboard::operator [](const TLogoBlobID& id) {
+    const auto [it, inserted] = BlobStates.try_emplace(id);
+    TBlobState& state = it->second;
+    if (inserted) {
+        state.Init(id, *Info);
+    }
+    return state;
 }
 
 TString TBlackboard::ToString() const {

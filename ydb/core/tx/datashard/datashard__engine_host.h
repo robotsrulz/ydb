@@ -37,6 +37,11 @@ public:
         ui64 TotalKeysSize = 0;
     };
 
+    struct TColumnWriteMeta {
+        NTable::TColumn Column;
+        ui32 MaxValueSizeBytes = 0;
+    };
+
     TEngineBay(TDataShard * self, TTransactionContext& txc, const TActorContext& ctx,
                std::pair<ui64, ui64> stepTxId);
 
@@ -44,7 +49,7 @@ public:
 
     const NMiniKQL::IEngineFlat * GetEngine() const { return Engine.Get(); }
     NMiniKQL::IEngineFlat * GetEngine();
-    void SetLockTxId(ui64 lockTxId);
+    void SetLockTxId(ui64 lockTxId, ui32 lockNodeId);
     void SetUseLlvmRuntime(bool llvmRuntime) { EngineSettings->LlvmRuntime = llvmRuntime; }
 
     EResult Validate() {
@@ -61,9 +66,10 @@ public:
     }
 
     void AddReadRange(const TTableId& tableId, const TVector<NTable::TColumn>& columns, const TTableRange& range,
-                      const TVector<NScheme::TTypeId>& keyTypes, ui64 itemsLimit = 0, bool reverse = false);
+        const TVector<NScheme::TTypeId>& keyTypes, ui64 itemsLimit = 0, bool reverse = false);
 
-    void AddWriteRange(const TTableId& tableId, const TTableRange& range, const TVector<NScheme::TTypeId>& keyTypes);
+    void AddWriteRange(const TTableId& tableId, const TTableRange& range, const TVector<NScheme::TTypeId>& keyTypes,
+        const TVector<TColumnWriteMeta>& columns, bool isPureEraseOp);
 
     void MarkTxLoaded() {
         Info.Loaded = true;
@@ -84,7 +90,6 @@ public:
 
         Engine.Reset();
         EngineHost.Reset();
-        TraceMessage.clear();
     }
 
     const TValidationInfo& TxInfo() const { return Info; }
@@ -93,6 +98,7 @@ public:
     void SetWriteVersion(TRowVersion writeVersion);
     void SetReadVersion(TRowVersion readVersion);
     void SetIsImmediateTx();
+    void SetIsRepeatableSnapshot();
 
     TVector<NMiniKQL::IChangeCollector::TChange> GetCollectedChanges() const;
 
@@ -110,7 +116,7 @@ private:
     TValidationInfo Info;
     TEngineHostCounters EngineHostCounters;
     ui64 LockTxId;
-    TString TraceMessage;
+    ui32 LockNodeId;
     NYql::NDq::TLogFunc KqpLogFunc;
     THolder<NUdf::IApplyContext> KqpApplyCtx;
     THolder<NMiniKQL::TKqpDatashardComputeContext> ComputeCtx;

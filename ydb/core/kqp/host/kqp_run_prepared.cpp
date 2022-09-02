@@ -29,6 +29,9 @@ public:
 
         const auto& kql = TransformCtx->GetPreparedKql();
 
+        // TODO: Enable after switch to NewEngine
+        // YQL_ENSURE(!TransformCtx->Config->HasKqpForceNewEngine());
+
         if (CurrentMkqlIndex >= kql.MkqlsSize()) {
             return Finish(ctx);
         }
@@ -136,7 +139,7 @@ private:
             YQL_CLOG(TRACE, ProviderKqp) << "MiniKQL parameters:" << Endl << paramsTextBuilder;
         }
 
-        if (TransformCtx->QueryCtx->StatsMode == EKikimrStatsMode::Profile) {
+        if (TransformCtx->QueryCtx->StatsMode == EKikimrStatsMode::Full) {
             MkqlExecuteResult.Program = mkql.GetProgramText();
         }
 

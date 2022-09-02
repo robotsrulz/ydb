@@ -7,16 +7,9 @@
 #include <util/network/address.h>
 
 #include "interconnect_stream.h"
-#include "packet.h"
 #include "types.h"
 
 namespace NActors {
-    struct TProgramInfo {
-        ui64 PID = 0;
-        ui64 StartTime = 0;
-        ui64 Serial = 0;
-    };
-
     enum class ENetwork : ui32 {
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // local messages
@@ -59,6 +52,9 @@ namespace NActors {
         EvProcessPingRequest,
         EvGetSecureSocket,
         EvSecureSocket,
+        HandshakeBrokerTake,
+        HandshakeBrokerFree,
+        HandshakeBrokerPermit,
 
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
         // nonlocal messages; their indices must be preserved in order to work properly while doing rolling update
@@ -103,6 +99,18 @@ namespace NActors {
             : Reason(std::move(reason))
         {
         }
+    };
+
+    struct TEvHandshakeBrokerTake: public TEventLocal<TEvHandshakeBrokerTake, ui32(ENetwork::HandshakeBrokerTake)> {
+        DEFINE_SIMPLE_LOCAL_EVENT(TEvHandshakeBrokerTake, "Network: TEvHandshakeBrokerTake")
+    };
+
+    struct TEvHandshakeBrokerFree: public TEventLocal<TEvHandshakeBrokerFree, ui32(ENetwork::HandshakeBrokerFree)> {
+        DEFINE_SIMPLE_LOCAL_EVENT(TEvHandshakeBrokerFree, "Network: TEvHandshakeBrokerFree")
+    };
+
+    struct TEvHandshakeBrokerPermit: public TEventLocal<TEvHandshakeBrokerPermit, ui32(ENetwork::HandshakeBrokerPermit)> {
+        DEFINE_SIMPLE_LOCAL_EVENT(TEvHandshakeBrokerPermit, "Network: TEvHandshakeBrokerPermit")
     };
 
     struct TEvHandshakeAsk: public TEventLocal<TEvHandshakeAsk, ui32(ENetwork::HandshakeAsk)> {
@@ -239,7 +247,7 @@ namespace NActors {
         DEFINE_SIMPLE_LOCAL_EVENT(TEvLocalNodeInfo, "Network: TEvLocalNodeInfo")
 
         ui32 NodeId;
-        NAddr::IRemoteAddrPtr Address;
+        std::vector<NInterconnect::TAddress> Addresses;
     };
 
     struct TEvBunchOfEventsToDestroy : TEventLocal<TEvBunchOfEventsToDestroy, ui32(ENetwork::BunchOfEventsToDestroy)> {
@@ -274,6 +282,7 @@ namespace NActors {
         DEFINE_SIMPLE_LOCAL_EVENT(TEvResolveError, "Network: TEvResolveError")
 
         TString Explain;
+        TString Host;
     };
 
     struct TEvHTTPStreamStatus

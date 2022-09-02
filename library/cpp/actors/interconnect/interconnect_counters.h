@@ -1,7 +1,5 @@
 #pragma once
 
-#include <library/cpp/actors/helpers/mon_histogram_helper.h>
-
 #include <util/system/valgrind.h>
 
 #include "types.h"
@@ -32,7 +30,7 @@ public:
     virtual void IncDisconnections() = 0;
     virtual void IncUsefulWriteWakeups() = 0;
     virtual void IncSpuriousWriteWakeups() = 0;
-    virtual void IncSendSyscalls() = 0;
+    virtual void IncSendSyscalls(ui64 ns) = 0;
     virtual void IncInflyLimitReach() = 0;
     virtual void IncDisconnectByReason(const TString& s) = 0;
     virtual void IncUsefulReadWakeups() = 0;
@@ -40,9 +38,9 @@ public:
     virtual void SetPeerInfo(const TString& name, const TString& dataCenterId) = 0;
     virtual void AddInputChannelsIncomingTraffic(ui16 channel, ui64 incomingTraffic) = 0;
     virtual void IncInputChannelsIncomingEvents(ui16 channel) = 0;
-    virtual void IncRecvSyscalls() = 0;
+    virtual void IncRecvSyscalls(ui64 ns) = 0;
     virtual void AddTotalBytesRead(ui64 value) = 0;
-    virtual void UpdateLegacyPingTimeHist(ui64 value) = 0;
+    virtual void UpdatePingTimeHistogram(ui64 value) = 0;
     virtual void UpdateOutputChannelTraffic(ui16 channel, ui64 value) = 0;
     virtual void UpdateOutputChannelEvents(ui16 channel) = 0;
     TString GetHumanFriendlyPeerHostName() const {

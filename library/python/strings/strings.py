@@ -29,7 +29,7 @@ def to_basestring(value):
         return value
     try:
         if six.PY2:
-            return unicode(value)
+            return unicode(value)  # noqa
         else:
             return str(value)
     except UnicodeDecodeError:
@@ -37,6 +37,8 @@ def to_basestring(value):
             return str(value)
         except UnicodeEncodeError:
             return repr(value)
+
+
 to_text = to_basestring
 
 
@@ -45,7 +47,7 @@ def to_unicode(value, from_enc=DEFAULT_ENCODING):
         return value
     if isinstance(value, six.binary_type):
         if six.PY2:
-            return unicode(value, from_enc, ENCODING_ERRORS_POLICY)
+            return unicode(value, from_enc, ENCODING_ERRORS_POLICY)  # noqa
         else:
             return value.decode(from_enc, errors=ENCODING_ERRORS_POLICY)
     return six.text_type(value)
@@ -80,10 +82,17 @@ def _convert_deep(x, enc, convert, relaxed=True):
     raise TypeError('unsupported type')
 
 
+# Result as from six.ensure_text
 def unicodize_deep(x, enc=DEFAULT_ENCODING, relaxed=True):
     return _convert_deep(x, enc, to_unicode, relaxed)
 
 
+# Result as from six.ensure_str
+def ensure_str_deep(x, enc=DEFAULT_ENCODING, relaxed=True):
+    return _convert_deep(x, enc, six.ensure_str, relaxed)
+
+
+# Result as from six.ensure_binary
 def stringize_deep(x, enc=DEFAULT_ENCODING, relaxed=True):
     return _convert_deep(x, enc, to_str, relaxed)
 

@@ -17,10 +17,10 @@
 namespace NActors {
 
     void TTestActorRuntime::TNodeData::Stop() {
+        TNodeDataBase::Stop();
         if (Mon) {
             Mon->Stop();
         }
-        TNodeDataBase::Stop();
     }
 
     TTestActorRuntime::TNodeData::~TNodeData() {
@@ -102,7 +102,7 @@ namespace NActors {
             auto* node = GetNodeById(nodeId);
             const auto* app0 = App0.Get();
             if (!SingleSysEnv) {
-                const TIntrusivePtr<NMonitoring::TDynamicCounters> profilerCounters = NKikimr::GetServiceCounters(node->DynamicCounters, "utils");
+                const TIntrusivePtr<::NMonitoring::TDynamicCounters> profilerCounters = NKikimr::GetServiceCounters(node->DynamicCounters, "utils");
                 TActorSetupCmd profilerSetup(CreateProfilerActor(profilerCounters, "."), TMailboxType::Simple, 0);
                 node->LocalServices.push_back(std::pair<TActorId, TActorSetupCmd>(MakeProfilerID(FirstNodeId + nodeIndex), profilerSetup));
             }
@@ -136,6 +136,7 @@ namespace NActors {
             nodeAppData->FeatureFlags = app0->FeatureFlags;
             nodeAppData->CompactionConfig = app0->CompactionConfig;
             nodeAppData->HiveConfig = app0->HiveConfig;
+            nodeAppData->SchemeShardConfig = app0->SchemeShardConfig;
             nodeAppData->DataShardConfig = app0->DataShardConfig;
             nodeAppData->MeteringConfig = app0->MeteringConfig;
             nodeAppData->EnableMvccSnapshotWithLegacyDomainRoot = app0->EnableMvccSnapshotWithLegacyDomainRoot;
@@ -261,7 +262,7 @@ namespace NActors {
             fromNodeIndex, async);
     }
 
-    TIntrusivePtr<NMonitoring::TDynamicCounters> TTestActorRuntime::GetCountersForComponent(TIntrusivePtr<NMonitoring::TDynamicCounters> counters, const char* component) {
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> TTestActorRuntime::GetCountersForComponent(TIntrusivePtr<::NMonitoring::TDynamicCounters> counters, const char* component) {
         return NKikimr::GetServiceCounters(counters, component);
     }
 

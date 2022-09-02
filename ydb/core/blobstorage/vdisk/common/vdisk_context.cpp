@@ -22,10 +22,10 @@ namespace NKikimr {
     TVDiskContext::TVDiskContext(
                 const TActorId &vdiskActorId,
                 std::shared_ptr<TBlobStorageGroupInfo::TTopology> top,
-                const TIntrusivePtr<NMonitoring::TDynamicCounters>& vdiskCounters,
+                const TIntrusivePtr<::NMonitoring::TDynamicCounters>& vdiskCounters,
                 const TVDiskID &selfVDisk,
                 TActorSystem *as, // as can be nullptr for tests
-                TPDiskCategory::EDeviceType type,
+                NPDisk::EDeviceType type,
                 bool donorMode,
                 TReplQuoter::TPtr replPDiskReadQuoter,
                 TReplQuoter::TPtr replPDiskWriteQuoter,

@@ -13,12 +13,12 @@ find_package(c-ares REQUIRED)
 add_library(libs-grpc-grpc)
 target_compile_options(libs-grpc-grpc PRIVATE
   -DGRPC_POSIX_FORK_ALLOW_PTHREAD_ATFORK=1
+  -Wno-everything
 )
 target_include_directories(libs-grpc-grpc PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
 )
 target_include_directories(libs-grpc-grpc PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/libs/grpc/include
   ${CMAKE_SOURCE_DIR}/contrib/libs/c-ares/include
   ${CMAKE_BINARY_DIR}/contrib/libs/grpc
   ${CMAKE_SOURCE_DIR}/contrib/libs/grpc
@@ -41,16 +41,17 @@ target_link_libraries(libs-grpc-grpc PUBLIC
   contrib-libs-re2
   contrib-libs-xxhash
   ZLIB::ZLIB
-  yabseil-cpp-tstring-y_absl-hash
+  abseil-cpp-tstring-y_absl-algorithm
+  abseil-cpp-tstring-y_absl-base
+  abseil-cpp-tstring-y_absl-functional
+  abseil-cpp-tstring-y_absl-hash
   abseil-cpp-tstring-y_absl-meta
-  yabseil-cpp-tstring-y_absl-status
-  yabsl-status-statusor
-  yabseil-cpp-tstring-y_absl-strings
-  yabsl-strings-cord
-  ystrings-internal-str_format
-  yabseil-cpp-tstring-y_absl-synchronization
-  yabseil-cpp-tstring-y_absl-time
-  yabsl-time-time_zone
+  abseil-cpp-tstring-y_absl-status
+  abseil-cpp-tstring-y_absl-strings
+  abseil-cpp-tstring-y_absl-synchronization
+  abseil-cpp-tstring-y_absl-time
+  abseil-cpp-tstring-y_absl-types
+  abseil-cpp-tstring-y_absl-utility
   library-cpp-resource
 )
 target_sources(libs-grpc-grpc PRIVATE

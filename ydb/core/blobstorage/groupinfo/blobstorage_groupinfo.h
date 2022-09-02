@@ -307,10 +307,10 @@ public:
             TCypherKey key = TCypherKey((const ui8*)"TestKey", 8));
 
     TBlobStorageGroupInfo(std::shared_ptr<TTopology> topology, TDynamicInfo&& rti, TString storagePoolName,
-        TMaybe<TKikimrScopeId> acceptedScope, TPDiskCategory::EDeviceType deviceType);
+        TMaybe<TKikimrScopeId> acceptedScope, NPDisk::EDeviceType deviceType);
 
     TBlobStorageGroupInfo(TTopology&& topology, TDynamicInfo&& rti, TString storagePoolName,
-        TMaybe<TKikimrScopeId> acceptedScope = {}, TPDiskCategory::EDeviceType deviceType = TPDiskCategory::DEVICE_TYPE_UNKNOWN);
+        TMaybe<TKikimrScopeId> acceptedScope = {}, NPDisk::EDeviceType deviceType = NPDisk::DEVICE_TYPE_UNKNOWN);
 
     TBlobStorageGroupInfo(const TIntrusivePtr<TBlobStorageGroupInfo>& info, const TVDiskID& vdiskId, const TActorId& actorId);
 
@@ -327,7 +327,7 @@ public:
         return StoragePoolName ? StoragePoolName : "static";
     }
 
-    TPDiskCategory::EDeviceType GetDeviceType() const {
+    NPDisk::EDeviceType GetDeviceType() const {
         return DeviceType;
     }
 
@@ -413,6 +413,10 @@ public:
     const ui32 GroupGeneration;
     // erasure primarily
     const TBlobStorageGroupType Type;
+    // virtual group BlobDepot tablet id
+    std::optional<ui64> BlobDepotId;
+    // assimilating group id
+    NKikimrBlobStorage::TGroupDecommitStatus::E DecommitStatus = NKikimrBlobStorage::TGroupDecommitStatus::NONE;
     // origin of the group info content
     std::optional<NKikimrBlobStorage::TGroupInfo> Group;
 
@@ -431,7 +435,7 @@ private:
     // access control
     TMaybe<TKikimrScopeId> AcceptedScope;
     TString StoragePoolName;
-    TPDiskCategory::EDeviceType DeviceType = TPDiskCategory::DEVICE_TYPE_UNKNOWN;
+    NPDisk::EDeviceType DeviceType = NPDisk::DEVICE_TYPE_UNKNOWN;
 };
 
 // physical fail domain description

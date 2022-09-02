@@ -48,12 +48,11 @@ dsn := "grpcs://ydb.serverless.yandexcloud.net:2135/?database=/ru-central1/b1g8s
 // IAM-токен
 token := "t1.9euelZrOy8aVmZKJm5HGjceMkMeVj-..."
 // создаем объект подключения db, является входной точкой для сервисов YDB
-db, err := ydb.Open(
-  ctx,
+db, err := ydb.Open(ctx,
   dsn,
 //  yc.WithInternalCA(), // используем сертификаты Яндекс Облака
   ydb.WithAccessTokenCredentials(token), // аутентификация с помощью токена
-//  ydb.WithAnonimousCredentials(token), // анонимная аутентификация (например, в docker ydb)
+//  ydb.WithAnonimousCredentials(), // анонимная аутентификация (например, в docker ydb)
 //  yc.WithMetadataCredentials(token), // аутентификация изнутри виртуальной машины в Яндекс Облаке или из Яндекс Функции
 //  yc.WithServiceAccountKeyFileCredentials("~/.ydb/sa.json"), // аутентификация в Яндекс Облаке с помощью файла сервисного аккаунта
 //  environ.WithEnvironCredentials(ctx), // аутентификация с использованием переменных окружения
@@ -82,7 +81,7 @@ err = db.Table().Do(
   ctx,
   func(ctx context.Context, s table.Session) (err error) {
     return s.CreateTable(ctx, path.Join(db.Name(), "series"),
-      options.WithColumn("series_id", types.Optional(types.TypeUint64)),
+      options.WithColumn("series_id", types.TypeUint64),  // not null column
       options.WithColumn("title", types.Optional(types.TypeUTF8)),
       options.WithColumn("series_info", types.Optional(types.TypeUTF8)),
       options.WithColumn("release_date", types.Optional(types.TypeDate)),
@@ -137,7 +136,7 @@ err := db.Table().Do(
   func(ctx context.Context, s table.Session) (err error) {
     var (
       res   result.Result
-      id    *uint64 // указатель - для опциональных результатов
+      id    uint64 // переменная для required результатов
       title *string // указатель - для опциональных результатов
       date  *time.Time // указатель - для опциональных результатов
     )
@@ -158,9 +157,6 @@ err := db.Table().Do(
       table.NewQueryParameters(
         table.ValueParam("$seriesID", types.Uint64Value(1)), // подстановка в условие запроса
       ),
-      options.WithQueryCachePolicy(
-        options.WithQueryCachePolicyKeepInCache(), // включаем серверный кэш скомпилированных запросов
-      ),
     )
     if err != nil {
       return err
@@ -174,7 +170,7 @@ err := db.Table().Do(
         // в ScanNamed передаем имена колонок из строки сканирования,
         // адреса (и типы данных), куда следует присвоить результаты запроса
         err = res.ScanNamed(
-          named.Optional("series_id", &id),
+          named.Required("series_id", id),
           named.Optional("title", &title),
           named.Optional("release_date", &date),
         )
@@ -183,7 +179,7 @@ err := db.Table().Do(
         }
         log.Printf(
           "  > %d %s %s\n",
-          *id, *title, *date,
+          id, *title, *date,
         )
       }
     }
@@ -243,7 +239,7 @@ err = c.Do(
         // named.OptionalOrDefault позволяет "развернуть" опциональные
         // результаты или использовать дефолтное значение типа go
         err = res.ScanNamed(
-          named.OptionalOrDefault("series_id", &seriesID),
+          named.Required("series_id", &seriesID),
           named.OptionalOrDefault("season_id", &seasonID),
           named.OptionalOrDefault("title", &title),
           named.OptionalOrDefault("first_aired", &date),

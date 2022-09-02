@@ -163,6 +163,7 @@ public:
     bool HasFinalizeBuilIndex() const { return SchemaTx && SchemaTx->IsFinalizeBuildIndex(); }
     bool HasDropIndexNotice() const { return SchemaTx && SchemaTx->IsDropIndexNotice(); }
     bool HasMove() const { return SchemaTx && SchemaTx->IsMove(); }
+    bool HasMoveIndex() const { return SchemaTx && SchemaTx->IsMoveIndex(); }
     bool HasCreateCdcStream() const { return SchemaTx && SchemaTx->IsCreateCdcStream(); }
     bool HasAlterCdcStream() const { return SchemaTx && SchemaTx->IsAlterCdcStream(); }
     bool HasDropCdcStream() const { return SchemaTx && SchemaTx->IsDropCdcStream(); }
@@ -327,10 +328,16 @@ public:
     void ActivateWaitingSchemeOps(const TActorContext& ctx) const;
     void MaybeActivateWaitingSchemeOps(const TActorContext& ctx) const;
 
-    ui64 WaitingTxs() const { return WaitingDataTxOps.size(); }
+    ui64 WaitingTxs() const { return WaitingDataTxOps.size(); } // note that without iterators
     bool AddWaitingTxOp(TEvDataShard::TEvProposeTransaction::TPtr& ev, const TActorContext& ctx);
     void ActivateWaitingTxOps(TRowVersion edge, bool prioritizedReads, const TActorContext& ctx);
     void ActivateWaitingTxOps(const TActorContext& ctx);
+
+    ui64 WaitingReadIterators() const { return WaitingDataReadIterators.size(); }
+    void AddWaitingReadIterator(
+        const TRowVersion& version,
+        TEvDataShard::TEvRead::TPtr ev,
+        const TActorContext& ctx);
 
     TRowVersion GetReadEdge() const;
     TRowVersion GetUnreadableEdge(bool prioritizedReads) const;
@@ -342,6 +349,11 @@ public:
     void AddCommittingOp(const TOperation::TPtr& op);
     void RemoveCommittingOp(const TOperation::TPtr& op);
     bool WaitCompletion(const TOperation::TPtr& op) const;
+
+    /**
+     * Promotes the mvcc complete edge to the last distributed transaction less than version
+     */
+    bool PromoteCompleteEdgeUpTo(const TRowVersion& version, TTransactionContext& txc);
 
     /**
      * Marks all active planned transactions before this version as logically "complete"
@@ -460,6 +472,8 @@ private:
     TCommittingDataTxOps CommittingOps;
 
     THashMap<ui64, TOperation::TPtr> CompletingOps;
+
+    TMultiMap<TRowVersion, TEvDataShard::TEvRead::TPtr> WaitingDataReadIterators;
 
     bool GetPlannedTx(NIceDb::TNiceDb& db, ui64& step, ui64& txId);
     void SaveLastPlannedTx(NIceDb::TNiceDb& db, TStepOrder stepTxId);

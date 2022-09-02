@@ -414,6 +414,8 @@ void TExecutor::Active(const TActorContext &ctx) {
         LeaseDuration = Owner->ReadOnlyLeaseDuration();
         if (!LeaseDuration) {
             LeaseEnabled = false;
+        } else {
+            LeaseDurationUpdated = true;
         }
     }
 
@@ -1403,37 +1405,12 @@ void TExecutor::ApplyExternalPartSwitch(TPendingPartSwitch &partSwitch) {
     }
 }
 
-TExecutor::TLeaseCommit* TExecutor::EnsureReadOnlyLease(TMonotonic at) {
-    Y_VERIFY(Stats->IsActive && !Stats->IsFollower);
-    Y_VERIFY(at >= LeaseEnd);
-
-    if (!LeaseEnabled) {
-        // Automatically enable leases
-        LeaseEnabled = true;
-        LeaseDuration = Owner->ReadOnlyLeaseDuration();
-        Y_VERIFY(LeaseDuration);
+TExecutor::TLeaseCommit* TExecutor::AttachLeaseCommit(TLogCommit* commit, bool force) {
+    if (!LeaseEnabled || Y_UNLIKELY(LeaseDropped)) {
+        return nullptr;
     }
 
-    // Try to find a suitable commit that is already in flight
-    TLeaseCommit* lease = nullptr;
-    for (auto it = LeaseCommits.rbegin(); it != LeaseCommits.rend(); ++it) {
-        if (at < it->LeaseEnd) {
-            lease = &*it;
-        } else {
-            break;
-        }
-    }
-
-    if (!lease) {
-        if (LeaseDropped) {
-            // We cannot start new lease confirmations
-            return nullptr;
-        }
-
-        LogicRedo->FlushBatchedLog();
-
-        auto commit = CommitManager->Begin(true, ECommit::Misc);
-
+    if (force || LeaseDurationUpdated) {
         NKikimrExecutorFlat::TLeaseInfoMetadata proto;
         ActorIdToProto(SelfId(), proto.MutableLeaseHolder());
         proto.SetLeaseDurationUs(LeaseDuration.MicroSeconds());
@@ -1443,11 +1420,63 @@ TExecutor::TLeaseCommit* TExecutor::EnsureReadOnlyLease(TMonotonic at) {
         Y_VERIFY(ok);
 
         commit->Metadata.emplace_back(ui32(NBoot::ELogCommitMeta::LeaseInfo), std::move(data));
+        LeaseDurationUpdated = false;
+    }
 
-        TMonotonic ts = AppData()->MonotonicTimeProvider->Now();
-        lease = &LeaseCommits.emplace_back(commit->Step, ts, ts + LeaseDuration);
+    TMonotonic ts = AppData()->MonotonicTimeProvider->Now();
+    TLeaseCommit* lease = &LeaseCommits.emplace_back(commit->Step, ts, ts + LeaseDuration);
+
+    // It may happen in the future that LeaseDuration is decreased by this
+    // commit, in which case new leader might read and use it, and may not wait
+    // longer than the new LeaseEnd. If there are commits currently in flight
+    // make sure to truncate their lease extensions to the new LeaseEnd.
+    if (force || LeaseDurationUpdated) {
+        auto it = LeaseCommitsByEnd.upper_bound(lease->LeaseEnd);
+        while (it != LeaseCommitsByEnd.end()) {
+            TLeaseCommit* other = it->second;
+            it = LeaseCommitsByEnd.erase(it);
+            other->LeaseEnd = lease->LeaseEnd;
+            other->ByEndIterator = LeaseCommitsByEnd.emplace(other->LeaseEnd, other);
+        }
+        // Currently confirmed lease may become truncated as well
+        LeaseEnd = Min(LeaseEnd, lease->LeaseEnd);
+    }
+
+    lease->ByEndIterator = LeaseCommitsByEnd.emplace(lease->LeaseEnd, lease);
+    return lease;
+}
+
+TExecutor::TLeaseCommit* TExecutor::EnsureReadOnlyLease(TMonotonic at) {
+    Y_VERIFY(Stats->IsActive && !Stats->IsFollower);
+    Y_VERIFY(at >= LeaseEnd);
+
+    if (!LeaseEnabled) {
+        // Automatically enable leases
+        LeaseEnabled = true;
+        LeaseDuration = Owner->ReadOnlyLeaseDuration();
+        Y_VERIFY(LeaseDuration);
+        LeaseDurationUpdated = true;
+    }
+
+    TLeaseCommit* lease = nullptr;
+
+    // Try to find a suitable commit that is already in flight
+    // This would be the first commit where at < LeaseEnd
+    auto itAfter = LeaseCommitsByEnd.upper_bound(at);
+    if (itAfter != LeaseCommitsByEnd.end()) {
+        lease = itAfter->second;
+    } else if (!LeaseDropped) {
+        LogicRedo->FlushBatchedLog();
+
+        auto commit = CommitManager->Begin(true, ECommit::Misc);
+
+        lease = AttachLeaseCommit(commit.Get(), /* force */ true);
 
         CommitManager->Commit(commit);
+
+        if (LogicSnap->MayFlush(false)) {
+            MakeLogSnapshot();
+        }
     }
 
     return lease;
@@ -1550,7 +1579,7 @@ void TExecutor::ExecuteTransaction(TAutoPtr<TSeat> seat, const TActorContext &ct
 
     THPTimer cpuTimer;
 
-    TPageCollectionTxEnv env(*PrivatePageCache);
+    TPageCollectionTxEnv env(*Database, *PrivatePageCache);
 
     TTransactionContext txc(Owner->TabletID(), Generation(), Step(), *Database, env, seat->CurrentTxDataLimit, seat->TaskId);
     txc.NotEnoughMemory(seat->NotEnoughMemoryCount);
@@ -1560,11 +1589,6 @@ void TExecutor::ExecuteTransaction(TAutoPtr<TSeat> seat, const TActorContext &ct
     const bool done = seat->Self->Execute(txc, ctx.MakeFor(OwnerActorId));
     LWTRACK(TransactionExecuteEnd, seat->Self->Orbit, seat->UniqID, done);
     seat->CPUExecTime += cpuTimer.PassedReset();
-
-    if (done && !Stats->IsFollower) { /* possible rw commit */
-        for (auto one: env.MakeSnap)
-            Database->TxSnapTable(one.first /* table */);
-    }
 
     bool failed = false;
     TString failureReason;
@@ -1615,11 +1639,16 @@ void TExecutor::ExecuteTransaction(TAutoPtr<TSeat> seat, const TActorContext &ct
         // It may not be safe to call Broken right now, call it later
         Send(SelfId(), new TEvPrivate::TEvBrokenTransaction());
     } else if (done) {
+        Y_VERIFY(!txc.IsRescheduled());
         Y_VERIFY(!seat->RequestedMemory);
         seat->OnCommitted = std::move(txc.OnCommitted_);
         CommitTransactionLog(seat, env, prod.Change, cpuTimer, ctx);
     } else {
         Y_VERIFY(!seat->CapturedMemory);
+        if (!env.ToLoad && !seat->RequestedMemory && !txc.IsRescheduled()) {
+            Y_Fail(NFmt::Do(*this) << " " << NFmt::Do(*seat) << " type "
+                    << NFmt::Do(*seat->Self) << " postoned w/o demands");
+        }
         PostponeTransaction(seat, env, prod.Change, cpuTimer, ctx);
     }
 
@@ -1664,12 +1693,8 @@ void TExecutor::ReleaseTxData(TSeat &seat, ui64 requested, const TActorContext &
 
 void TExecutor::PostponeTransaction(TAutoPtr<TSeat> seat, TPageCollectionTxEnv &env,
                                     TAutoPtr<NTable::TChange> change,
-                                    THPTimer &bookkeepingTimer, const TActorContext &ctx) {
-    if (!env.ToLoad && !seat->RequestedMemory) {
-        Y_Fail(NFmt::Do(*this) << " " << NFmt::Do(*seat) << " type "
-                << NFmt::Do(*seat->Self) << " postoned w/o demands");
-    }
-
+                                    THPTimer &bookkeepingTimer, const TActorContext &ctx)
+{
     TTxType txType = seat->Self->GetTxType();
 
     ui32 touchedPages = 0;
@@ -1907,21 +1932,20 @@ void TExecutor::CommitTransactionLog(TAutoPtr<TSeat> seat, TPageCollectionTxEnv 
         Y_VERIFY(!force || commitResult.Commit);
         auto *commit = commitResult.Commit.Get(); // could be nullptr
 
-        Y_VERIFY(env.MakeSnap.size() == change->Snapshots.size());
+        for (auto& pr : env.MakeSnap) {
+            const ui32 table = pr.first;
+            auto& snap = pr.second;
 
-        for (auto seq: xrange(env.MakeSnap.size())) {
-            const auto &snap = change->Snapshots[seq];
+            Y_VERIFY(snap.Epoch, "Table was not snapshotted");
 
-            Y_VERIFY(snap.Epoch != NTable::TEpoch::Max(), "Table was not snapshoted");
-
-            for (auto &context: env.MakeSnap.at(snap.Table).Context) {
-                auto edge = NTable::TSnapEdge(change->Stamp, snap.Epoch);
+            for (auto &context: snap.Context) {
+                auto edge = NTable::TSnapEdge(change->Stamp - 1, *snap.Epoch);
 
                 if (!context->Impl)
                     context->Impl.Reset(new TTableSnapshotContext::TImpl);
 
-                context->Impl->Prepare(snap.Table, edge);
-                CompactionLogic->PrepareTableSnapshot(snap.Table, edge, context.Get());
+                context->Impl->Prepare(table, edge);
+                CompactionLogic->PrepareTableSnapshot(table, edge, context.Get());
                 WaitingSnapshots.insert(std::make_pair(context.Get(), context));
             }
         }
@@ -2313,8 +2337,10 @@ void TExecutor::CommitTransactionLog(TAutoPtr<TSeat> seat, TPageCollectionTxEnv 
             GcLogic->HoldBarrier(barrier->Step);
         }
 
-        if (commitResult.Commit)
+        if (commitResult.Commit) {
+            AttachLeaseCommit(commitResult.Commit.Get());
             CommitManager->Commit(commitResult.Commit);
+        }
 
         for (auto &affectedTable : change->Affects)
             CompactionLogic->UpdateInMemStatsStep(affectedTable, 1, Database->GetTableMemSize(affectedTable));
@@ -2478,21 +2504,7 @@ void TExecutor::MakeLogSnapshot() {
     GcLogic->SnapToLog(snap, commit->Step);
     LogicSnap->MakeSnap(snap, *commit, Logger.Get());
 
-    if (LeaseEnabled) {
-        NKikimrExecutorFlat::TLeaseInfoMetadata proto;
-        ActorIdToProto(SelfId(), proto.MutableLeaseHolder());
-        proto.SetLeaseDurationUs(LeaseDuration.MicroSeconds());
-
-        TString data;
-        bool ok = proto.SerializeToString(&data);
-        Y_VERIFY(ok);
-
-        commit->Metadata.emplace_back(ui32(NBoot::ELogCommitMeta::LeaseInfo), std::move(data));
-
-        TMonotonic ts = AppData()->MonotonicTimeProvider->Now();
-        LeaseCommits.emplace_back(commit->Step, ts, ts + LeaseDuration);
-    }
-
+    AttachLeaseCommit(commit.Get(), /* force */ true);
     CommitManager->Commit(commit);
 
     CompactionLogic->UpdateLogUsage(LogicRedo->GrabLogUsage());
@@ -2716,7 +2728,11 @@ void TExecutor::Handle(TEvTablet::TEvDropLease::TPtr &ev, const TActorContext &c
     LeaseEnd = Min(LeaseEnd, ts);
 
     for (auto& l : LeaseCommits) {
-        l.LeaseEnd = Min(l.LeaseEnd, ts);
+        if (l.LeaseEnd > ts) {
+            LeaseCommitsByEnd.erase(l.ByEndIterator);
+            l.LeaseEnd = ts;
+            l.ByEndIterator = LeaseCommitsByEnd.emplace(l.LeaseEnd, &l);
+        }
     }
 
     ctx.Send(ev->Sender, new TEvTablet::TEvLeaseDropped);
@@ -2728,6 +2744,15 @@ void TExecutor::Handle(TEvPrivate::TEvLeaseExtend::TPtr &, const TActorContext &
     LeaseExtendPending = false;
 
     if (!LeaseCommits.empty() || !LeaseEnabled || LeaseDropped) {
+        return;
+    }
+
+    // It is possible lease was extended while this event was pending
+    TMonotonic now = TActivationContext::Monotonic();
+    TMonotonic deadline = LeaseEnd - LeaseDuration / 3;
+    if (now < deadline) {
+        Schedule(deadline, new TEvPrivate::TEvLeaseExtend);
+        LeaseExtendPending = true;
         return;
     }
 
@@ -2777,24 +2802,25 @@ void TExecutor::Handle(TEvTablet::TEvCommitResult::TPtr &ev, const TActorContext
             LeasePersisted = true;
             LeaseEnd = Max(LeaseEnd, l.LeaseEnd);
 
-            while (!l.Callbacks.empty()) {
-                // Note: callback may (though unlikely) recursively add more callbacks
-                TVector<std::function<void()>> callbacks;
-                callbacks.swap(l.Callbacks);
-                for (auto& callback : callbacks) {
-                    callback();
-                }
-            }
-
+            auto callbacks = std::move(l.Callbacks);
+            LeaseCommitsByEnd.erase(l.ByEndIterator);
             LeaseCommits.pop_front();
 
-            // Calculate a full round-trip latency for leases
-            // When this latency is larger than third of lease duration we want
-            // to increase lease duration so we would have enough time for
-            // processing read-only requests without additional commits
-            TMonotonic ts = AppData()->MonotonicTimeProvider->Now();
-            if ((LeaseEnd - ts) < LeaseDuration / 3) {
-                LeaseDuration *= 2;
+            for (auto& callback : callbacks) {
+                callback();
+            }
+
+            if (LeaseDurationIncreases < 2 && LeaseCommits.empty()) {
+                // Calculate how much of a lease is left after a full round trip
+                // When we are left with less than a third of lease duration we want
+                // to increase lease duration so we would have enough time for
+                // processing read-only requests without additional commits
+                TMonotonic ts = AppData()->MonotonicTimeProvider->Now();
+                if ((LeaseEnd - ts) < LeaseDuration / 3) {
+                    LeaseDuration *= 2;
+                    LeaseDurationUpdated = true;
+                    ++LeaseDurationIncreases;
+                }
             }
 
             // We want to schedule a new commit before the lease expires
@@ -2914,6 +2940,7 @@ THolder<TScanSnapshot> TExecutor::PrepareScanSnapshot(ui32 table, const NTable::
 
     TIntrusivePtr<TBarrier> barrier = new TBarrier(commit->Step);
 
+    AttachLeaseCommit(commit.Get());
     CommitManager->Commit(commit);
 
     TAutoPtr<NTable::TSubset> subset;
@@ -2929,8 +2956,10 @@ THolder<TScanSnapshot> TExecutor::PrepareScanSnapshot(ui32 table, const NTable::
             subset->ColdParts.insert(subset->ColdParts.end(), params->ColdParts.begin(), params->ColdParts.end());
         }
 
-        if (*subset && !subset->IsStickedToHead()) {
-            Y_FAIL("Got table subset with unexpected epoch marker");
+        if (*subset) {
+            Y_VERIFY_S(subset->IsStickedToHead(),
+                "Got table subset with unexpected head " << subset->Head
+                << " and epoch " << subset->Epoch());
         }
     } else {
         // This grabs a volatile snapshot of the mutable table state
@@ -2942,6 +2971,10 @@ THolder<TScanSnapshot> TExecutor::PrepareScanSnapshot(ui32 table, const NTable::
 
     GcLogic->HoldBarrier(barrier->Step);
     CompactionLogic->UpdateLogUsage(LogicRedo->GrabLogUsage());
+
+    if (LogicSnap->MayFlush(false)) {
+        MakeLogSnapshot();
+    }
 
     return THolder<TScanSnapshot>(new TScanSnapshot{table, std::move(barrier), subset, snapshot});
 }
@@ -3343,6 +3376,7 @@ void TExecutor::Handle(NOps::TEvResult *ops, TProdCompact *msg, bool cancelled) 
 
     Y_VERIFY(InFlyCompactionGcBarriers.emplace(commit->Step, ops->Barrier).second);
 
+    AttachLeaseCommit(commit.Get());
     CommitManager->Commit(commit);
 
     if (hadFrozen || logicResult.MemCompacted)
@@ -3708,6 +3742,12 @@ bool TExecutor::CompactTables() {
     }
 }
 
+void TExecutor::AllowBorrowedGarbageCompaction(ui32 tableId) {
+    if (CompactionLogic) {
+        return CompactionLogic->AllowBorrowedGarbageCompaction(tableId);
+    }
+}
+
 STFUNC(TExecutor::StateInit) {
     Y_UNUSED(ev);
     Y_UNUSED(ctx);
@@ -3804,6 +3844,11 @@ bool TExecutor::HasLoanedParts() const {
     if (BorrowLogic)
         return BorrowLogic->HasLoanedParts();
     return false;
+}
+
+bool TExecutor::HasBorrowed(ui32 table, ui64 selfTabletId) const {
+    Y_VERIFY_S(Database, "Checking borrowers of table# " << table << " for tablet# " << selfTabletId);
+    return Database->HasBorrowed(table, selfTabletId);
 }
 
 const TExecutorStats& TExecutor::GetStats() const {
@@ -4452,6 +4497,10 @@ void TExecutor::Handle(TEvPrivate::TEvActivateCompactionChanges::TPtr& ev, const
     for (auto& logicResult : CompactionLogic->ApplyChanges()) {
         CommitCompactionChanges(logicResult.Table, logicResult.Changes, logicResult.Strategy);
     }
+
+    if (LogicSnap->MayFlush(false)) {
+        MakeLogSnapshot();
+    }
 }
 
 void TExecutor::CommitCompactionChanges(
@@ -4481,6 +4530,7 @@ void TExecutor::CommitCompactionChanges(
         Y_UNUSED(glob);
     }
 
+    AttachLeaseCommit(commit.Get());
     CommitManager->Commit(commit);
 }
 

@@ -27,6 +27,8 @@ struct TYqEventSubspace {
         AuditService,
         TestConnection,
         InternalService,
+        QuotaService,
+        RateLimiter,
 
         SubspacesEnd,
     };

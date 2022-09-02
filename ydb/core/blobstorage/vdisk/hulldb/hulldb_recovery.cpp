@@ -438,7 +438,21 @@ namespace NKikimr {
     void THullDbRecovery::OutputHtmlForHugeBlobDeleter(IOutputStream &str) const
     {
         if (HullDs && HullDs->LogoBlobs) {
-            HullDs->LogoBlobs->DelayedHugeBlobDeleterInfo->RenderState(str);
+            HullDs->LogoBlobs->DelayedCompactionDeleterInfo->RenderState(str);
+        }
+    }
+
+    void THullDbRecovery::OutputProtoForDb(NKikimrVDisk::VDiskStat *proto) const {
+        if (HullDs) {
+            if (HullDs->LogoBlobs) {
+                HullDs->LogoBlobs->OutputProto(proto->mutable_logoblobs());
+            }
+            if (HullDs->Blocks) {
+                HullDs->Blocks->OutputProto(proto->mutable_blocks());
+            }
+            if (HullDs->Barriers) {
+                HullDs->Barriers->OutputProto(proto->mutable_barriers());
+            }
         }
     }
 

@@ -16,13 +16,14 @@ target_link_libraries(yq-libs-private_client PUBLIC
   yutil
   cpp-monlib-dynamic_counters
   cpp-protobuf-json
-  api-grpc-draft
   cpp-client-ydb_table
   libs-control_plane_storage-proto
+  yq-libs-grpc
   yq-libs-shared_resources
   ydb-core-protos
 )
 target_sources(yq-libs-private_client PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/private_client/internal_service.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/private_client/loopback_service.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/private_client/private_client.cpp
 )

@@ -21,7 +21,7 @@ using TStatus = IGraphTransformer::TStatus;
 class TKqpPhysicalOptTransformer : public TOptimizeTransformerBase {
 public:
     TKqpPhysicalOptTransformer(TTypeAnnotationContext& typesCtx, const TIntrusivePtr<TKqpOptimizeContext>& kqpCtx)
-        : TOptimizeTransformerBase(nullptr, NLog::EComponent::ProviderKqp, {})
+        : TOptimizeTransformerBase(nullptr, NYql::NLog::EComponent::ProviderKqp, {})
         , TypesCtx(typesCtx)
         , KqpCtx(*kqpCtx)
     {
@@ -29,10 +29,13 @@ public:
         AddHandler(0, &TKqlReadTable::Match, HNDL(BuildReadTableStage));
         AddHandler(0, &TKqlReadTableRanges::Match, HNDL(BuildReadTableRangesStage));
         AddHandler(0, &TKqlLookupTable::Match, HNDL(BuildLookupTableStage));
+        AddHandler(0, &TKqlStreamLookupTable::Match, HNDL(BuildStreamLookupTableStages));
         AddHandler(0, [](const TExprNode* node) { return TCoSort::Match(node) || TCoTopSort::Match(node); },
             HNDL(RemoveRedundantSortByPk));
         AddHandler(0, &TCoTake::Match, HNDL(ApplyLimitToReadTable));
         AddHandler(0, &TCoFlatMap::Match, HNDL(PushOlapFilter));
+        AddHandler(0, &TCoCombineByKey::Match, HNDL(PushOlapAggregate));
+        AddHandler(0, &TDqPhyLength::Match, HNDL(PushOlapLength));
         AddHandler(0, &TCoSkipNullMembers::Match, HNDL(PushSkipNullMembersToStage<false>));
         AddHandler(0, &TCoExtractMembers::Match, HNDL(PushExtractMembersToStage<false>));
         AddHandler(0, &TCoFlatMapBase::Match, HNDL(BuildFlatmapStage<false>));
@@ -40,9 +43,9 @@ public:
         AddHandler(0, &TCoPartitionsByKeys::Match, HNDL(BuildPartitionsStage));
         AddHandler(0, &TCoPartitionByKey::Match, HNDL(BuildPartitionStage));
         AddHandler(0, &TCoTopSort::Match, HNDL(BuildTopSortStage<false>));
-        AddHandler(0, &TCoTake::Match, HNDL(BuildTakeSkipStage<false>));
+        AddHandler(0, &TCoTakeBase::Match, HNDL(BuildTakeSkipStage<false>));
         AddHandler(0, &TCoSortBase::Match, HNDL(BuildSortStage<false>));
-        AddHandler(0, &TCoTake::Match, HNDL(BuildTakeStage<false>));
+        AddHandler(0, &TCoTakeBase::Match, HNDL(BuildTakeStage<false>));
         AddHandler(0, &TCoLength::Match, HNDL(RewriteLengthOfStageOutput<false>));
         AddHandler(0, &TCoExtendBase::Match, HNDL(BuildExtendStage));
         AddHandler(0, &TDqJoin::Match, HNDL(RewriteRightJoinToLeft));
@@ -58,6 +61,7 @@ public:
         AddHandler(0, &TKqlInsertRowsIndex::Match, HNDL(BuildInsertIndexStages));
         AddHandler(0, &TKqlDeleteRowsIndex::Match, HNDL(BuildDeleteIndexStages));
         AddHandler(0, &TCoUnorderedBase::Match, HNDL(DropUnordered));
+        AddHandler(0, &TDqStage::Match, HNDL(PrecomputeToInput));
         AddHandler(0, &TDqStage::Match, HNDL(FloatUpStage));
         AddHandler(0, &TCoHasItems::Match, HNDL(BuildHasItems));
         AddHandler(0, &TCoHead::Match, HNDL(BuildScalarPrecompute<false>));
@@ -71,9 +75,9 @@ public:
         AddHandler(1, &TCoFlatMapBase::Match, HNDL(BuildFlatmapStage<true>));
         AddHandler(1, &TCoCombineByKey::Match, HNDL(PushCombineToStage<true>));
         AddHandler(1, &TCoTopSort::Match, HNDL(BuildTopSortStage<true>));
-        AddHandler(1, &TCoTake::Match, HNDL(BuildTakeSkipStage<true>));
+        AddHandler(1, &TCoTakeBase::Match, HNDL(BuildTakeSkipStage<true>));
         AddHandler(1, &TCoSortBase::Match, HNDL(BuildSortStage<true>));
-        AddHandler(1, &TCoTake::Match, HNDL(BuildTakeStage<true>));
+        AddHandler(1, &TCoTakeBase::Match, HNDL(BuildTakeStage<true>));
         AddHandler(1, &TCoLength::Match, HNDL(RewriteLengthOfStageOutput<true>));
         AddHandler(1, &TDqJoin::Match, HNDL(RewriteLeftPureJoin<true>));
         AddHandler(1, &TDqJoin::Match, HNDL(BuildJoin<true>));
@@ -108,6 +112,12 @@ protected:
         return output;
     }
 
+    TMaybeNode<TExprBase> BuildStreamLookupTableStages(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpBuildStreamLookupTableStages(node, ctx);
+        DumpAppliedRule("BuildStreamLookupTableStages", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
     TMaybeNode<TExprBase> RemoveRedundantSortByPk(TExprBase node, TExprContext& ctx) {
         TExprBase output = KqpRemoveRedundantSortByPk(node, ctx, KqpCtx);
         DumpAppliedRule("RemoveRedundantSortByPk", node.Ptr(), output.Ptr(), ctx);
@@ -123,6 +133,18 @@ protected:
     TMaybeNode<TExprBase> PushOlapFilter(TExprBase node, TExprContext& ctx) {
         TExprBase output = KqpPushOlapFilter(node, ctx, KqpCtx, TypesCtx);
         DumpAppliedRule("PushOlapFilter", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
+    TMaybeNode<TExprBase> PushOlapAggregate(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpPushOlapAggregate(node, ctx, KqpCtx);
+        DumpAppliedRule("PushOlapAggregate", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
+    TMaybeNode<TExprBase> PushOlapLength(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpPushOlapLength(node, ctx, KqpCtx);
+        DumpAppliedRule("PushOlapLength", node.Ptr(), output.Ptr(), ctx);
         return output;
     }
 
@@ -351,7 +373,7 @@ protected:
     TMaybeNode<TExprBase> PropagatePrecomuteTake(TExprBase node, TExprContext& ctx,
         IOptimizationContext& optCtx, const TGetParents& getParents)
     {
-        TExprBase output = KqpPropagatePrecomuteTake(node, ctx, optCtx, *getParents(), IsGlobal);
+        TExprBase output = DqPropagatePrecomuteTake(node, ctx, optCtx, *getParents(), IsGlobal);
         DumpAppliedRule("PropagatePrecomuteTake", node.Ptr(), output.Ptr(), ctx);
         return output;
     }
@@ -360,8 +382,14 @@ protected:
     TMaybeNode<TExprBase> PropagatePrecomuteFlatmap(TExprBase node, TExprContext& ctx,
         IOptimizationContext& optCtx, const TGetParents& getParents)
     {
-        TExprBase output = KqpPropagatePrecomuteFlatmap(node, ctx, optCtx, *getParents(), IsGlobal);
+        TExprBase output = DqPropagatePrecomuteFlatmap(node, ctx, optCtx, *getParents(), IsGlobal);
         DumpAppliedRule("PropagatePrecomuteFlatmap", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
+    TMaybeNode<TExprBase> PrecomputeToInput(TExprBase node, TExprContext& ctx) {
+        TExprBase output = DqPrecomputeToInput(node, ctx);
+        DumpAppliedRule("PrecomputeToInput", node.Ptr(), output.Ptr(), ctx);
         return output;
     }
 

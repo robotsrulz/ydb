@@ -6,6 +6,9 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(json)
+add_subdirectory(protos)
+add_subdirectory(ut)
 
 add_library(ydb-core-viewer)
 target_compile_options(ydb-core-viewer PRIVATE
@@ -18,10 +21,13 @@ target_link_libraries(ydb-core-viewer PUBLIC
   cpp-actors-core
   library-cpp-archive
   cpp-mime-types
+  cpp-protobuf-json
   ydb-core-base
   core-blobstorage-base
+  blobstorage-vdisk-common
   core-client-server
   ydb-core-health_check
+  ydb-core-grpc_services
   ydb-core-node_whiteboard
   ydb-core-protos
   ydb-core-scheme
@@ -29,11 +35,18 @@ target_link_libraries(ydb-core-viewer PUBLIC
   ydb-core-util
   core-viewer-json
   core-viewer-protos
+  yq-libs-result_formatter
   library-persqueue-topic_parser
   api-protos
   lib-deprecated-kicli
+  public-lib-json_value
 )
 target_sources(ydb-core-viewer PRIVATE
+  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/http_router.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/grpc_request_context_wrapper.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/json_handlers_fq.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/json_handlers_vdisk.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/json_handlers_viewer.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/viewer.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/wb_aggregate.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/wb_filter.cpp
@@ -51,10 +64,13 @@ target_link_libraries(ydb-core-viewer.global PUBLIC
   cpp-actors-core
   library-cpp-archive
   cpp-mime-types
+  cpp-protobuf-json
   ydb-core-base
   core-blobstorage-base
+  blobstorage-vdisk-common
   core-client-server
   ydb-core-health_check
+  ydb-core-grpc_services
   ydb-core-node_whiteboard
   ydb-core-protos
   ydb-core-scheme
@@ -62,100 +78,18 @@ target_link_libraries(ydb-core-viewer.global PUBLIC
   ydb-core-util
   core-viewer-json
   core-viewer-protos
+  yq-libs-result_formatter
   library-persqueue-topic_parser
   api-protos
   lib-deprecated-kicli
+  public-lib-json_value
 )
 target_sources(ydb-core-viewer.global PRIVATE
-  ${CMAKE_BINARY_DIR}/ydb/core/viewer/f083176314ed002a1f504f746fc2553b.cpp
+  ${CMAKE_BINARY_DIR}/ydb/core/viewer/1cdc663173c623f6a008fb99b02498f1.cpp
 )
 resources(ydb-core-viewer.global
-  ${CMAKE_BINARY_DIR}/ydb/core/viewer/f083176314ed002a1f504f746fc2553b.cpp
+  ${CMAKE_BINARY_DIR}/ydb/core/viewer/1cdc663173c623f6a008fb99b02498f1.cpp
   INPUTS
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/index.html
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/23.c91c8ccf.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/25.e1e7d81a.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/61.cf8d37dc.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/43.2f0fa127.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/64.5456c2c7.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/42.c8452d83.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/28.889b6611.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/56.094415aa.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/8.4249de62.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/6.1c300a53.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/37.8bd311d5.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/11.f00dc151.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/27.a882e6d4.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/70.3f29d08a.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/35.2155030c.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/38.2523e6e8.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/22.4fcb77c5.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/9.7ad374a4.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/12.0a6b3185.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/52.fa68fd59.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/39.94b515ee.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/47.5c5fbd32.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/10.1663f149.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/24.086f1c96.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/1.00298cdb.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/runtime-main.1f4bf331.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/15.d7cfc9c7.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/26.ab136b87.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/76.9e0fcd6c.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/29.f207d61c.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/18.79da197d.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/46.d46c9132.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/0.46ee130e.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/65.b1ceabf6.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/31.5103f298.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/55.f9447ebb.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/20.31e12d9b.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/71.fc834a7c.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/30.d27a0016.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/75.0242ef21.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/49.c7f95d00.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/5.1cb3dd5e.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/40.0c9ddbc1.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/main.5a10f92f.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/57.b3628e0e.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/63.76168228.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/62.a5e87602.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/69.d354c945.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/33.f874acc9.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/54.0d770520.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/32.a4bcafec.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/44.a5b7267e.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/51.1eb8cb89.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/7.34d8b7fb.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/41.4c87b95e.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/77.8396f8e8.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/59.1e98d62c.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/78.6d95ceab.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/66.a76b11fa.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/68.82a7b8f6.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/36.810c51c0.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/60.69ebed0d.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/21.28e040b8.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/16.829d825a.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/14.232b4b6e.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/17.1314dfa0.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/50.65300557.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/13.9514e098.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/73.b8e3f76c.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/34.9ac6c889.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/74.048824c9.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/45.e46d1e81.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/48.fd25e54e.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/72.7f46887b.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/58.9be33e32.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/53.6022c001.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/19.a00df727.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/67.7b9bff8b.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/js/4.7189f7fd.chunk.js
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/css/main.c9c40502.chunk.css
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/css/4.3e61f2b6.chunk.css
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/media/codicon.80a4c25b.ttf
-  ${CMAKE_SOURCE_DIR}/ydb/core/viewer/monitoring/resources/favicon.png
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/content/index.html
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/content/viewer.js
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/content/jstree.min.js
@@ -248,90 +182,6 @@ resources(ydb-core-viewer.global
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/content/api/lib/swagger-oauth.js
   ${CMAKE_SOURCE_DIR}/ydb/core/viewer/content/api/swagger-ui.min.js
   KEYS
-  monitoring/index.html
-  monitoring/resources/js/23.c91c8ccf.chunk.js
-  monitoring/resources/js/25.e1e7d81a.chunk.js
-  monitoring/resources/js/61.cf8d37dc.chunk.js
-  monitoring/resources/js/43.2f0fa127.chunk.js
-  monitoring/resources/js/64.5456c2c7.chunk.js
-  monitoring/resources/js/42.c8452d83.chunk.js
-  monitoring/resources/js/28.889b6611.chunk.js
-  monitoring/resources/js/56.094415aa.chunk.js
-  monitoring/resources/js/8.4249de62.chunk.js
-  monitoring/resources/js/6.1c300a53.chunk.js
-  monitoring/resources/js/37.8bd311d5.chunk.js
-  monitoring/resources/js/11.f00dc151.chunk.js
-  monitoring/resources/js/27.a882e6d4.chunk.js
-  monitoring/resources/js/70.3f29d08a.chunk.js
-  monitoring/resources/js/35.2155030c.chunk.js
-  monitoring/resources/js/38.2523e6e8.chunk.js
-  monitoring/resources/js/22.4fcb77c5.chunk.js
-  monitoring/resources/js/9.7ad374a4.chunk.js
-  monitoring/resources/js/12.0a6b3185.chunk.js
-  monitoring/resources/js/52.fa68fd59.chunk.js
-  monitoring/resources/js/39.94b515ee.chunk.js
-  monitoring/resources/js/47.5c5fbd32.chunk.js
-  monitoring/resources/js/10.1663f149.chunk.js
-  monitoring/resources/js/24.086f1c96.chunk.js
-  monitoring/resources/js/1.00298cdb.chunk.js
-  monitoring/resources/js/runtime-main.1f4bf331.js
-  monitoring/resources/js/15.d7cfc9c7.chunk.js
-  monitoring/resources/js/26.ab136b87.chunk.js
-  monitoring/resources/js/76.9e0fcd6c.chunk.js
-  monitoring/resources/js/29.f207d61c.chunk.js
-  monitoring/resources/js/18.79da197d.chunk.js
-  monitoring/resources/js/46.d46c9132.chunk.js
-  monitoring/resources/js/0.46ee130e.chunk.js
-  monitoring/resources/js/65.b1ceabf6.chunk.js
-  monitoring/resources/js/31.5103f298.chunk.js
-  monitoring/resources/js/55.f9447ebb.chunk.js
-  monitoring/resources/js/20.31e12d9b.chunk.js
-  monitoring/resources/js/71.fc834a7c.chunk.js
-  monitoring/resources/js/30.d27a0016.chunk.js
-  monitoring/resources/js/75.0242ef21.chunk.js
-  monitoring/resources/js/49.c7f95d00.chunk.js
-  monitoring/resources/js/5.1cb3dd5e.chunk.js
-  monitoring/resources/js/40.0c9ddbc1.chunk.js
-  monitoring/resources/js/main.5a10f92f.chunk.js
-  monitoring/resources/js/57.b3628e0e.chunk.js
-  monitoring/resources/js/63.76168228.chunk.js
-  monitoring/resources/js/62.a5e87602.chunk.js
-  monitoring/resources/js/69.d354c945.chunk.js
-  monitoring/resources/js/33.f874acc9.chunk.js
-  monitoring/resources/js/54.0d770520.chunk.js
-  monitoring/resources/js/32.a4bcafec.chunk.js
-  monitoring/resources/js/44.a5b7267e.chunk.js
-  monitoring/resources/js/51.1eb8cb89.chunk.js
-  monitoring/resources/js/7.34d8b7fb.chunk.js
-  monitoring/resources/js/41.4c87b95e.chunk.js
-  monitoring/resources/js/77.8396f8e8.chunk.js
-  monitoring/resources/js/59.1e98d62c.chunk.js
-  monitoring/resources/js/78.6d95ceab.chunk.js
-  monitoring/resources/js/66.a76b11fa.chunk.js
-  monitoring/resources/js/68.82a7b8f6.chunk.js
-  monitoring/resources/js/36.810c51c0.chunk.js
-  monitoring/resources/js/60.69ebed0d.chunk.js
-  monitoring/resources/js/21.28e040b8.chunk.js
-  monitoring/resources/js/16.829d825a.chunk.js
-  monitoring/resources/js/14.232b4b6e.chunk.js
-  monitoring/resources/js/17.1314dfa0.chunk.js
-  monitoring/resources/js/50.65300557.chunk.js
-  monitoring/resources/js/13.9514e098.chunk.js
-  monitoring/resources/js/73.b8e3f76c.chunk.js
-  monitoring/resources/js/34.9ac6c889.chunk.js
-  monitoring/resources/js/74.048824c9.chunk.js
-  monitoring/resources/js/45.e46d1e81.chunk.js
-  monitoring/resources/js/48.fd25e54e.chunk.js
-  monitoring/resources/js/72.7f46887b.chunk.js
-  monitoring/resources/js/58.9be33e32.chunk.js
-  monitoring/resources/js/53.6022c001.chunk.js
-  monitoring/resources/js/19.a00df727.chunk.js
-  monitoring/resources/js/67.7b9bff8b.chunk.js
-  monitoring/resources/js/4.7189f7fd.chunk.js
-  monitoring/resources/css/main.c9c40502.chunk.css
-  monitoring/resources/css/4.3e61f2b6.chunk.css
-  monitoring/resources/media/codicon.80a4c25b.ttf
-  monitoring/resources/favicon.png
   viewer/index.html
   viewer/viewer.js
   viewer/jstree.min.js
@@ -424,3 +274,39 @@ resources(ydb-core-viewer.global
   viewer/api/lib/swagger-oauth.js
   viewer/api/swagger-ui.min.js
 )
+option(YDB_EMBEDDED_UI_DEV_SNAPSHOT "Use latest dev version of embedded UI git repo" Off)
+include(${CMAKE_CURRENT_SOURCE_DIR}/recursive_resources.cmake)
+
+if (YDB_EMBEDDED_UI_DEV_SNAPSHOT)
+  find_program(NPM_PATH NAMES npm REQUIRED)
+
+  include(ExternalProject)
+  ExternalProject_Add(ydb-embedded-ui-git
+    GIT_REPOSITORY https://github.com/ydb-platform/ydb-embedded-ui.git
+    GIT_TAG main
+    USES_TERMINAL_DOWNLOAD On
+    USES_TERMINAL_UPDATE On
+    USES_TERMINAL_BUILD On
+    CONFIGURE_COMMAND ""
+    TEST_COMMAND ""
+    INSTALL_COMMAND ""
+    BUILD_IN_SOURCE On
+    BUILD_COMMAND ${NPM_PATH} ci
+    COMMAND       ${NPM_PATH} run build:embedded
+  )
+  ExternalProject_Get_property(ydb-embedded-ui-git SOURCE_DIR)
+  add_gen_resources(ydb-embedded-ui-git ${CMAKE_BINARY_DIR}/ydb/core/viewer/ydb_embedded_ui_monitoring.cpp
+    IN_DIR  ${SOURCE_DIR}/build
+    PREFIX monitoring
+  )
+
+else()
+  add_dir_resources(${CMAKE_BINARY_DIR}/ydb/core/viewer/ydb_embedded_ui_monitoring.cpp
+    IN_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/monitoring
+    PREFIX monitoring
+  )
+endif()
+target_sources(ydb-core-viewer.global PRIVATE
+  ${CMAKE_BINARY_DIR}/ydb/core/viewer/ydb_embedded_ui_monitoring.cpp
+)
+

@@ -6,6 +6,10 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(service)
+add_subdirectory(support)
+add_subdirectory(tz)
+add_subdirectory(ut)
 
 add_library(yql-public-udf)
 target_compile_options(yql-public-udf PRIVATE
@@ -18,6 +22,7 @@ target_link_libraries(yql-public-udf PUBLIC
   library-cpp-resource
   yql-public-decimal
   yql-public-types
+  cpp-deprecated-atomic
 )
 target_sources(yql-public-udf PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/public/udf/udf_allocator.cpp

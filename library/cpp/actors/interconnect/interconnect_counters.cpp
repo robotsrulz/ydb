@@ -29,6 +29,7 @@ namespace {
             {}
 
             TOutputChannel(const TOutputChannel&) = default;
+            TOutputChannel &operator=(const TOutputChannel& other) = default;
         };
 
         struct TInputChannel {
@@ -52,6 +53,7 @@ namespace {
             {}
 
             TInputChannel(const TInputChannel&) = default;
+            TInputChannel &operator=(const TInputChannel& other) = default;
         };
 
         struct TInputChannels : std::unordered_map<ui16, TInputChannel> {
@@ -72,6 +74,7 @@ namespace {
             }
 
             TInputChannels(const TInputChannels&) = default;
+            TInputChannels &operator=(const TInputChannels& other) = default;
 
             const TInputChannel& Get(ui16 id) const {
                 const auto it = find(id);
@@ -165,8 +168,9 @@ namespace {
             ++*SpuriousWriteWakeups;
         }
 
-        void IncSendSyscalls() override {
+        void IncSendSyscalls(ui64 ns) override {
             ++*SendSyscalls;
+            *SendSyscallsNs += ns;
         }
 
         void IncInflyLimitReach() override {
@@ -197,16 +201,16 @@ namespace {
             ++*ch.IncomingEvents;
         }
 
-        void IncRecvSyscalls() override {
+        void IncRecvSyscalls(ui64 ns) override {
             ++*RecvSyscalls;
+            *RecvSyscallsNs += ns;
         }
 
         void AddTotalBytesRead(ui64 value) override {
             *TotalBytesRead += value;
         }
 
-        void UpdateLegacyPingTimeHist(ui64 value) override {
-            LegacyPingTimeHist.Add(value);
+        void UpdatePingTimeHistogram(ui64 value) override {
             PingTimeHistogram->Collect(value);
         }
 
@@ -278,9 +282,6 @@ namespace {
                 InflyLimitReach = AdaptiveCounters->GetCounter("InflyLimitReach", true);
                 InflightDataAmount = AdaptiveCounters->GetCounter("Inflight_Data");
 
-                LegacyPingTimeHist = {};
-                LegacyPingTimeHist.Init(AdaptiveCounters.Get(), "PingTimeHist", "mks", 125, 18);
-
                 PingTimeHistogram = AdaptiveCounters->GetHistogram(
                     "PingTimeUs", NMonitoring::ExponentialHistogram(18, 2, 125));
             }
@@ -288,7 +289,9 @@ namespace {
             if (updateGlobal) {
                 OutputBuffersTotalSize = Counters->GetCounter("OutputBuffersTotalSize");
                 SendSyscalls = Counters->GetCounter("SendSyscalls", true);
+                SendSyscallsNs = Counters->GetCounter("SendSyscallsNs", true);
                 RecvSyscalls = Counters->GetCounter("RecvSyscalls", true);
+                RecvSyscallsNs = Counters->GetCounter("RecvSyscallsNs", true);
                 SpuriousReadWakeups = Counters->GetCounter("SpuriousReadWakeups", true);
                 UsefulReadWakeups = Counters->GetCounter("UsefulReadWakeups", true);
                 SpuriousWriteWakeups = Counters->GetCounter("SpuriousWriteWakeups", true);
@@ -323,13 +326,14 @@ namespace {
         NMonitoring::TDynamicCounters::TCounterPtr QueueUtilization;
         NMonitoring::TDynamicCounters::TCounterPtr SubscribersCount;
         NMonitoring::TDynamicCounters::TCounterPtr SendSyscalls;
+        NMonitoring::TDynamicCounters::TCounterPtr SendSyscallsNs;
         NMonitoring::TDynamicCounters::TCounterPtr ClockSkewMicrosec;
         NMonitoring::TDynamicCounters::TCounterPtr RecvSyscalls;
+        NMonitoring::TDynamicCounters::TCounterPtr RecvSyscallsNs;
         NMonitoring::TDynamicCounters::TCounterPtr UsefulReadWakeups;
         NMonitoring::TDynamicCounters::TCounterPtr SpuriousReadWakeups;
         NMonitoring::TDynamicCounters::TCounterPtr UsefulWriteWakeups;
         NMonitoring::TDynamicCounters::TCounterPtr SpuriousWriteWakeups;
-        NMon::THistogramCounterHelper LegacyPingTimeHist;
         NMonitoring::THistogramPtr PingTimeHistogram;
 
         std::unordered_map<ui16, TOutputChannel> OutputChannels;
@@ -360,6 +364,7 @@ namespace {
             {}
 
             TOutputChannel(const TOutputChannel&) = default;
+            TOutputChannel &operator=(const TOutputChannel& other) = default;
         };
 
         struct TInputChannel {
@@ -382,6 +387,7 @@ namespace {
             {}
 
             TInputChannel(const TInputChannel&) = default;
+            TInputChannel &operator=(const TInputChannel& other) = default;
         };
 
         struct TInputChannels : std::unordered_map<ui16, TInputChannel> {
@@ -403,6 +409,7 @@ namespace {
             }
 
             TInputChannels(const TInputChannels&) = default;
+            TInputChannels &operator=(const TInputChannels& other) = default;
 
             const TInputChannel& Get(ui16 id) const {
                 const auto it = find(id);
@@ -480,7 +487,7 @@ namespace {
             SpuriousWriteWakeups_->Inc();
         }
 
-        void IncSendSyscalls() override {
+        void IncSendSyscalls(ui64 /*ns*/) override {
             SendSyscalls_->Inc();
         }
 
@@ -512,7 +519,7 @@ namespace {
             ch.IncomingEvents->Inc();
         }
 
-        void IncRecvSyscalls() override {
+        void IncRecvSyscalls(ui64 /*ns*/) override {
             RecvSyscalls_->Inc();
         }
 
@@ -520,7 +527,7 @@ namespace {
             TotalBytesRead_->Add(value);
         }
 
-        void UpdateLegacyPingTimeHist(ui64 value) override {
+        void UpdatePingTimeHistogram(ui64 value) override {
             PingTimeHistogram_->Record(value);
         }
 

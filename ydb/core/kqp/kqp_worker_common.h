@@ -1,5 +1,6 @@
 #include <library/cpp/actors/core/actor.h>
 #include <library/cpp/actors/core/log.h>
+#include <library/cpp/json/json_reader.h>
 
 #include <util/datetime/base.h>
 #include <util/generic/string.h>
@@ -62,6 +63,61 @@ inline bool IsQueryAllowedToLog(const TString& text) {
     auto itPassword = std::search(itUser, text.end(), password.begin(), password.end(),
         [](const char a, const char b) -> bool { return std::tolower(a) == b; });
     return itPassword == text.end();
+}
+
+inline TIntrusivePtr<NYql::TKikimrConfiguration> CreateConfig(const TKqpSettings::TConstPtr& kqpSettings,
+    const TKqpWorkerSettings& workerSettings)
+{
+    auto cfg = MakeIntrusive<NYql::TKikimrConfiguration>();
+    cfg->Init(kqpSettings->DefaultSettings.GetDefaultSettings(), workerSettings.Cluster,
+            kqpSettings->Settings, false);
+
+    if (!workerSettings.Database.empty()) {
+        cfg->_KqpTablePathPrefix = workerSettings.Database;
+    }
+
+    ApplyServiceConfig(*cfg, workerSettings.Service);
+
+    cfg->FreezeDefaults();
+    return cfg;
+}
+
+enum ETableReadType {
+    Other = 0,
+    Scan = 1,
+    FullScan = 2,
+};
+
+inline ETableReadType ExtractMostHeavyReadType(const TString& queryPlan) {
+    ETableReadType maxReadType = ETableReadType::Other;
+
+    if (queryPlan.empty()) {
+        return maxReadType;
+    }
+
+    NJson::TJsonValue root;
+    NJson::ReadJsonTree(queryPlan, &root, false);
+
+    if (root.Has("tables")) {
+        for (const auto& table : root["tables"].GetArray()) {
+            if (!table.Has("reads")) {
+                continue;
+            }
+
+            for (const auto& read : table["reads"].GetArray()) {
+                Y_VERIFY(read.Has("type"));
+                const auto& type = read["type"].GetString();
+
+                if (type == "Scan") {
+                    maxReadType = Max(maxReadType, ETableReadType::Scan);
+                } else if (type == "FullScan") {
+                    return ETableReadType::FullScan;
+                }
+            }
+        }
+    }
+
+    return maxReadType;
 }
 
 }

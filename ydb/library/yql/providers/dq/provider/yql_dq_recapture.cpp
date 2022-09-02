@@ -12,6 +12,7 @@
 #include <ydb/library/yql/ast/yql_expr.h>
 #include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/dq/opt/dq_opt.h>
+#include <ydb/library/yql/minikql/mkql_program_builder.h>
 
 #include <util/generic/scope.h>
 
@@ -21,8 +22,8 @@ using namespace NNodes;
 
 namespace {
 
-const THashSet<TStringBuf> VALID_SOURCES = {DqProviderName, ConfigProviderName, YtProviderName, ClickHouseProviderName, YdbProviderName};
-const THashSet<TStringBuf> VALID_SINKS = {ResultProviderName, YtProviderName};
+const THashSet<TStringBuf> VALID_SOURCES = {DqProviderName, ConfigProviderName, YtProviderName, ClickHouseProviderName, YdbProviderName, S3ProviderName};
+const THashSet<TStringBuf> VALID_SINKS = {ResultProviderName, YtProviderName, S3ProviderName};
 const THashSet<TStringBuf> UNSUPPORTED_CALLABLE = { TCoForwardList::CallableName() };
 
 }
@@ -79,18 +80,20 @@ public:
             TNodeSet visited;
             Scan(*input, ctx, good, dataSize, visited, hasJoin);
 
+            if (good && hasJoin && dataSize > State_->Settings->MaxDataSizePerQuery.Get().GetOrElse(10_GB)) {
+                Statistics_["DqAnalyzerBigJoin"]++;
+                AddInfo(ctx, TStringBuilder() << "too big join input: " << dataSize);
+                good = false;
+            }
+
             if (good) {
                 Statistics_["DqAnalyzerOk"]++;
             } else {
                 Statistics_["DqAnalyzerFail"] ++;
             }
 
-            if ((hasJoin && dataSize > State_->Settings->MaxDataSizePerQuery.Get().GetOrElse(10_GB))) {
-                Statistics_["DqAnalyzerBigJoin"]++;
-            }
-
-            if (!good || (hasJoin && dataSize > State_->Settings->MaxDataSizePerQuery.Get().GetOrElse(10_GB))) {
-                YQL_LOG(DEBUG) << "good: " << good << " hasJoin: " << hasJoin << " dataSize: " << dataSize;
+            if (!good) {
+                YQL_CLOG(DEBUG, ProviderDq) << "good: " << good << " hasJoin: " << hasJoin << " dataSize: " << dataSize;
                 return TStatus::Ok;
             }
         }
@@ -116,6 +119,7 @@ public:
         }, ctx, TOptimizeExprSettings{State_->TypeCtx});
 
         if (input != output) {
+            YQL_CLOG(DEBUG, ProviderDq) << "DqsRecapture";
             // TODO: Add before/after recapture transformers
             State_->TypeCtx->DqCaptured = true;
             // TODO: drop this after implementing DQS ConstraintTransformer
@@ -129,7 +133,7 @@ public:
 
 private:
     void AddInfo(TExprContext& ctx, const TString& message) const {
-        YQL_LOG(DEBUG) << message;
+        YQL_CLOG(DEBUG, ProviderDq) << message;
         TIssue info("DQ cannot execute the query. Cause: " + message);
         info.Severity = TSeverityIds::S_INFO;
         ctx.IssueManager.RaiseIssue(info);
@@ -224,9 +228,15 @@ private:
                 }
             }
         }
-        else if (!State_->TypeCtx->UdfSupportsYield && TCoScriptUdf::Match(&node)) {
-            if (IsCallableTypeHasStreams(node.GetTypeAnn()->Cast<TCallableExprType>())) {
-                AddInfo(ctx, TStringBuilder() << "script udf with streams");
+        else if (TCoScriptUdf::Match(&node)) {
+            if (!State_->TypeCtx->UdfSupportsYield) {
+                if (IsCallableTypeHasStreams(node.GetTypeAnn()->Cast<TCallableExprType>())) {
+                    AddInfo(ctx, TStringBuilder() << "script udf with streams");
+                    good = false;
+                }
+            }
+            if (NKikimr::NMiniKQL::IsSystemPython(NKikimr::NMiniKQL::ScriptTypeFromStr(node.Head().Content()))) {
+                AddInfo(ctx, TStringBuilder() << "system python udf");
                 good = false;
             }
             if (good) {

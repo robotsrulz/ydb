@@ -18,6 +18,8 @@
  * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
  * KIND, either express or implied.
  *
+ * SPDX-License-Identifier: curl
+ *
  ***************************************************************************/
 
 #include "curl_setup.h"
@@ -964,6 +966,13 @@ static CURLcode CONNECT(struct Curl_easy *data,
     break;
 
     default:
+      break;
+    }
+
+    if(conn->bits.close && data->req.newurl) {
+      /* Connection closed by server. Don't use it anymore */
+      Curl_closesocket(data, conn, conn->sock[sockindex]);
+      conn->sock[sockindex] = CURL_SOCKET_BAD;
       break;
     }
 

@@ -58,11 +58,17 @@ public:
         ui64 Weeded = 0;
         ui64 Sieved = 0;
         ui64 NoKey = 0;         /* Examined TPart without the key */
-        ui64 Invisible = 0;     /* Skipped invisible versions */
+
+        TIteratorStats Stats;
     };
 
     explicit TTable(TEpoch);
     ~TTable();
+
+    void PrepareRollback();
+    void RollbackChanges();
+    void CommitChanges(TArrayRef<const TMemGlob> blobs);
+    void CommitNewTable(TArrayRef<const TMemGlob> blobs);
 
     void SetScheme(const TScheme::TTableInfo& tableScheme);
 
@@ -79,6 +85,8 @@ public:
     TAutoPtr<TSubset> Subset(TEpoch edge) const noexcept;
     TAutoPtr<TSubset> ScanSnapshot(TRowVersion snapshot = TRowVersion::Max()) noexcept;
     TAutoPtr<TSubset> Unwrap() noexcept; /* full Subset(..) + final Replace(..) */
+
+    bool HasBorrowed(ui64 selfTabletId) const noexcept;
 
     /**
      * Returns current slices for bundles
@@ -126,21 +134,42 @@ public:
 
     TVector<TIntrusiveConstPtr<TMemTable>> GetMemTables() const noexcept;
 
-    TAutoPtr<TTableIt> Iterate(TRawVals key, TTagsRef tags, IPages* env, ESeek, TRowVersion snapshot) const noexcept;
-    TAutoPtr<TTableReverseIt> IterateReverse(TRawVals key, TTagsRef tags, IPages* env, ESeek, TRowVersion snapshot) const noexcept;
-    TReady Select(TRawVals key, TTagsRef tags, IPages* env, TRowState& row,
-                   ui64 flg, TRowVersion snapshot, TDeque<TPartSimpleIt>& tempIterators) const noexcept;
+    TAutoPtr<TTableIt> Iterate(TRawVals key, TTagsRef tags, IPages* env, ESeek,
+            TRowVersion snapshot,
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
+    TAutoPtr<TTableReverseIt> IterateReverse(TRawVals key, TTagsRef tags, IPages* env, ESeek,
+            TRowVersion snapshot,
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
+    EReady Select(TRawVals key, TTagsRef tags, IPages* env, TRowState& row,
+                  ui64 flg, TRowVersion snapshot, TDeque<TPartSimpleIt>& tempIterators,
+                  TSelectStats& stats,
+                  const ITransactionMapPtr& visible = nullptr,
+                  const ITransactionObserverPtr& observer = nullptr) const noexcept;
+    TSelectRowVersionResult SelectRowVersion(
+            TRawVals key, IPages* env, ui64 readFlags,
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
 
-    TReady Precharge(TRawVals minKey, TRawVals maxKey, TTagsRef tags,
-                   IPages* env, ui64 flg,
-                   ui64 itemsLimit, ui64 bytesLimit,
-                   EDirection direction, TRowVersion snapshot) const;
+    EReady Precharge(TRawVals minKey, TRawVals maxKey, TTagsRef tags,
+                     IPages* env, ui64 flg,
+                     ui64 itemsLimit, ui64 bytesLimit,
+                     EDirection direction, TRowVersion snapshot, TSelectStats& stats) const;
 
-    void Update(ERowOp, TRawVals key, TOpsRef, TArrayRef<TMemGlob> apart, TRowVersion rowVersion);
+    void Update(ERowOp, TRawVals key, TOpsRef, TArrayRef<const TMemGlob> apart, TRowVersion rowVersion);
 
-    void UpdateTx(ERowOp, TRawVals key, TOpsRef, TArrayRef<TMemGlob> apart, ui64 txId);
+    void UpdateTx(ERowOp, TRawVals key, TOpsRef, TArrayRef<const TMemGlob> apart, ui64 txId);
     void CommitTx(ui64 txId, TRowVersion rowVersion);
     void RemoveTx(ui64 txId);
+
+    /**
+     * Returns true when table has an open transaction that is not committed or removed yet
+     */
+    bool HasOpenTx(ui64 txId) const;
+    bool HasTxData(ui64 txId) const;
+    bool HasCommittedTx(ui64 txId) const;
+    bool HasRemovedTx(ui64 txId) const;
 
     TPartView GetPartView(const TLogoBlobID &bundle) const
     {
@@ -200,7 +229,9 @@ public:
     ui64 GetMemSize(TEpoch epoch = TEpoch::Max()) const noexcept
     {
         if (Y_LIKELY(epoch == TEpoch::Max())) {
-            return Stat_.FrozenSize + (Mutable ? Mutable->GetUsedMem() : 0);
+            return Stat_.FrozenSize
+                + (Mutable ? Mutable->GetUsedMem() : 0)
+                + (MutableBackup ? MutableBackup->GetUsedMem() : 0);
         }
 
         ui64 size = 0;
@@ -209,6 +240,10 @@ public:
             if (x->Epoch < epoch) {
                 size += x->GetUsedMem();
             }
+        }
+
+        if (MutableBackup && MutableBackup->Epoch < epoch) {
+            size += MutableBackup->GetUsedMem();
         }
 
         if (Mutable && Mutable->Epoch < epoch) {
@@ -220,17 +255,23 @@ public:
 
     ui64 GetMemWaste() const noexcept
     {
-        return Stat_.FrozenWaste + (Mutable ? Mutable->GetWastedMem() : 0);
+        return Stat_.FrozenWaste
+            + (Mutable ? Mutable->GetWastedMem() : 0)
+            + (MutableBackup ? MutableBackup->GetWastedMem() : 0);
     }
 
     ui64 GetMemRowCount() const noexcept
     {
-        return Stat_.FrozenRows + (Mutable ? Mutable->GetRowCount() : 0);
+        return Stat_.FrozenRows
+            + (Mutable ? Mutable->GetRowCount() : 0)
+            + (MutableBackup ? MutableBackup->GetRowCount() : 0);
     }
 
     ui64 GetOpsCount() const noexcept
     {
-        return Stat_.FrozenOps + (Mutable ? Mutable->GetOpsCount() : 0);
+        return Stat_.FrozenOps
+            + (Mutable ? Mutable->GetOpsCount() : 0)
+            + (MutableBackup ? MutableBackup->GetOpsCount() : 0);
     }
 
     ui64 GetPartsCount() const noexcept
@@ -240,8 +281,12 @@ public:
 
     ui64 EstimateRowSize() const noexcept
     {
-        ui64 size = Stat_.FrozenSize + (Mutable ? Mutable->GetUsedMem() : 0);
-        ui64 rows = Stat_.FrozenRows + (Mutable ? Mutable->GetRowCount() : 0);
+        ui64 size = Stat_.FrozenSize
+            + (Mutable ? Mutable->GetUsedMem() : 0)
+            + (MutableBackup ? MutableBackup->GetUsedMem() : 0);
+        ui64 rows = Stat_.FrozenRows
+            + (Mutable ? Mutable->GetRowCount() : 0)
+            + (MutableBackup ? MutableBackup->GetRowCount() : 0);
 
         for (const auto& flat : Flatten) {
             if (const TPartView &partView = flat.second) {
@@ -275,10 +320,7 @@ private:
     void RemoveStat(const TPartView& partView);
 
 private:
-    struct TOpenTransaction {
-        THashSet<TIntrusiveConstPtr<TMemTable>> Mem;
-        THashSet<TIntrusiveConstPtr<TPart>> Parts;
-    };
+    void AddTxRef(ui64 txId);
 
 private:
     TEpoch Epoch; /* Monotonic table change number, with holes */
@@ -299,10 +341,57 @@ private:
 
     TRowVersionRanges RemovedRowVersions;
 
+    THashMap<ui64, size_t> TxRefs;
     THashSet<ui64> CheckTransactions;
-    THashMap<ui64, TOpenTransaction> OpenTransactions;
-    TTransactionMap<TRowVersion> CommittedTransactions;
+    TTransactionMap CommittedTransactions;
     TTransactionSet RemovedTransactions;
+
+private:
+    struct TRollbackRemoveTxRef {
+        ui64 TxId;
+    };
+
+    struct TRollbackAddCommittedTx {
+        ui64 TxId;
+        TRowVersion RowVersion;
+    };
+
+    struct TRollbackRemoveCommittedTx {
+        ui64 TxId;
+    };
+
+    struct TRollbackAddRemovedTx {
+        ui64 TxId;
+    };
+
+    struct TRollbackRemoveRemovedTx {
+        ui64 TxId;
+    };
+
+    using TRollbackOp = std::variant<
+        TRollbackRemoveTxRef,
+        TRollbackAddCommittedTx,
+        TRollbackRemoveCommittedTx,
+        TRollbackAddRemovedTx,
+        TRollbackRemoveRemovedTx>;
+
+    struct TRollbackState {
+        TEpoch Epoch;
+        TIntrusiveConstPtr<TRowScheme> Scheme;
+        ui64 Annexed;
+        TKeyRangeCacheConfig EraseCacheConfig;
+        bool EraseCacheEnabled;
+        bool MutableExisted;
+        bool MutableUpdated;
+
+        TRollbackState(TEpoch epoch)
+            : Epoch(epoch)
+        { }
+    };
+
+    std::optional<TRollbackState> RollbackState;
+    std::vector<TRollbackOp> RollbackOps;
+    TIntrusivePtr<TMemTable> MutableBackup;
 };
 
 }

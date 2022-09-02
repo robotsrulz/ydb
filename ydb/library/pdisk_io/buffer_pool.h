@@ -5,7 +5,7 @@
 #include <library/cpp/threading/queue/mpsc_read_as_filled.h>
 #include <library/cpp/threading/queue/mpsc_vinfarr_obstructive.h>
 
-#include <util/system/atomic.h>
+#include <library/cpp/deprecated/atomic/atomic.h>
 #include <util/generic/vector.h>
 #include <util/generic/list.h>
 
@@ -15,9 +15,9 @@ template<typename TObject, ui32 Size>
 class TPool {
     TVector<TObject> Objects;
     NThreading::TObstructiveConsumerAuxQueue<TObject> InPoolObjects;
-    NMonitoring::TDynamicCounters::TCounterPtr TotalAllocatedObjects;
+    ::NMonitoring::TDynamicCounters::TCounterPtr TotalAllocatedObjects;
     TAtomic FreeObjects;
-    NMonitoring::TDynamicCounters::TCounterPtr FreeObjectsMin;
+    ::NMonitoring::TDynamicCounters::TCounterPtr FreeObjectsMin;
 
     public:
     TPool()
@@ -57,8 +57,8 @@ class TPool {
         }
     }
 
-    void InitializeMonitoring(NMonitoring::TDynamicCounters::TCounterPtr totalAllocatedObjects,
-            NMonitoring::TDynamicCounters::TCounterPtr freeObjectsMin) {
+    void InitializeMonitoring(::NMonitoring::TDynamicCounters::TCounterPtr totalAllocatedObjects,
+            ::NMonitoring::TDynamicCounters::TCounterPtr freeObjectsMin) {
         TotalAllocatedObjects = totalAllocatedObjects;
         FreeObjectsMin = freeObjectsMin;
         *FreeObjectsMin = AtomicGet(FreeObjects);

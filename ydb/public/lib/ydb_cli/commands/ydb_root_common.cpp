@@ -7,7 +7,7 @@
 #include "ydb_service_scheme.h"
 #include "ydb_service_scripting.h"
 #include "ydb_service_table.h"
-#include "ydb_service_stream.h"
+#include "ydb_service_topic.h"
 #include "ydb_tools.h"
 #include "ydb_yql.h"
 
@@ -37,7 +37,7 @@ TClientCommandRootCommon::TClientCommandRootCommon(const TClientSettings& settin
     AddCommand(std::make_unique<TCommandConfig>());
     AddCommand(std::make_unique<TCommandInit>());
     AddCommand(std::make_unique<TCommandYql>());
-    AddCommand(std::make_unique<TCommandStream>());
+    AddCommand(std::make_unique<TCommandTopic>());
     AddCommand(std::make_unique<TCommandWorkload>());
 }
 
@@ -227,8 +227,10 @@ void TClientCommandRootCommon::Parse(TConfig& config) {
     ParseProfile();
 
     TClientCommandRootBase::Parse(config);
-    ParseDatabase(config);
-    ParseCaCerts(config);
+    if (!config.IsSystemCommand()) {
+        ParseDatabase(config);
+        ParseCaCerts(config);
+    }
     config.IsVerbose = IsVerbose;
 }
 
@@ -250,7 +252,7 @@ void TClientCommandRootCommon::ParseAddress(TConfig& config) {
         if (config.IsSystemCommand()) {
             return;
         } else {
-            throw TMissUseException()
+            throw TMisuseException()
                 << "Missing required option 'endpoint'.";
         }
     } else {
@@ -263,7 +265,7 @@ void TClientCommandRootCommon::ParseAddress(TConfig& config) {
             if (colon_pos == Address.rfind(":")) {
                 config.Address = Address;
             } else {
-                throw TMissUseException() << "Wrong format for option 'endpoint': more than one colon found.";
+                throw TMisuseException() << "Wrong format for option 'endpoint': more than one colon found.";
             }
         }
     }
@@ -274,7 +276,7 @@ void TClientCommandRootCommon::ParseProfile() {
         if (ProfileManager->HasProfile(ProfileName)) {
             Profile = ProfileManager->GetProfile(ProfileName);
         } else {
-            throw TMissUseException() << "Profile " << ProfileName << " does not exist." << Endl
+            throw TMisuseException() << "Profile " << ProfileName << " does not exist." << Endl
                 << "Run \"ydb config profile list\" to see existing profiles";
         }
     }
@@ -292,15 +294,11 @@ void TClientCommandRootCommon::ParseDatabase(TConfig& config) {
     }
 
     if (Database.empty()) {
-        if (!config.IsSystemCommand()) {
-            throw TMissUseException()
-                << "Missing required option 'database'.";
-        }
+        throw TMisuseException()
+            << "Missing required option 'database'.";
     } else if (!Database.StartsWith('/')) {
-        if (!config.IsSystemCommand()) {
-            throw TMissUseException() << "Path to a database \"" << Database
-                << "\" is incorrect. It must be absolute and thus must begin with '/'.";
-        }
+        throw TMisuseException() << "Path to a database \"" << Database
+            << "\" is incorrect. It must be absolute and thus must begin with '/'.";
     }
     config.Database = Database;
 }
@@ -318,7 +316,7 @@ bool TClientCommandRootCommon::GetCredentialsFromProfile(std::shared_ptr<IProfil
     }
     auto authValue = profile->GetValue("authentication");
     if (!authValue["method"]) {
-        throw TMissUseException()
+        throw TMisuseException()
             << "Configuration profile has \"authentication\" but does not has \"method\" in it";
     }
     TString authMethod = authValue["method"].as<TString>();
@@ -341,10 +339,10 @@ bool TClientCommandRootCommon::GetCredentialsFromProfile(std::shared_ptr<IProfil
         knownMethod |= (authMethod == "static-credentials");
     }
     if (!knownMethod) {
-        throw TMissUseException() << "Unknown authentication method in configuration profile: \"" << authMethod << "\"";
+        throw TMisuseException() << "Unknown authentication method in configuration profile: \"" << authMethod << "\"";
     }
     if (!authValue["data"]) {
-        throw TMissUseException() << "Active configuration profile has \"authentication\" with method \""
+        throw TMisuseException() << "Active configuration profile has \"authentication\" with method \""
             << authMethod << "\" in it, but no \"data\"";
     }
     auto authData = authValue["data"];
@@ -537,7 +535,7 @@ void TClientCommandRootCommon::ParseCredentials(TConfig& config) {
             str << " UseMetadataCredentials (true)";
         }
 
-        throw TMissUseException() << str << ". Choose exactly one of them";
+        throw TMisuseException() << str << ". Choose exactly one of them";
     }
 
     if (config.UseStaticCredentials) {
@@ -548,7 +546,7 @@ void TClientCommandRootCommon::ParseCredentials(TConfig& config) {
             }
         } else {
             if (config.StaticCredentials.Password) {
-                throw TMissUseException() << "User password was provided without user name";
+                throw TMisuseException() << "User password was provided without user name";
             }
         }
     }

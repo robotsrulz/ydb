@@ -6,6 +6,7 @@
 #include <ydb/core/blobstorage/vdisk/syncer/blobstorage_syncer_localwriter.h>
 #include <ydb/core/blobstorage/vdisk/anubis_osiris/blobstorage_anubis_osiris.h>
 #include <ydb/core/blobstorage/vdisk/repl/blobstorage_repl.h>
+#include <library/cpp/actors/wilson/wilson_span.h>
 
 namespace NKikimr {
 
@@ -36,7 +37,7 @@ namespace NKikimr {
         ILoggedRec(TLsnSeg seg, bool confirmSyncLogAlso);
         virtual ~ILoggedRec() = default;
         // a method that replays changes that has been written to the recovery log
-        virtual void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) = 0;
+        virtual void Replay(THull &hull, const TActorContext &ctx) = 0;
 
         const TLsnSeg Seg;
         const bool ConfirmSyncLogAlso;
@@ -49,8 +50,8 @@ namespace NKikimr {
     public:
         TLoggedRecVPut(TLsnSeg seg, bool confirmSyncLogAlso, const TLogoBlobID &id, const TIngress &ingress,
                 TRope &&buffer, std::unique_ptr<TEvBlobStorage::TEvVPutResult> result, const TActorId &recipient,
-                ui64 recipientCookie);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+                ui64 recipientCookie, NWilson::TTraceId traceId);
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         TLogoBlobID Id;
@@ -59,6 +60,7 @@ namespace NKikimr {
         std::unique_ptr<TEvBlobStorage::TEvVPutResult> Result;
         TActorId Recipient;
         ui64 RecipientCookie;
+        NWilson::TSpan Span;
     };
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -68,8 +70,8 @@ namespace NKikimr {
     public:
         TLoggedRecVMultiPutItem(TLsnSeg seg, bool confirmSyncLogAlso, const TLogoBlobID &id, const TIngress &ingress,
                 TRope &&buffer, std::unique_ptr<TEvVMultiPutItemResult> result, const TActorId &recipient,
-                ui64 recipientCookie);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+                ui64 recipientCookie, NWilson::TTraceId traceId);
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         TLogoBlobID Id;
@@ -78,6 +80,7 @@ namespace NKikimr {
         std::unique_ptr<TEvVMultiPutItemResult> Result;
         TActorId Recipient;
         ui64 RecipientCookie;
+        NWilson::TSpan Span;
     };
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -87,11 +90,12 @@ namespace NKikimr {
     public:
         TLoggedRecVPutHuge(TLsnSeg seg, bool confirmSyncLogAlso, const TActorId &hugeKeeperId,
                 TEvHullLogHugeBlob::TPtr ev);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         const TActorId HugeKeeperId;
         TEvHullLogHugeBlob::TPtr Ev;
+        NWilson::TSpan Span;
     };
 
     ///////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -101,7 +105,7 @@ namespace NKikimr {
     public:
         TLoggedRecVBlock(TLsnSeg seg, bool confirmSyncLogAlso, ui64 tabletId, ui32 gen, ui64 issuerGuid,
                 std::unique_ptr<TEvBlobStorage::TEvVBlockResult> result, const TActorId &recipient, ui64 recipientCookie);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         ui64 TabletId;
@@ -120,7 +124,7 @@ namespace NKikimr {
         TLoggedRecVCollectGarbage(TLsnSeg seg, bool confirmSyncLogAlso, TBarrierIngress ingress,
                 std::unique_ptr<TEvBlobStorage::TEvVCollectGarbageResult> result,
                 TEvBlobStorage::TEvVCollectGarbage::TPtr origEv);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         TBarrierIngress Ingress;
@@ -135,7 +139,7 @@ namespace NKikimr {
     public:
         TLoggedRecLocalSyncData(TLsnSeg seg, bool confirmSyncLogAlso, std::unique_ptr<TEvLocalSyncDataResult> result,
                 TEvLocalSyncData::TPtr origEv);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         std::unique_ptr<TEvLocalSyncDataResult> Result;
@@ -150,7 +154,7 @@ namespace NKikimr {
         TLoggedRecAnubisOsirisPut(TLsnSeg seg, bool confirmSyncLogAlso,
                 const TEvAnubisOsirisPut::THullDbInsert &insert, std::unique_ptr<TEvAnubisOsirisPutResult> result,
                 TEvAnubisOsirisPut::TPtr origEv);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         TEvAnubisOsirisPut::THullDbInsert Insert;
@@ -164,7 +168,7 @@ namespace NKikimr {
     class TLoggedRecPhantoms : public ILoggedRec {
     public:
         TLoggedRecPhantoms(TLsnSeg seg, bool confirmSyncLogAlso, TEvDetectedPhantomBlob::TPtr origEv);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         TEvDetectedPhantomBlob::TPtr OrigEv;
@@ -178,7 +182,7 @@ namespace NKikimr {
         TLoggedRecDelLogoBlobDataSyncLog(TLsnSeg seg, bool confirmSyncLogAlso,
                 std::unique_ptr<TEvDelLogoBlobDataSyncLogResult> result, const TActorId &recipient,
                 ui64 recipientCookie);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         std::unique_ptr<TEvDelLogoBlobDataSyncLogResult> Result;
@@ -193,7 +197,7 @@ namespace NKikimr {
     class TLoggedRecAddBulkSst : public ILoggedRec {
     public:
         TLoggedRecAddBulkSst(TLsnSeg seg, bool confirmSyncLogAlso, TEvAddBulkSst::TPtr ev);
-        void Replay(THull &hull, const TActorContext &ctx, const IActor& actor) override;
+        void Replay(THull &hull, const TActorContext &ctx) override;
 
     private:
         TEvAddBulkSst::TPtr OrigEv;

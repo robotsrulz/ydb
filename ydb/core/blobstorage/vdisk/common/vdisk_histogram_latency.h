@@ -20,17 +20,17 @@ namespace NKikimr {
         /////////////////////////////////////////////////////////////////////////////////////////
         class TLtcHisto {
         public:
-            TLtcHisto(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters,
+            TLtcHisto(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
                     const TString &name,
                     const TString &value,
-                    TPDiskCategory::EDeviceType type);
+                    NPDisk::EDeviceType type);
 
             // update histogram with with an operation with duration 'd'
             void Collect(TDuration d, ui64 size = 0);
 
         private:
             NMonitoring::THistogramPtr Histo;
-            NMonitoring::TDynamicCounters::TCounterPtr ThroughputBytes;
+            ::NMonitoring::TDynamicCounters::TCounterPtr ThroughputBytes;
         };
 
         using TLtcHistoPtr = std::shared_ptr<TLtcHisto>;

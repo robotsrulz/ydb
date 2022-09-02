@@ -497,6 +497,16 @@ NTable::TRowVersionRanges GetRemovedRowVersions(
         Tests::TServer::TPtr server,
         ui64 shardId);
 
+void SendCreateVolatileSnapshot(
+        TTestActorRuntime& runtime,
+        const TActorId& sender,
+        const TVector<TString>& tables,
+        TDuration timeout = TDuration::Seconds(5));
+
+TRowVersion GrabCreateVolatileSnapshotResult(
+        TTestActorRuntime& runtime,
+        const TActorId& sender);
+
 TRowVersion CreateVolatileSnapshot(
         Tests::TServer::TPtr server,
         const TVector<TString>& tables,
@@ -545,6 +555,10 @@ ui64 AsyncMergeTable(
         TActorId sender,
         const TString& path,
         const TVector<ui64>& sourceTabletIds);
+
+ui64 AsyncMoveTable(Tests::TServer::TPtr server,
+        const TString& srcTable,
+        const TString& dstTable);
 
 ui64 AsyncAlterAddExtraColumn(
         Tests::TServer::TPtr server,

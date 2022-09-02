@@ -7,6 +7,7 @@
 
 
 find_package(AIO REQUIRED)
+add_subdirectory(protos)
 
 add_library(ydb-library-pdisk_io)
 target_link_libraries(ydb-library-pdisk_io PUBLIC
@@ -14,12 +15,11 @@ target_link_libraries(ydb-library-pdisk_io PUBLIC
   yutil
   tools-enum_parser-enum_serialization_runtime
   AIO::aio
-  $CONAN_OPTS_SEM
   cpp-actors-core
+  cpp-actors-wilson
   cpp-monlib-dynamic_counters
   ydb-core-debug
   library-pdisk_io-protos
-  ydb-library-wilson
 )
 target_sources(ydb-library-pdisk_io PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/aio_linux.cpp
@@ -27,7 +27,10 @@ target_sources(ydb-library-pdisk_io PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/aio.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/aio_map.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/buffers.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/device_type.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/drivedata.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/sector_map.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/wcache.cpp
 )
 generate_enum_serilization(ydb-library-pdisk_io
   ${CMAKE_SOURCE_DIR}/ydb/library/pdisk_io/aio.h

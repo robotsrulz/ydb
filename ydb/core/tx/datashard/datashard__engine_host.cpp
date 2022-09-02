@@ -280,7 +280,7 @@ TIntrusivePtr<TThrRefBase> InitDataShardSysTables(TDataShard* self) {
 ///
 class TDataShardEngineHost : public TEngineHost {
 public:
-    TDataShardEngineHost(TDataShard* self, NTable::TDatabase& db, TEngineHostCounters& counters, ui64& lockTxId, TInstant now)
+    TDataShardEngineHost(TDataShard* self, NTable::TDatabase& db, TEngineHostCounters& counters, ui64& lockTxId, ui32& lockNodeId, TInstant now)
         : TEngineHost(db, counters,
             TEngineHostSettings(self->TabletID(),
                 (self->State == TShardState::Readonly || self->State == TShardState::Frozen),
@@ -289,6 +289,7 @@ public:
         , Self(self)
         , DB(db)
         , LockTxId(lockTxId)
+        , LockNodeId(lockNodeId)
         , Now(now)
     {}
 
@@ -314,6 +315,10 @@ public:
 
     void SetIsImmediateTx() {
         IsImmediateTx = true;
+    }
+
+    void SetIsRepeatableSnapshot() {
+        IsRepeatableSnapshot = true;
     }
 
     IChangeCollector* GetChangeCollector(const TTableId& tableId) const override {
@@ -350,11 +355,22 @@ public:
         if (TSysTables::IsSystemTable(key.TableId))
             return DataShardSysTable(key.TableId).IsValidKey(key);
 
-        // prevent updates/erases with LockTxId set
-        if (LockTxId && key.RowOperation != TKeyDesc::ERowOperation::Read) {
-            key.Status = TKeyDesc::EStatus::OperationNotSupported;
-            return false;
+        if (LockTxId) {
+            // Prevent updates/erases with LockTxId set, unless it's allowed for immediate mvcc txs
+            if (key.RowOperation != TKeyDesc::ERowOperation::Read &&
+                (!Self->GetEnableLockedWrites() || !IsImmediateTx || !IsRepeatableSnapshot || !LockNodeId))
+            {
+                key.Status = TKeyDesc::EStatus::OperationNotSupported;
+                return false;
+            }
+        } else if (IsRepeatableSnapshot) {
+            // Prevent updates/erases in repeatable mvcc txs
+            if (key.RowOperation != TKeyDesc::ERowOperation::Read) {
+                key.Status = TKeyDesc::EStatus::OperationNotSupported;
+                return false;
+            }
         }
+
         return TEngineHost::IsValidKey(key, maxSnapshotTime);
     }
 
@@ -366,7 +382,7 @@ public:
             return DataShardSysTable(tableId).SelectRow(row, columnIds, returnType, readTarget, holderFactory);
         }
 
-        Self->SysLocksTable().SetLock(tableId, row, LockTxId);
+        Self->SysLocksTable().SetLock(tableId, row, LockTxId, LockNodeId);
 
         Self->SetTableAccessTime(tableId, Now);
         return TEngineHost::SelectRow(tableId, row, columnIds, returnType, readTarget, holderFactory);
@@ -379,7 +395,7 @@ public:
     {
         Y_VERIFY(!TSysTables::IsSystemTable(tableId), "SelectRange no system table is not supported");
 
-        Self->SysLocksTable().SetLock(tableId, range, LockTxId);
+        Self->SysLocksTable().SetLock(tableId, range, LockTxId, LockNodeId);
 
         Self->SetTableAccessTime(tableId, Now);
         return TEngineHost::SelectRange(tableId, range, columnIds, skipNullKeys, returnType, readTarget,
@@ -392,7 +408,10 @@ public:
             return;
         }
 
-        Self->SysLocksTable().BreakLock(tableId, row);
+        // TODO: handle presistent tx locks
+        if (!LockTxId) {
+            Self->SysLocksTable().BreakLock(tableId, row);
+        }
         Self->SetTableUpdateTime(tableId, Now);
 
         // apply special columns if declared
@@ -444,7 +463,10 @@ public:
             return;
         }
 
-        Self->SysLocksTable().BreakLock(tableId, row);
+        // TODO: handle persistent tx locks
+        if (!LockTxId) {
+            Self->SysLocksTable().BreakLock(tableId, row);
+        }
 
         Self->SetTableUpdateTime(tableId, Now);
         TEngineHost::EraseRow(tableId, row);
@@ -491,6 +513,36 @@ public:
         }
     }
 
+    ui64 GetWriteTxId(const TTableId& tableId) const override {
+        if (TSysTables::IsSystemTable(tableId))
+            return 0;
+
+        return LockTxId;
+    }
+
+    NTable::ITransactionMapPtr GetReadTxMap(const TTableId& tableId) const override {
+        if (TSysTables::IsSystemTable(tableId) || !LockTxId)
+            return nullptr;
+
+        // Don't use tx map when we know there's no open tx with the given txId
+        if (!DB.HasOpenTx(LocalTableId(tableId), LockTxId)) {
+            return nullptr;
+        }
+
+        // Uncommitted changes are visible in all possible snapshots
+        // TODO: we need to guarantee no other changes committed between snapshot read and our local changes
+        return new NTable::TSingleTransactionMap(LockTxId, TRowVersion::Min());
+    }
+
+    NTable::ITransactionObserverPtr GetReadTxObserver(const TTableId& tableId) const override {
+        if (TSysTables::IsSystemTable(tableId))
+            return nullptr;
+
+        // TODO: use observer to detect conflicts with other uncommitted transactions
+
+        return nullptr;
+    }
+
 private:
     const TDataShardSysTable& DataShardSysTable(const TTableId& tableId) const {
         return static_cast<const TDataShardSysTables *>(Self->GetDataShardSysTables())->Get(tableId);
@@ -499,7 +551,9 @@ private:
     TDataShard* Self;
     NTable::TDatabase& DB;
     const ui64& LockTxId;
+    const ui32& LockNodeId;
     bool IsImmediateTx = false;
+    bool IsRepeatableSnapshot = false;
     TInstant Now;
     TRowVersion WriteVersion = TRowVersion::Max();
     TRowVersion ReadVersion = TRowVersion::Min();
@@ -512,33 +566,36 @@ TEngineBay::TEngineBay(TDataShard * self, TTransactionContext& txc, const TActor
                        std::pair<ui64, ui64> stepTxId)
     : StepTxId(stepTxId)
     , LockTxId(0)
+    , LockNodeId(0)
 {
     auto now = TAppData::TimeProvider->Now();
-    EngineHost = MakeHolder<TDataShardEngineHost>(self, txc.DB, EngineHostCounters, LockTxId, now);
+    EngineHost = MakeHolder<TDataShardEngineHost>(self, txc.DB, EngineHostCounters, LockTxId, LockNodeId, now);
 
     EngineSettings = MakeHolder<TEngineFlatSettings>(IEngineFlat::EProtocol::V1, AppData(ctx)->FunctionRegistry,
         *TAppData::RandomProvider, *TAppData::TimeProvider, EngineHost.Get(), self->AllocCounters);
 
-    ui64 tabletId = self->TabletID();
-    TraceMessage = Sprintf("Shard %" PRIu64 ", txid %" PRIu64, tabletId, stepTxId.second);
+    auto tabletId = self->TabletID();
+    auto txId = stepTxId.second;
     const TActorSystem* actorSystem = ctx.ExecutorThread.ActorSystem;
-    EngineSettings->LogErrorWriter = [actorSystem, this](const TString& message) {
-        LOG_ERROR_S(*actorSystem, NKikimrServices::MINIKQL_ENGINE, TraceMessage
-            << ", engine error: " << message);
+    EngineSettings->LogErrorWriter = [actorSystem, tabletId, txId](const TString& message) {
+        LOG_ERROR_S(*actorSystem, NKikimrServices::MINIKQL_ENGINE,
+            "Shard %" << tabletId << ", txid %" <<txId << ", engine error: " << message);
     };
 
     if (ctx.LoggerSettings()->Satisfies(NLog::PRI_DEBUG, NKikimrServices::MINIKQL_ENGINE, stepTxId.second)) {
         EngineSettings->BacktraceWriter =
-            [actorSystem, this](const char * operation, ui32 line, const TBackTrace* backtrace)
+            [actorSystem, tabletId, txId](const char * operation, ui32 line, const TBackTrace* backtrace)
             {
-                LOG_DEBUG(*actorSystem, NKikimrServices::MINIKQL_ENGINE, "%s, %s (%" PRIu32 ")\n%s",
-                    TraceMessage.data(), operation, line, backtrace ? backtrace->PrintToString().data() : "");
+                LOG_DEBUG(*actorSystem, NKikimrServices::MINIKQL_ENGINE,
+                    "Shard %" PRIu64 ", txid %, %s (%" PRIu32 ")\n%s",
+                    tabletId, txId, operation, line,
+                    backtrace ? backtrace->PrintToString().data() : "");
             };
     }
 
-    KqpLogFunc = [actorSystem, this](const TStringBuf& message) {
-        LOG_DEBUG_S(*actorSystem, NKikimrServices::KQP_TASKS_RUNNER, TraceMessage
-            << ": " << message);
+    KqpLogFunc = [actorSystem, tabletId, txId](const TStringBuf& message) {
+        LOG_DEBUG_S(*actorSystem, NKikimrServices::KQP_TASKS_RUNNER,
+            "Shard %" << tabletId << ", txid %" << txId << ": " << message);
     };
 
     ComputeCtx = MakeHolder<TKqpDatashardComputeContext>(self, *EngineHost, now);
@@ -571,8 +628,8 @@ TEngineBay::~TEngineBay() {
     }
 }
 
-void TEngineBay::AddReadRange(const TTableId& tableId, const TVector<NTable::TColumn>& columns, const TTableRange& range,
-                              const TVector<NScheme::TTypeId>& keyTypes, ui64 itemsLimit, bool reverse)
+void TEngineBay::AddReadRange(const TTableId& tableId, const TVector<NTable::TColumn>& columns,
+    const TTableRange& range, const TVector<NScheme::TTypeId>& keyTypes, ui64 itemsLimit, bool reverse)
 {
     TVector<TKeyDesc::TColumnOp> columnOps;
     columnOps.reserve(columns.size());
@@ -588,7 +645,7 @@ void TEngineBay::AddReadRange(const TTableId& tableId, const TVector<NTable::TCo
         "-- AddReadRange: " << DebugPrintRange(keyTypes, range, *AppData()->TypeRegistry));
 
     auto desc = MakeHolder<TKeyDesc>(tableId, range, TKeyDesc::ERowOperation::Read, keyTypes, columnOps, itemsLimit,
-                                     0 /* bytesLimit */, reverse);
+        0 /* bytesLimit */, reverse);
     Info.Keys.emplace_back(TValidatedKey(std::move(desc), /* isWrite */ false));
     // Info.Keys.back().IsResultPart = not a lock key? // TODO: KIKIMR-11134
     ++Info.ReadsCount;
@@ -596,10 +653,21 @@ void TEngineBay::AddReadRange(const TTableId& tableId, const TVector<NTable::TCo
 }
 
 void TEngineBay::AddWriteRange(const TTableId& tableId, const TTableRange& range,
-                               const TVector<NScheme::TTypeId>& keyTypes)
+    const TVector<NScheme::TTypeId>& keyTypes, const TVector<TColumnWriteMeta>& columns,
+    bool isPureEraseOp)
 {
-    auto desc = MakeHolder<TKeyDesc>(tableId, range, TKeyDesc::ERowOperation::Update,
-                                     keyTypes, TVector<TKeyDesc::TColumnOp>());
+    TVector<TKeyDesc::TColumnOp> columnOps;
+    for (const auto& writeColumn : columns) {
+        TKeyDesc::TColumnOp op;
+        op.Column = writeColumn.Column.Id;
+        op.Operation = TKeyDesc::EColumnOperation::Set;
+        op.ExpectedType = writeColumn.Column.PType;
+        op.ImmediateUpdateSize = writeColumn.MaxValueSizeBytes;
+        columnOps.emplace_back(std::move(op));
+    }
+
+    auto rowOp = isPureEraseOp ? TKeyDesc::ERowOperation::Erase : TKeyDesc::ERowOperation::Update;
+    auto desc = MakeHolder<TKeyDesc>(tableId, range, rowOp, keyTypes, columnOps);
     Info.Keys.emplace_back(TValidatedKey(std::move(desc), /* isWrite */ true));
     ++Info.WritesCount;
     if (!range.Point) {
@@ -664,6 +732,13 @@ void TEngineBay::SetIsImmediateTx() {
     host->SetIsImmediateTx();
 }
 
+void TEngineBay::SetIsRepeatableSnapshot() {
+    Y_VERIFY(EngineHost);
+
+    auto* host = static_cast<TDataShardEngineHost*>(EngineHost.Get());
+    host->SetIsRepeatableSnapshot();
+}
+
 TVector<IChangeCollector::TChange> TEngineBay::GetCollectedChanges() const {
     Y_VERIFY(EngineHost);
 
@@ -680,10 +755,11 @@ IEngineFlat * TEngineBay::GetEngine() {
     return Engine.Get();
 }
 
-void TEngineBay::SetLockTxId(ui64 lockTxId) {
+void TEngineBay::SetLockTxId(ui64 lockTxId, ui32 lockNodeId) {
     LockTxId = lockTxId;
+    LockNodeId = lockNodeId;
     if (ComputeCtx) {
-        ComputeCtx->SetLockTxId(lockTxId);
+        ComputeCtx->SetLockTxId(lockTxId, lockNodeId);
     }
 }
 
@@ -693,7 +769,8 @@ NKqp::TKqpTasksRunner& TEngineBay::GetKqpTasksRunner(const NKikimrTxDataShard::T
 
         if (tx.HasRuntimeSettings() && tx.GetRuntimeSettings().HasStatsMode()) {
             auto statsMode = tx.GetRuntimeSettings().GetStatsMode();
-            settings.CollectBasicStats = statsMode >= NYql::NDqProto::DQ_STATS_MODE_BASIC;
+            // Always collect basic stats for system views / request unit computation.
+            settings.CollectBasicStats = true;
             settings.CollectProfileStats = statsMode >= NYql::NDqProto::DQ_STATS_MODE_PROFILE;
         } else {
             settings.CollectBasicStats = false;

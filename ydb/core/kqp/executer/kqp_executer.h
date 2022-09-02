@@ -1,8 +1,10 @@
 #pragma once
 
+#include <library/cpp/lwtrace/shuttle.h>
 #include <ydb/core/kqp/common/kqp_common.h>
 #include <ydb/core/kqp/common/kqp_gateway.h>
 #include <ydb/core/kqp/counters/kqp_counters.h>
+#include <ydb/core/tx/long_tx_service/public/lock_handle.h>
 #include <ydb/core/protos/config.pb.h>
 #include <ydb/core/protos/kqp.pb.h>
 
@@ -14,7 +16,17 @@ struct TEvKqpExecuter {
         TKqpExecuterEvents::EvTxRequest> {};
 
     struct TEvTxResponse : public TEventPB<TEvTxResponse, NKikimrKqp::TEvExecuterTxResponse,
-        TKqpExecuterEvents::EvTxResponse> {};
+        TKqpExecuterEvents::EvTxResponse>
+    {
+        NLongTxService::TLockHandle LockHandle;
+
+        NLWTrace::TOrbit Orbit;
+
+        bool IsSerializable() const override {
+            // We cannot serialize LockHandle, should always send locally
+            return false;
+        }
+    };
 
     struct TEvStreamData : public TEventPB<TEvStreamData, NKikimrKqp::TEvExecuterStreamData,
         TKqpExecuterEvents::EvStreamData> {};

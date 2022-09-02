@@ -21,6 +21,7 @@ namespace NKikimr {
                 struct TQueue {
                     TActorId ActorId;
                     TIntrusivePtr<NBackpressure::TFlowRecord> FlowRecord;
+                    std::optional<bool> ExtraBlockChecksSupport;
                 };
                 TQueue PutTabletLog;
                 TQueue PutAsyncBlob;
@@ -52,6 +53,10 @@ namespace NKikimr {
                     return NKikimrBlobStorage::EVDiskQueueId::GetFastRead;
                 }
 
+                static NKikimrBlobStorage::EVDiskQueueId VDiskQueueId(const TEvBlobStorage::TEvVAssimilate&) {
+                    return NKikimrBlobStorage::EVDiskQueueId::GetAsyncRead;
+                }
+
                 TQueue& GetQueue(NKikimrBlobStorage::EVDiskQueueId queueId) {
                     switch (queueId) {
                         case NKikimrBlobStorage::EVDiskQueueId::PutTabletLog: return PutTabletLog;
@@ -65,10 +70,6 @@ namespace NKikimr {
                     }
                 }
 
-                TActorId& QueueForQueueId(NKikimrBlobStorage::EVDiskQueueId queueId) {
-                    return GetQueue(queueId).ActorId;
-                }
-
                 TIntrusivePtr<NBackpressure::TFlowRecord>& FlowRecordForQueueId(NKikimrBlobStorage::EVDiskQueueId queueId) {
                     return GetQueue(queueId).FlowRecord;
                 }
@@ -78,9 +79,25 @@ namespace NKikimr {
                     return flowRecord ? flowRecord->GetPredictedDelayNs() : 0;
                 }
 
+                template<typename T>
+                static void ValidateEvent(TQueue& /*queue*/, const T& /*event*/)
+                {}
+
+                static void ValidateEvent(TQueue& queue, const TEvBlobStorage::TEvVPut& event) {
+                    Y_VERIFY(!event.Record.ExtraBlockChecksSize() || queue.ExtraBlockChecksSupport.value_or(true));
+                }
+
+                static void ValidateEvent(TQueue& queue, const TEvBlobStorage::TEvVMultiPut& event) {
+                    for (const auto& item : event.Record.GetItems()) {
+                        Y_VERIFY(!item.ExtraBlockChecksSize() || queue.ExtraBlockChecksSupport.value_or(true));
+                    }
+                }
+
                 template<typename TEvent>
                 TActorId QueueForEvent(const TEvent& event) {
-                    return QueueForQueueId(VDiskQueueId(event));
+                    TQueue& queue = GetQueue(VDiskQueueId(event));
+                    ValidateEvent(queue, event);
+                    return queue.ActorId;
                 }
 
                 TString ToString() const {
@@ -124,6 +141,8 @@ namespace NKikimr {
             TStackVec<TVDisk, TypicalDisksInFailDomain> VDisks;
 
             // Ill-formed because TVDisk is not assignable.
+            TFailDomain(const TFailDomain& other) = default;
+            TFailDomain() {};
             void operator=(const TFailDomain&) = delete;
 
             TString ToString() const {
@@ -164,6 +183,7 @@ namespace NKikimr {
         }
 
         void SetUpSubmitTimestamp(TEvBlobStorage::TEvVStatus& /*event*/) {}
+        void SetUpSubmitTimestamp(TEvBlobStorage::TEvVAssimilate& /*event*/) {}
 
         template<typename TEvent>
         TActorId Send(const IActor& actor, const TBlobStorageGroupInfo::TTopology& topology, std::unique_ptr<TEvent> event,
@@ -220,7 +240,8 @@ namespace NKikimr {
             const TActorId& monActor, const TActorId& proxyActor);
         void Poison();
         bool GoodToGo(const TBlobStorageGroupInfo::TTopology& topology, bool waitForAllVDisks);
-        void QueueConnectUpdate(ui32 orderNumber, NKikimrBlobStorage::EVDiskQueueId queueId, bool connected);
+        void QueueConnectUpdate(ui32 orderNumber, NKikimrBlobStorage::EVDiskQueueId queueId, bool connected,
+            bool extraBlockChecksSupport, const TBlobStorageGroupInfo::TTopology& topology);
         ui32 GetNumUnconnectedDisks();
     };
 

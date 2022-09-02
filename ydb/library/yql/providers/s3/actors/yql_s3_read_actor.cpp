@@ -1,17 +1,43 @@
+#include <util/system/platform.h>
+#if defined(_linux_) || defined(_darwin_)
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeArray.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeDate.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeEnum.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeFactory.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeInterval.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeNothing.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeNullable.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeString.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeTuple.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypeUUID.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/DataTypes/DataTypesNumber.h>
+
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/IO/ReadBuffer.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/Core/Block.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/Core/ColumnsWithTypeAndName.h>
+
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/Formats/FormatFactory.h>
+#include <ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/InputStreamFromInputFormat.h>
+#endif
+
 #include "yql_s3_read_actor.h"
+#include "yql_s3_retry_policy.h"
 
 #include <ydb/library/yql/minikql/mkql_string_util.h>
-#include <ydb/library/yql/minikql/computation/mkql_computation_node.h>
+#include <ydb/library/yql/minikql/computation/mkql_computation_node_impl.h>
 #include <ydb/library/yql/minikql/mkql_program_builder.h>
 #include <ydb/library/yql/minikql/invoke_builtins/mkql_builtins.h>
 #include <ydb/library/yql/minikql/mkql_function_registry.h>
+#include <ydb/library/yql/minikql/mkql_node_cast.h>
 #include <ydb/library/yql/minikql/mkql_terminator.h>
 #include <ydb/library/yql/minikql/comp_nodes/mkql_factories.h>
 #include <ydb/library/yql/providers/common/schema/mkql/yql_mkql_schema.h>
 #include <ydb/library/yql/utils/yql_panic.h>
 
+#include <ydb/library/yql/providers/s3/compressors/factory.h>
 #include <ydb/library/yql/providers/s3/proto/range.pb.h>
-#include <ydb/library/yql/providers/common/provider/yql_provider_names.h>
+#include <ydb/library/yql/providers/s3/range_helpers/path_list_reader.h>
+#include <ydb/library/yql/providers/s3/serializations/serialization_interval.h>
 
 #include <library/cpp/actors/core/actor_bootstrapped.h>
 #include <library/cpp/actors/core/actor_coroutine.h>
@@ -23,9 +49,15 @@
 
 #include <queue>
 
+#ifdef THROW
+#undef THROW
+#endif
+#include <library/cpp/xml/document/xml-document.h>
+
 namespace NYql::NDq {
 
-using namespace NActors;
+using namespace ::NActors;
+using namespace ::NYql::NS3Details;
 
 namespace {
 
@@ -35,9 +67,12 @@ struct TEvPrivate {
         EvBegin = EventSpaceBegin(TEvents::ES_PRIVATE),
 
         EvReadResult = EvBegin,
+        EvDataPart,
+        EvReadStarted,
         EvReadFinished,
         EvReadError,
         EvRetry,
+        EvNextBlock,
 
         EvEnd
     };
@@ -46,21 +81,26 @@ struct TEvPrivate {
 
     // Events
     struct TEvReadResult : public TEventLocal<TEvReadResult, EvReadResult> {
-        TEvReadResult(IHTTPGateway::TContent&& result, size_t pathInd = 0U): Result(std::move(result)), PathIndex(pathInd) {}
+        TEvReadResult(IHTTPGateway::TContent&& result, size_t pathInd): Result(std::move(result)), PathIndex(pathInd) {}
         IHTTPGateway::TContent Result;
         const size_t PathIndex;
+    };
+
+    struct TEvDataPart : public TEventLocal<TEvDataPart, EvDataPart> {
+        TEvDataPart(IHTTPGateway::TCountedContent&& data) : Result(std::move(data)) {}
+        IHTTPGateway::TCountedContent Result;
+    };
+
+    struct TEvReadStarted : public TEventLocal<TEvReadStarted, EvReadStarted> {
+        explicit TEvReadStarted(long httpResponseCode) : HttpResponseCode(httpResponseCode) {}
+        const long HttpResponseCode;
     };
 
     struct TEvReadFinished : public TEventLocal<TEvReadFinished, EvReadFinished> {};
 
     struct TEvReadError : public TEventLocal<TEvReadError, EvReadError> {
-        TEvReadError(TIssues&& error, size_t pathInd = 0U) : Error(std::move(error)), PathIndex(pathInd) {}
+        TEvReadError(TIssues&& error, size_t pathInd = std::numeric_limits<size_t>::max()) : Error(std::move(error)), PathIndex(pathInd) {}
         const TIssues Error;
-        const size_t PathIndex;
-    };
-
-    struct TEvRetryEvent : public NActors::TEventLocal<TEvRetryEvent, EvRetry> {
-        explicit TEvRetryEvent(size_t pathIndex) : PathIndex(pathIndex) {}
         const size_t PathIndex;
     };
 
@@ -68,76 +108,48 @@ struct TEvPrivate {
         explicit TEvRetryEventFunc(std::function<void()> functor) : Functor(std::move(functor)) {}
         const std::function<void()> Functor;
     };
+
+    struct TEvNextBlock : public NActors::TEventLocal<TEvNextBlock, EvNextBlock> {
+        TEvNextBlock(NDB::Block& block, size_t pathInd) : PathIndex(pathInd) { Block.swap(block); }
+        NDB::Block Block;
+        const size_t PathIndex;
+    };
 };
 
-using TPath = std::tuple<TString, size_t>;
-using TPathList = std::vector<TPath>;
+using namespace NKikimr::NMiniKQL;
 
-class TRetryParams {
-public:
-    TRetryParams(const std::shared_ptr<NS3::TRetryConfig>& retryConfig)
-        : MaxRetries(retryConfig && retryConfig->GetMaxRetriesPerPath() ? retryConfig->GetMaxRetriesPerPath() : 3U)
-        , InitDelayMs(retryConfig && retryConfig->GetInitialDelayMs() ? TDuration::MilliSeconds(retryConfig->GetInitialDelayMs()) : TDuration::MilliSeconds(100))
-        , InitEpsilon(retryConfig && retryConfig->GetEpsilon() ? retryConfig->GetEpsilon() : 0.1)
-    {
-        Y_VERIFY(0. < InitEpsilon && InitEpsilon < 1.);
-        Reset();
-    }
-
-    void Reset() {
-        Retries = 0U;
-        DelayMs = InitDelayMs;
-        Epsilon = InitEpsilon;
-    }
-
-    TDuration GetNextDelay() {
-        if (++Retries > MaxRetries)
-            return TDuration::Zero();
-        return DelayMs = GenerateNextDelay();
-    }
-private:
-    TDuration GenerateNextDelay() {
-        const auto low = 1. - Epsilon;
-        const auto jitter = low + std::rand() / (RAND_MAX / (2. * Epsilon));
-        return DelayMs * jitter;
-    }
-
-    const ui32 MaxRetries;
-    const TDuration InitDelayMs;
-    const double InitEpsilon;
-
-    ui32 Retries;
-    TDuration DelayMs;
-    double Epsilon;
-};
-
-class TS3ReadActor : public TActorBootstrapped<TS3ReadActor>, public IDqSourceActor {
+class TS3ReadActor : public TActorBootstrapped<TS3ReadActor>, public IDqComputeActorAsyncInput {
 public:
     TS3ReadActor(ui64 inputIndex,
         IHTTPGateway::TPtr gateway,
+        const THolderFactory& holderFactory,
         const TString& url,
         const TString& token,
         TPathList&& paths,
+        bool addPathIndex,
+        ui64 startPathIndex,
         const NActors::TActorId& computeActorId,
-        const std::shared_ptr<NS3::TRetryConfig>& retryConfig
+        ui64 expectedSize
     )   : Gateway(std::move(gateway))
+        , HolderFactory(holderFactory)
         , InputIndex(inputIndex)
         , ComputeActorId(computeActorId)
         , ActorSystem(TActivationContext::ActorSystem())
         , Url(url)
         , Headers(MakeHeader(token))
         , Paths(std::move(paths))
-        , RetryConfig(retryConfig)
+        , AddPathIndex(addPathIndex)
+        , StartPathIndex(startPathIndex)
+        , ExpectedSize(expectedSize)
     {}
 
     void Bootstrap() {
         Become(&TS3ReadActor::StateFunc);
-        RetriesPerPath.resize(Paths.size(), TRetryParams(RetryConfig));
         for (size_t pathInd = 0; pathInd < Paths.size(); ++pathInd) {
             const TPath& path = Paths[pathInd];
             Gateway->Download(Url + std::get<TString>(path),
-                Headers, std::get<size_t>(path),
-                std::bind(&TS3ReadActor::OnDownloadFinished, ActorSystem, SelfId(), std::placeholders::_1, pathInd));
+                Headers, std::min(std::get<size_t>(path), ExpectedSize),
+                std::bind(&TS3ReadActor::OnDownloadFinished, ActorSystem, SelfId(), std::placeholders::_1, pathInd + StartPathIndex), {}, GetS3RetryPolicy());
         };
     }
 
@@ -152,7 +164,6 @@ private:
     STRICT_STFUNC(StateFunc,
         hFunc(TEvPrivate::TEvReadResult, Handle);
         hFunc(TEvPrivate::TEvReadError, Handle);
-        hFunc(TEvPrivate::TEvRetryEvent, HandleRetry);
     )
 
     static void OnDownloadFinished(TActorSystem* actorSystem, TActorId selfId, IHTTPGateway::TResult&& result, size_t pathInd) {
@@ -168,13 +179,23 @@ private:
         }
     }
 
-    i64 GetSourceData(NKikimr::NMiniKQL::TUnboxedValueVector& buffer, bool& finished, i64 freeSpace) final {
+    i64 GetAsyncInputData(TUnboxedValueVector& buffer, bool& finished, i64 freeSpace) final {
         i64 total = 0LL;
         if (!Blocks.empty()) {
             buffer.reserve(buffer.size() + Blocks.size());
             do {
-                const auto size = Blocks.front().size();
-                buffer.emplace_back(NKikimr::NMiniKQL::MakeString(std::string_view(Blocks.front())));
+                auto& content = std::get<IHTTPGateway::TContent>(Blocks.front());
+                const auto size = content.size();
+                auto value = MakeString(std::string_view(content));
+                if (AddPathIndex) {
+                    NUdf::TUnboxedValue* tupleItems = nullptr;
+                    auto tuple = ContainerCache.NewArray(HolderFactory, 2, tupleItems);
+                    *tupleItems++ = value;
+                    *tupleItems++ = NUdf::TUnboxedValuePod(std::get<ui64>(Blocks.front()));
+                    value = tuple;
+                }
+
+                buffer.emplace_back(std::move(value));
                 Blocks.pop();
                 total += size;
                 freeSpace -= size;
@@ -183,6 +204,7 @@ private:
 
         if (Blocks.empty() && IsDoneCounter == Paths.size()) {
             finished = true;
+            ContainerCache.Clear();
         }
 
         return total;
@@ -191,30 +213,18 @@ private:
 
     void Handle(TEvPrivate::TEvReadResult::TPtr& result) {
         ++IsDoneCounter;
-        Blocks.emplace(std::move(result->Get()->Result));
-        Send(ComputeActorId, new TEvNewSourceDataArrived(InputIndex));
-    }
-
-    void HandleRetry(TEvPrivate::TEvRetryEvent::TPtr& ev) {
-        const auto pathInd = ev->Get()->PathIndex;
-        Gateway->Download(Url + std::get<TString>(Paths[pathInd]),
-            Headers, std::get<size_t>(Paths[pathInd]),
-            std::bind(&TS3ReadActor::OnDownloadFinished, ActorSystem, SelfId(), std::placeholders::_1, pathInd));
+        Blocks.emplace(std::make_tuple(std::move(result->Get()->Result), result->Get()->PathIndex));
+        Send(ComputeActorId, new TEvNewAsyncInputDataArrived(InputIndex));
     }
 
     void Handle(TEvPrivate::TEvReadError::TPtr& result) {
-        const auto pathInd = result->Get()->PathIndex;
-        Y_VERIFY(pathInd < RetriesPerPath.size());
-        if (auto nextDelayMs = RetriesPerPath[pathInd].GetNextDelay()) {
-            Schedule(nextDelayMs, new TEvPrivate::TEvRetryEvent(pathInd));
-            return;
-        }
         ++IsDoneCounter;
-        Send(ComputeActorId, new TEvSourceError(InputIndex, result->Get()->Error, true));
+        Send(ComputeActorId, new TEvAsyncInputError(InputIndex, result->Get()->Error, NYql::NDqProto::StatusIds::EXTERNAL_ERROR));
     }
 
-    // IActor & IDqSourceActor
+    // IActor & IDqComputeActorAsyncInput
     void PassAway() override { // Is called from Compute Actor
+        ContainerCache.Clear();
         TActorBootstrapped<TS3ReadActor>::PassAway();
     }
 
@@ -226,6 +236,8 @@ private:
     size_t IsDoneCounter = 0U;
 
     const IHTTPGateway::TPtr Gateway;
+    const THolderFactory& HolderFactory;
+    TPlainContainerCache ContainerCache;
 
     const ui64 InputIndex;
     const NActors::TActorId ComputeActorId;
@@ -235,213 +247,255 @@ private:
     const TString Url;
     const IHTTPGateway::THeaders Headers;
     const TPathList Paths;
+    const bool AddPathIndex;
+    const ui64 StartPathIndex;
+    const ui64 ExpectedSize;
 
-    std::queue<IHTTPGateway::TContent> Blocks;
-
-    std::vector<TRetryParams> RetriesPerPath;
-    const std::shared_ptr<NS3::TRetryConfig> RetryConfig;
+    std::queue<std::tuple<IHTTPGateway::TContent, ui64>> Blocks;
 };
 
-using namespace NKikimr::NMiniKQL;
+struct TReadSpec {
+    using TPtr = std::shared_ptr<TReadSpec>;
 
-struct TOutput {
-    TUnboxedValueDeque Data;
-    using TPtr = std::shared_ptr<TOutput>;
+    NDB::ColumnsWithTypeAndName Columns;
+    NDB::FormatSettings Settings;
+    TString Format, Compression;
+    ui64 ExpectedSize = 0;
+};
+
+struct TRetryStuff {
+    using TPtr = std::shared_ptr<TRetryStuff>;
+
+    TRetryStuff(
+        IHTTPGateway::TPtr gateway,
+        TString url,
+        const IHTTPGateway::THeaders& headers,
+        std::size_t expectedSize
+    ) : Gateway(std::move(gateway)), Url(std::move(url)), Headers(headers), ExpectedSize(expectedSize), Offset(0U), RetryState(GetS3RetryPolicy()->CreateRetryState())
+    {}
+
+    const IHTTPGateway::TPtr Gateway;
+    const TString Url;
+    const IHTTPGateway::THeaders Headers;
+    const std::size_t ExpectedSize;
+
+    std::size_t Offset = 0U;
+    const IRetryPolicy<long>::IRetryState::TPtr RetryState;
+    IHTTPGateway::TCancelHook CancelHook;
+    TMaybe<TDuration> NextRetryDelay;
+
+    void Cancel() {
+        NextRetryDelay = {};
+        if (const auto cancelHook = std::move(CancelHook)) {
+            CancelHook = {};
+            cancelHook(TIssue("Request cancelled."));
+        }
+    }
 };
 
 class TS3ReadCoroImpl : public TActorCoroImpl {
 private:
-    class TCoroStreamWrapper: public TMutableComputationNode<TCoroStreamWrapper> {
-    using TBaseComputation = TMutableComputationNode<TCoroStreamWrapper>;
+    class TReadBufferFromStream : public NDB::ReadBuffer {
     public:
-        class TStreamValue : public TComputationValue<TStreamValue> {
-        public:
-            using TBase = TComputationValue<TStreamValue>;
-
-            TStreamValue(TMemoryUsageInfo* memInfo, TS3ReadCoroImpl* coro)
-                : TBase(memInfo), Coro(coro)
-            {}
-
-        private:
-            NUdf::EFetchStatus Fetch(NUdf::TUnboxedValue& value) final {
-                return Coro->Next(value) ? NUdf::EFetchStatus::Ok : NUdf::EFetchStatus::Finish;
+        TReadBufferFromStream(TS3ReadCoroImpl* coro)
+            : NDB::ReadBuffer(nullptr, 0ULL), Coro(coro)
+        {}
+    private:
+        bool nextImpl() final {
+            if (Coro->Next(Value)) {
+                working_buffer = NDB::BufferBase::Buffer(const_cast<char*>(Value.data()), const_cast<char*>(Value.data()) + Value.size());
+                return true;
             }
 
-        private:
-            TS3ReadCoroImpl *const Coro;
-        };
-
-        TCoroStreamWrapper(TComputationMutables& mutables, TS3ReadCoroImpl* coro)
-            : TBaseComputation(mutables), Coro(coro)
-        {}
-
-        NUdf::TUnboxedValuePod DoCalculate(TComputationContext& ctx) const {
-            return ctx.HolderFactory.Create<TStreamValue>(Coro);
+            return false;
         }
 
-        static IComputationNode* Make(TCallable&, const TComputationNodeFactoryContext& ctx, TS3ReadCoroImpl* coro) {
-            return new TCoroStreamWrapper(ctx.Mutables, coro);
-        }
-    private:
-        void RegisterDependencies() const final {}
         TS3ReadCoroImpl *const Coro;
+        TString Value;
     };
 
+    static constexpr std::string_view TruncatedSuffix = "... [truncated]"sv;
 public:
-    TS3ReadCoroImpl(const TTypeEnvironment& typeEnv, const IFunctionRegistry& functionRegistry, ui64 inputIndex, const NActors::TActorId& computeActorId, ui64, TString format, TString rowType, TOutput::TPtr outputs)
-        : TActorCoroImpl(512_KB), TypeEnv(typeEnv), FunctionRegistry(functionRegistry), InputIndex(inputIndex), Format(std::move(format)), RowType(std::move(rowType)), ComputeActorId(computeActorId), Outputs(std::move(outputs))
+    TS3ReadCoroImpl(ui64 inputIndex, const NActors::TActorId& computeActorId, const TRetryStuff::TPtr& retryStuff, const TReadSpec::TPtr& readSpec, size_t pathIndex, const TString& path)
+        : TActorCoroImpl(256_KB), InputIndex(inputIndex), RetryStuff(retryStuff), ReadSpec(readSpec), ComputeActorId(computeActorId), PathIndex(pathIndex), Path(path)
     {}
 
-    bool Next(NUdf::TUnboxedValue& value) {
-        if (Finished)
+    bool Next(TString& value) {
+        if (InputFinished)
             return false;
 
-        TAllocState *const allocState = TlsAllocState;
-        PgReleaseThreadContext(allocState->MainContext);
-        TlsAllocState = nullptr;
-        const auto ev = WaitForSpecificEvent<TEvPrivate::TEvReadResult, TEvPrivate::TEvReadError, TEvPrivate::TEvReadFinished>();
-        TlsAllocState = allocState;
-        PgAcquireThreadContext(allocState->MainContext);
-
+        const auto ev = WaitForSpecificEvent<TEvPrivate::TEvReadStarted, TEvPrivate::TEvDataPart, TEvPrivate::TEvReadError, TEvPrivate::TEvReadFinished>();
         switch (const auto etype = ev->GetTypeRewrite()) {
+            case TEvPrivate::TEvReadStarted::EventType:
+                ErrorText.clear();
+                Issues.Clear();
+                value.clear();
+                RetryStuff->NextRetryDelay = RetryStuff->RetryState->GetNextRetryDelay(HttpResponseCode = ev->Get<TEvPrivate::TEvReadStarted>()->HttpResponseCode);
+                return true;
             case TEvPrivate::TEvReadFinished::EventType:
-                Finished = true;
+                InputFinished = true;
                 return false;
             case TEvPrivate::TEvReadError::EventType:
-                Send(ComputeActorId, new IDqSourceActor::TEvSourceError(InputIndex, ev->Get<TEvPrivate::TEvReadError>()->Error, true));
+                InputFinished = true;
+                Issues = std::move(ev->Get<TEvPrivate::TEvReadError>()->Error);
                 return false;
-            case TEvPrivate::TEvReadResult::EventType:
-                value = MakeString(NUdf::TStringRef(std::string_view(ev->Get<TEvPrivate::TEvReadResult>()->Result)));
-                Send(ComputeActorId, new IDqSourceActor::TEvNewSourceDataArrived(InputIndex));
+            case TEvPrivate::TEvDataPart::EventType:
+                if (200L == HttpResponseCode || 206L == HttpResponseCode) {
+                    value = ev->Get<TEvPrivate::TEvDataPart>()->Result.Extract();
+                    RetryStuff->Offset += value.size();
+                    Send(ComputeActorId, new IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived(InputIndex));
+                } else if (HttpResponseCode && !RetryStuff->NextRetryDelay) {
+                    if (ErrorText.size() < 256_KB)
+                        ErrorText.append(ev->Get<TEvPrivate::TEvDataPart>()->Result.Extract());
+                    else if (!ErrorText.EndsWith(TruncatedSuffix))
+                        ErrorText.append(TruncatedSuffix);
+                    value.clear();
+                }
                 return true;
             default:
                 return false;
         }
     }
 private:
+    void WaitFinish() {
+        if (InputFinished)
+            return;
+
+        while (true) {
+            const auto ev = WaitForSpecificEvent<TEvPrivate::TEvReadError, TEvPrivate::TEvDataPart, TEvPrivate::TEvReadFinished>();
+            const auto etype = ev->GetTypeRewrite();
+            if (etype == TEvPrivate::TEvDataPart::EventType) {
+                // just ignore all data parts event to drain event queue
+                continue;
+            }
+            switch (etype) {
+                case TEvPrivate::TEvReadFinished::EventType:
+                    break;
+                case TEvPrivate::TEvReadError::EventType:
+                    Issues = std::move(ev->Get<TEvPrivate::TEvReadError>()->Error);
+                    break;
+                default:
+                    break;
+            }
+            InputFinished = true;
+            return;
+        }
+    }
+
     void Run() final try {
-        TOutput::TPtr outputs;
-        // reset member to decrement ref, important for UV lifetime
-        Outputs.swap(outputs);
 
-        const auto randStub = CreateDeterministicRandomProvider(1);
-        const auto timeStub = CreateDeterministicTimeProvider(10000000);
+        NYql::NDqProto::StatusIds::StatusCode fatalCode = NYql::NDqProto::StatusIds::EXTERNAL_ERROR;
 
-        Y_VERIFY(!TlsAllocState);
-        TlsAllocState = &TypeEnv.GetAllocator().Ref();
-        PgAcquireThreadContext(TypeEnv.GetAllocator().Ref().MainContext);
-        Y_DEFER{
-            PgReleaseThreadContext(TypeEnv.GetAllocator().Ref().MainContext);
-            TlsAllocState = nullptr;
-        };
+        TIssue exceptIssue;
+        try {
+            TReadBufferFromStream buffer(this);
+            const auto decompress(MakeDecompressor(buffer, ReadSpec->Compression));
+            YQL_ENSURE(ReadSpec->Compression.empty() == !decompress, "Unsupported " << ReadSpec->Compression << " compression.");
+            NDB::InputStreamFromInputFormat stream(NDB::FormatFactory::instance().getInputFormat(ReadSpec->Format, decompress ? *decompress : buffer, NDB::Block(ReadSpec->Columns), nullptr, 1_MB, ReadSpec->Settings));
 
-        const auto pb = std::make_unique<TProgramBuilder>(TypeEnv, FunctionRegistry);
+            while (auto block = stream.read())
+                Send(ParentActorId, new TEvPrivate::TEvNextBlock(block, PathIndex));
+        } catch (const std::exception& err) {
+            exceptIssue.Message = TStringBuilder() << "Error while reading file " << Path << ", details: " << err.what();
+            fatalCode = NYql::NDqProto::StatusIds::BAD_REQUEST;
+        }
 
-        TCallableBuilder callableBuilder(TypeEnv, "CoroStream", pb->NewStreamType(pb->NewDataType(NUdf::EDataSlot::String)));
+        WaitFinish();
 
-        const auto factory = [this](TCallable& callable, const TComputationNodeFactoryContext& ctx) -> IComputationNode* {
-            return callable.GetType()->GetName() == "CoroStream" ?
-                TCoroStreamWrapper::Make(callable, ctx, this) : GetBuiltinFactory()(callable, ctx);
-        };
+        if (!ErrorText.empty()) {
+            TStringBuilder str;
 
-        TRuntimeNode stream(callableBuilder.Build(), false);
+            if (HttpResponseCode)
+                str << "HTTP response code: " << HttpResponseCode << ", ";
 
-        const auto outputItemType = NCommon::ParseTypeFromYson(TStringBuf(RowType), *pb,  Cerr);
-        const auto userType = pb->NewTupleType({pb->NewTupleType({pb->NewDataType(NUdf::EDataSlot::String)}), pb->NewStructType({}), outputItemType});
-        const auto root = pb->Apply(pb->Udf("ClickHouseClient.ParseSource", {}, userType, Format), {stream});
+            if (ErrorText.StartsWith("<?xml") && !ErrorText.EndsWith(TruncatedSuffix)) {
+                const NXml::TDocument xml(ErrorText, NXml::TDocument::String);
+                if (const auto& root = xml.Root(); root.Name() == "Error") {
+                    const auto& code = root.Node("Code", true).Value<TString>();
+                    const auto& message = root.Node("Message", true).Value<TString>();
+                    str << message << ", error code: " << code;
+                } else
+                    str << ErrorText;
+            } else
+                str << ErrorText;
 
-        TExploringNodeVisitor explorer;
-        explorer.Walk(root.GetNode(), TypeEnv);
-        TComputationPatternOpts opts(TypeEnv.GetAllocator().Ref(), TypeEnv, factory, &FunctionRegistry, NUdf::EValidateMode::None, NUdf::EValidatePolicy::Exception,  "OFF", EGraphPerProcess::Single);
-        const auto pattern = MakeComputationPattern(explorer, root, {}, opts);
-        const auto graph = pattern->Clone(opts.ToComputationOptions(*randStub, *timeStub));
-        const TBindTerminator bind(graph->GetTerminator());
+            Issues.AddIssues({TIssue(str)});
+        }
 
-        const auto output = graph->GetValue();
-        for (NUdf::TUnboxedValue v; NUdf::EFetchStatus::Ok == output.Fetch(v);)
-            outputs->Data.emplace_back(std::move(v));
+        if (exceptIssue.Message) {
+            Issues.AddIssue(exceptIssue);
+        }
 
-        outputs = nullptr;
-        Send(ComputeActorId, new IDqSourceActor::TEvNewSourceDataArrived(InputIndex));
+        if (Issues)
+            Send(ComputeActorId, new IDqComputeActorAsyncInput::TEvAsyncInputError(InputIndex, std::move(Issues), fatalCode));
+        else
+            Send(ParentActorId, new TEvPrivate::TEvReadFinished);
+    } catch (const TDtorException&) {
+        return RetryStuff->Cancel();
     } catch (const std::exception& err) {
-        Send(ComputeActorId, new IDqSourceActor::TEvSourceError(InputIndex, TIssues{TIssue(err.what())}, true));
+        Send(ComputeActorId, new IDqComputeActorAsyncInput::TEvAsyncInputError(InputIndex, TIssues{TIssue(TStringBuilder() << "Error while reading file " << Path << ", details: " << err.what())}, NYql::NDqProto::StatusIds::INTERNAL_ERROR));
         return;
     }
 
-    void ProcessUnexpectedEvent(TAutoPtr<IEventHandle>) final {
-        Send(ComputeActorId, new IDqSourceActor::TEvSourceError(InputIndex, TIssues{TIssue("Unexpected event")}, true));
+    void ProcessUnexpectedEvent(TAutoPtr<IEventHandle> ev) final {
+        TString message = Sprintf("Unexpected message type 0x%08" PRIx32, ev->GetTypeRewrite());
+        Send(ComputeActorId, new IDqComputeActorAsyncInput::TEvAsyncInputError(InputIndex, TIssues{TIssue(message)}));
     }
 private:
-    const TTypeEnvironment& TypeEnv;
-    const IFunctionRegistry& FunctionRegistry;
     const ui64 InputIndex;
+    const TRetryStuff::TPtr RetryStuff;
+    const TReadSpec::TPtr ReadSpec;
     const TString Format, RowType, Compression;
     const NActors::TActorId ComputeActorId;
-    TOutput::TPtr Outputs;
-    bool Finished = false;
+    const size_t PathIndex;
+    const TString Path;
+
+    bool InputFinished = false;
+    long HttpResponseCode = 0L;
+    TString ErrorText;
+    TIssues Issues;
 };
 
 class TS3ReadCoroActor : public TActorCoro {
-    struct TRetryStuff {
-        using TPtr = std::shared_ptr<TRetryStuff>;
-
-        TRetryStuff(
-            IHTTPGateway::TPtr gateway,
-            TString url,
-            const IHTTPGateway::THeaders& headers,
-            const std::shared_ptr<NS3::TRetryConfig>& retryConfig,
-            std::size_t expectedSize
-        ) : Gateway(std::move(gateway)), Url(std::move(url)), Headers(headers), ExpectedSize(expectedSize), Offset(0U), RetryParams(retryConfig)
-        {}
-
-        const IHTTPGateway::TPtr Gateway;
-        const TString Url;
-        const IHTTPGateway::THeaders Headers;
-        const std::size_t ExpectedSize;
-
-        std::size_t Offset = 0U;
-        TRetryParams RetryParams;
-    };
 public:
-    TS3ReadCoroActor(THolder<TS3ReadCoroImpl> impl,
-        IHTTPGateway::TPtr gateway,
-        const TString& url,
-        const IHTTPGateway::THeaders& headers,
-        const TString& path,
-        const std::size_t expectedSize,
-        const std::shared_ptr<NS3::TRetryConfig>& retryConfig,
-        TOutput::TPtr outputs)
+    TS3ReadCoroActor(THolder<TS3ReadCoroImpl> impl, TRetryStuff::TPtr retryStuff)
         : TActorCoro(THolder<TActorCoroImpl>(impl.Release()))
-        , RetryStuff(std::make_shared<TRetryStuff>(std::move(gateway), url + path, headers, retryConfig, expectedSize))
-        , Outputs(std::move(outputs))
+        , RetryStuff(std::move(retryStuff))
     {}
 private:
-    static void OnNewData(TActorSystem* actorSystem, const TActorId& self, const TActorId& parent, const TRetryStuff::TPtr& retryStuff, IHTTPGateway::TContent&& data) {
-        retryStuff->Offset += data.size();
-        retryStuff->RetryParams.Reset();
-        actorSystem->Send(new IEventHandle(self, parent, new TEvPrivate::TEvReadResult(std::move(data))));
+    static void OnDownloadStart(TActorSystem* actorSystem, const TActorId& self, const TActorId& parent, long httpResponseCode) {
+        actorSystem->Send(new IEventHandle(self, parent, new TEvPrivate::TEvReadStarted(httpResponseCode)));
     }
 
-    static void OnDownloadFinished(TActorSystem* actorSystem, const TActorId& self, const TActorId& parent, const TRetryStuff::TPtr& retryStuff, std::optional<TIssues> result) {
-        if (result)
-            if (const auto nextDelayMs = retryStuff->RetryParams.GetNextDelay())
-                actorSystem->Schedule(nextDelayMs, new IEventHandle(parent, self, new TEvPrivate::TEvRetryEventFunc(std::bind(&TS3ReadCoroActor::DownloadStart, retryStuff, self, parent))));
-            else
-                actorSystem->Send(new IEventHandle(self, parent, new TEvPrivate::TEvReadError(TIssues{*result})));
+    static void OnNewData(TActorSystem* actorSystem, const TActorId& self, const TActorId& parent, IHTTPGateway::TCountedContent&& data) {
+        actorSystem->Send(new IEventHandle(self, parent, new TEvPrivate::TEvDataPart(std::move(data))));
+    }
+
+    static void OnDownloadFinished(TActorSystem* actorSystem, const TActorId& self, const TActorId& parent, const TRetryStuff::TPtr& retryStuff, TIssues issues) {
+        if (issues) {
+            if  (retryStuff->NextRetryDelay = retryStuff->RetryState->GetNextRetryDelay(0L); !retryStuff->NextRetryDelay) {
+                actorSystem->Send(new IEventHandle(self, parent, new TEvPrivate::TEvReadError(std::move(issues))));
+                return;
+            }
+        }
+
+        if (retryStuff->NextRetryDelay)
+            actorSystem->Schedule(*retryStuff->NextRetryDelay, new IEventHandle(parent, self, new TEvPrivate::TEvRetryEventFunc(std::bind(&TS3ReadCoroActor::DownloadStart, retryStuff, self, parent))));
         else
             actorSystem->Send(new IEventHandle(self, parent, new TEvPrivate::TEvReadFinished));
     }
 
     static void DownloadStart(const TRetryStuff::TPtr& retryStuff, const TActorId& self, const TActorId& parent) {
-        retryStuff->Gateway->Download(retryStuff->Url,
+        retryStuff->CancelHook = retryStuff->Gateway->Download(retryStuff->Url,
             retryStuff->Headers, retryStuff->Offset,
-            std::bind(&TS3ReadCoroActor::OnNewData, TActivationContext::ActorSystem(), self, parent, retryStuff, std::placeholders::_1),
+            std::bind(&TS3ReadCoroActor::OnDownloadStart, TActivationContext::ActorSystem(), self, parent, std::placeholders::_1),
+            std::bind(&TS3ReadCoroActor::OnNewData, TActivationContext::ActorSystem(), self, parent, std::placeholders::_1),
             std::bind(&TS3ReadCoroActor::OnDownloadFinished, TActivationContext::ActorSystem(), self, parent, retryStuff, std::placeholders::_1));
     }
 
-    TAutoPtr<IEventHandle> AfterRegister(const TActorId& self, const TActorId& parent) {
-        DownloadStart(RetryStuff, self, parent);
-        return TActorCoro::AfterRegister(self, parent);
+    void Registered(TActorSystem* sys, const TActorId& parent) override {
+        TActorCoro::Registered(sys, parent); // Calls TActorCoro::OnRegister and sends bootstrap event to ourself.
+        DownloadStart(RetryStuff, SelfId(), parent);
     }
 
     static IHTTPGateway::THeaders MakeHeader(const TString& token) {
@@ -449,72 +503,102 @@ private:
     }
 
     const TRetryStuff::TPtr RetryStuff;
-    TOutput::TPtr Outputs;
 };
 
-class TS3StreamReadActor : public TActorBootstrapped<TS3StreamReadActor>, public IDqSourceActor {
+class TS3StreamReadActor : public TActorBootstrapped<TS3StreamReadActor>, public IDqComputeActorAsyncInput {
 public:
     TS3StreamReadActor(
-        const TTypeEnvironment& typeEnv,
-        const IFunctionRegistry& functionRegistry,
         ui64 inputIndex,
         IHTTPGateway::TPtr gateway,
+        const THolderFactory& holderFactory,
         const TString& url,
         const TString& token,
         TPathList&& paths,
-        TString format,
-        TString rowType,
-        const NActors::TActorId& computeActorId,
-        const std::shared_ptr<NS3::TRetryConfig>& retryConfig
-    )   : TypeEnv(typeEnv)
-        , FunctionRegistry(functionRegistry)
-        , Gateway(std::move(gateway))
+        bool addPathIndex,
+        ui64 startPathIndex,
+        const TReadSpec::TPtr& readSpec,
+        const NActors::TActorId& computeActorId
+    )   : Gateway(std::move(gateway))
+        , HolderFactory(holderFactory)
         , InputIndex(inputIndex)
         , ComputeActorId(computeActorId)
         , Url(url)
         , Headers(MakeHeader(token))
         , Paths(std::move(paths))
-        , Format(format)
-        , RowType(rowType)
-        , RetryConfig(retryConfig)
-        , Outputs(std::make_shared<TOutput>())
+        , AddPathIndex(addPathIndex)
+        , StartPathIndex(startPathIndex)
+        , ReadSpec(readSpec)
+        , Count(Paths.size())
     {}
 
     void Bootstrap() {
         Become(&TS3StreamReadActor::StateFunc);
-        for (const auto& path : Paths) {
-            auto impl = MakeHolder<TS3ReadCoroImpl>(TypeEnv, FunctionRegistry, InputIndex, ComputeActorId, Paths.size(), Format, RowType, Outputs);
-            RegisterWithSameMailbox(MakeHolder<TS3ReadCoroActor>(std::move(impl), Gateway, Url, Headers, std::get<TString>(path), std::get<std::size_t>(path), RetryConfig, Outputs).Release());
+        for (size_t pathInd = 0; pathInd < Paths.size(); ++pathInd) {
+            const TPath& path = Paths[pathInd];
+            auto stuff = std::make_shared<TRetryStuff>(Gateway, Url + std::get<TString>(path), Headers, std::get<std::size_t>(path));
+            auto impl = MakeHolder<TS3ReadCoroImpl>(InputIndex, ComputeActorId, stuff, ReadSpec, pathInd + StartPathIndex, std::get<TString>(path));
+            RegisterWithSameMailbox(std::make_unique<TS3ReadCoroActor>(std::move(impl), std::move(stuff)).release());
         }
     }
 
     static constexpr char ActorName[] = "S3_READ_ACTOR";
 
 private:
+    class TBoxedBlock : public TComputationValue<TBoxedBlock> {
+    public:
+        TBoxedBlock(TMemoryUsageInfo* memInfo, NDB::Block& block)
+            : TComputationValue(memInfo)
+        {
+            Block.swap(block);
+        }
+    private:
+        NUdf::TStringRef GetResourceTag() const final {
+            return NUdf::TStringRef::Of("ClickHouseClient.Block");
+        }
+
+        void* GetResource() final {
+            return &Block;
+        }
+
+        NDB::Block Block;
+    };
+
     void SaveState(const NDqProto::TCheckpoint&, NDqProto::TSourceState&) final {}
     void LoadState(const NDqProto::TSourceState&) final {}
     void CommitState(const NDqProto::TCheckpoint&) final {}
     ui64 GetInputIndex() const final { return InputIndex; }
 
-    i64 GetSourceData(NKikimr::NMiniKQL::TUnboxedValueVector& buffer, bool& finished, i64) final {
-        if (!Outputs)
-            return 0LL;
+    i64 GetAsyncInputData(TUnboxedValueVector& output, bool& finished, i64 free) final {
+        i64 total = 0LL;
+        if (!Blocks.empty()) do {
+            auto& block = std::get<NDB::Block>(Blocks.front());
+            const i64 s = block.bytes();
 
-        i64 total = Outputs->Data.size();
-        std::move(Outputs->Data.begin(), Outputs->Data.end(), std::back_inserter(buffer));
-        Outputs->Data.clear();
+            auto value = HolderFactory.Create<TBoxedBlock>(block);
+            if (AddPathIndex) {
+                NUdf::TUnboxedValue* tupleItems = nullptr;
+                auto tuple = ContainerCache.NewArray(HolderFactory, 2, tupleItems);
+                *tupleItems++ = value;
+                *tupleItems++ = NUdf::TUnboxedValuePod(std::get<ui64>(Blocks.front()));
+                value = tuple;
+            }
 
-        if (Outputs.unique()) {
-            finished = true;
-            Outputs.reset();
+            free -= s;
+            total += s;
+            output.emplace_back(std::move(value));
+            Blocks.pop_front();
+        } while (!Blocks.empty() && free > 0LL && std::get<NDB::Block>(Blocks.front()).bytes() <= size_t(free));
+
+        finished = Blocks.empty() && !Count;
+        if (finished) {
+            ContainerCache.Clear();
         }
-
         return total;
     }
 
-    // IActor & IDqSourceActor
+    // IActor & IDqComputeActorAsyncInput
     void PassAway() override { // Is called from Compute Actor
-        Outputs = nullptr;
+        ContainerCache.Clear();
         TActorBootstrapped<TS3StreamReadActor>::PassAway();
     }
 
@@ -524,70 +608,227 @@ private:
 
     STRICT_STFUNC(StateFunc,
         hFunc(TEvPrivate::TEvRetryEventFunc, HandleRetry);
+        hFunc(TEvPrivate::TEvNextBlock, HandleNextBlock);
+        cFunc(TEvPrivate::EvReadFinished, HandleReadFinished);
     )
 
     void HandleRetry(TEvPrivate::TEvRetryEventFunc::TPtr& retry) {
         return retry->Get()->Functor();
     }
 
-    const TTypeEnvironment& TypeEnv;
-    const IFunctionRegistry& FunctionRegistry;
+    void HandleNextBlock(TEvPrivate::TEvNextBlock::TPtr& next) {
+        Blocks.emplace_back();
+        auto& block = std::get<NDB::Block>(Blocks.back());
+        auto& pathInd = std::get<size_t>(Blocks.back());
+        block.swap(next->Get()->Block);
+        pathInd = next->Get()->PathIndex;
+        Send(ComputeActorId, new IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived(InputIndex));
+    }
+
+    void HandleReadFinished() {
+        Y_VERIFY(Count);
+        --Count;
+    }
 
     const IHTTPGateway::TPtr Gateway;
+    const THolderFactory& HolderFactory;
+    TPlainContainerCache ContainerCache;
 
     const ui64 InputIndex;
     const NActors::TActorId ComputeActorId;
 
+
     const TString Url;
     const IHTTPGateway::THeaders Headers;
     const TPathList Paths;
-    const TString Format, RowType, Compression;
-    const std::shared_ptr<NS3::TRetryConfig> RetryConfig;
-
-    TOutput::TPtr Outputs;
+    const bool AddPathIndex;
+    const ui64 StartPathIndex;
+    const TReadSpec::TPtr ReadSpec;
+    std::deque<std::tuple<NDB::Block, size_t>> Blocks;
+    ui32 Count;
 };
+
+using namespace NKikimr::NMiniKQL;
+// the same func exists in clickhouse client udf :(
+NDB::DataTypePtr PgMetaToClickHouse(const TPgType* type) {
+    auto typeId = type->GetTypeId();
+    TTypeInfoHelper typeInfoHelper;
+    auto* pgDescription = typeInfoHelper.FindPgTypeDescription(typeId);
+    Y_ENSURE(pgDescription);
+    const auto typeName = pgDescription->Name;
+    using NUdf::TStringRef;
+    if (typeName == TStringRef("bool")) {
+        return std::make_shared<NDB::DataTypeUInt8>();
+    }
+
+    if (typeName == TStringRef("int4")) {
+        return std::make_shared<NDB::DataTypeInt32>();
+    }
+
+    if (typeName == TStringRef("int8")) {
+        return std::make_shared<NDB::DataTypeInt64>();
+    }
+
+    if (typeName == TStringRef("float4")) {
+        return std::make_shared<NDB::DataTypeFloat32>();
+    }
+
+    if (typeName == TStringRef("float8")) {
+        return std::make_shared<NDB::DataTypeFloat64>();
+    }
+    return std::make_shared<NDB::DataTypeString>();
+}
+
+NDB::DataTypePtr PgMetaToNullableClickHouse(const TPgType* type) {
+    return makeNullable(PgMetaToClickHouse(type));
+}
+
+NDB::DataTypePtr MetaToClickHouse(const TType* type, NSerialization::TSerializationInterval::EUnit unit) {
+    switch (type->GetKind()) {
+        case TType::EKind::EmptyList:
+            return std::make_shared<NDB::DataTypeArray>(std::make_shared<NDB::DataTypeNothing>());
+        case TType::EKind::Optional:
+            return makeNullable(MetaToClickHouse(static_cast<const TOptionalType*>(type)->GetItemType(), unit));
+        case TType::EKind::List:
+            return std::make_shared<NDB::DataTypeArray>(MetaToClickHouse(static_cast<const TListType*>(type)->GetItemType(), unit));
+        case TType::EKind::Tuple: {
+            const auto tupleType = static_cast<const TTupleType*>(type);
+            NDB::DataTypes elems;
+            elems.reserve(tupleType->GetElementsCount());
+            for (auto i = 0U; i < tupleType->GetElementsCount(); ++i)
+                elems.emplace_back(MetaToClickHouse(tupleType->GetElementType(i), unit));
+            return std::make_shared<NDB::DataTypeTuple>(elems);
+        }
+        case TType::EKind::Pg:
+            return PgMetaToNullableClickHouse(AS_TYPE(TPgType, type));
+        case TType::EKind::Data: {
+            const auto dataType = static_cast<const TDataType*>(type);
+            switch (const auto slot = *dataType->GetDataSlot()) {
+            case NUdf::EDataSlot::Int8:
+                return std::make_shared<NDB::DataTypeInt8>();
+            case NUdf::EDataSlot::Bool:
+            case NUdf::EDataSlot::Uint8:
+                return std::make_shared<NDB::DataTypeUInt8>();
+            case NUdf::EDataSlot::Int16:
+                return std::make_shared<NDB::DataTypeInt16>();
+            case NUdf::EDataSlot::Uint16:
+                return std::make_shared<NDB::DataTypeUInt16>();
+            case NUdf::EDataSlot::Int32:
+                return std::make_shared<NDB::DataTypeInt32>();
+            case NUdf::EDataSlot::Uint32:
+                return std::make_shared<NDB::DataTypeUInt32>();
+            case NUdf::EDataSlot::Int64:
+                return std::make_shared<NDB::DataTypeInt64>();
+            case NUdf::EDataSlot::Uint64:
+                return std::make_shared<NDB::DataTypeUInt64>();
+            case NUdf::EDataSlot::Float:
+                return std::make_shared<NDB::DataTypeFloat32>();
+            case NUdf::EDataSlot::Double:
+                return std::make_shared<NDB::DataTypeFloat64>();
+            case NUdf::EDataSlot::String:
+            case NUdf::EDataSlot::Utf8:
+            case NUdf::EDataSlot::Json:
+                return std::make_shared<NDB::DataTypeString>();
+            case NUdf::EDataSlot::Date:
+            case NUdf::EDataSlot::TzDate:
+                return std::make_shared<NDB::DataTypeDate>();
+            case NUdf::EDataSlot::Datetime:
+            case NUdf::EDataSlot::TzDatetime:
+                return std::make_shared<NDB::DataTypeDateTime>();
+            case NUdf::EDataSlot::Uuid:
+                return std::make_shared<NDB::DataTypeUUID>();
+            case NUdf::EDataSlot::Interval:
+                return NSerialization::GetInterval(unit);
+            default:
+                throw yexception() << "Unsupported data slot in MetaToClickHouse: " << slot;
+            }
+        }
+        default:
+            throw yexception() << "Unsupported type kind in MetaToClickHouse: " << type->GetKindAsStr();
+    }
+    return nullptr;
+}
 
 } // namespace
 
-std::pair<NYql::NDq::IDqSourceActor*, IActor*> CreateS3ReadActor(
+using namespace NKikimr::NMiniKQL;
+
+std::pair<NYql::NDq::IDqComputeActorAsyncInput*, IActor*> CreateS3ReadActor(
     const TTypeEnvironment& typeEnv,
-    const IFunctionRegistry& functionRegistry,
+    const THolderFactory& holderFactory,
     IHTTPGateway::TPtr gateway,
     NS3::TSource&& params,
     ui64 inputIndex,
     const THashMap<TString, TString>& secureParams,
     const THashMap<TString, TString>& taskParams,
     const NActors::TActorId& computeActorId,
-    ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
-    const std::shared_ptr<NS3::TRetryConfig>& retryConfig)
+    ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory)
 {
-    std::unordered_map<TString, size_t> map(params.GetPath().size());
-    for (auto i = 0; i < params.GetPath().size(); ++i)
-        map.emplace(params.GetPath().Get(i).GetPath(), params.GetPath().Get(i).GetSize());
+    const IFunctionRegistry& functionRegistry = *holderFactory.GetFunctionRegistry();
 
     TPathList paths;
-    paths.reserve(map.size());
-    if (const auto taskParamsIt = taskParams.find(S3ProviderName); taskParamsIt != taskParams.cend()) {
-        NS3::TRange range;
-        TStringInput input(taskParamsIt->second);
-        range.Load(&input);
-        for (auto i = 0; i < range.GetPath().size(); ++i) {
-            const auto& path = range.GetPath().Get(i);
-            paths.emplace_back(path, map[path]);
-        }
-    } else
-        while (auto item = map.extract(map.cbegin()))
-            paths.emplace_back(std::move(item.key()), std::move(item.mapped()));
+    ui64 startPathIndex = 0;
+    ReadPathsList(params, taskParams, paths, startPathIndex);
 
     const auto token = secureParams.Value(params.GetToken(), TString{});
     const auto credentialsProviderFactory = CreateCredentialsProviderFactoryForStructuredToken(credentialsFactory, token);
     const auto authToken = credentialsProviderFactory->CreateProvider()->GetAuthInfo();
 
+    const auto& settings = params.GetSettings();
+    bool addPathIndex = false;
+    if (auto it = settings.find("addPathIndex"); it != settings.cend()) {
+        addPathIndex = FromString<bool>(it->second);
+    }
+
+    NYql::NSerialization::TSerializationInterval::EUnit intervalUnit = NYql::NSerialization::TSerializationInterval::EUnit::MICROSECONDS;
+    if (auto it = settings.find("data.interval.unit"); it != settings.cend()) {
+        intervalUnit = NYql::NSerialization::TSerializationInterval::ToUnit(it->second);
+    }
+
     if (params.HasFormat() && params.HasRowType()) {
-        const auto actor = new TS3StreamReadActor(typeEnv, functionRegistry, inputIndex, std::move(gateway), params.GetUrl(), authToken, std::move(paths), params.GetFormat(), params.GetRowType(), computeActorId, retryConfig);
+        const auto pb = std::make_unique<TProgramBuilder>(typeEnv, functionRegistry);
+        const auto outputItemType = NCommon::ParseTypeFromYson(TStringBuf(params.GetRowType()), *pb,  Cerr);
+        const auto structType = static_cast<TStructType*>(outputItemType);
+
+        const auto readSpec = std::make_shared<TReadSpec>();
+        readSpec->Columns.resize(structType->GetMembersCount());
+        for (ui32 i = 0U; i < structType->GetMembersCount(); ++i) {
+            auto& column = readSpec->Columns[i];
+            column.type = MetaToClickHouse(structType->GetMemberType(i), intervalUnit);
+            column.name = structType->GetMemberName(i);
+        }
+        readSpec->Format = params.GetFormat();
+
+        if (const auto it = settings.find("compression"); settings.cend() != it)
+            readSpec->Compression = it->second;
+
+#define SUPPORTED_FLAGS(xx) \
+        xx(skip_unknown_fields, true) \
+        xx(import_nested_json, true) \
+        xx(with_names_use_header, true) \
+        xx(null_as_default, true) \
+
+#define SET_FLAG(flag, def) \
+        if (const auto it = settings.find(#flag); settings.cend() != it) \
+            readSpec->Settings.flag = FromString<bool>(it->second); \
+        else \
+            readSpec->Settings.flag = def;
+
+        SUPPORTED_FLAGS(SET_FLAG)
+
+#undef SET_FLAG
+#undef SUPPORTED_FLAGS
+
+        const auto actor = new TS3StreamReadActor(inputIndex, std::move(gateway), holderFactory, params.GetUrl(), authToken,
+                                                  std::move(paths), addPathIndex, startPathIndex, readSpec, computeActorId);
         return {actor, actor};
     } else {
-        const auto actor = new TS3ReadActor(inputIndex, std::move(gateway), params.GetUrl(), authToken, std::move(paths), computeActorId, retryConfig);
+        ui64 expectedSize = std::numeric_limits<ui64>::max();
+        if (const auto it = settings.find("expectedSize"); settings.cend() != it)
+            expectedSize = FromString<ui64>(it->second);
+
+        const auto actor = new TS3ReadActor(inputIndex, std::move(gateway), holderFactory, params.GetUrl(), authToken,
+                                            std::move(paths), addPathIndex, startPathIndex, computeActorId, expectedSize);
         return {actor, actor};
     }
 }

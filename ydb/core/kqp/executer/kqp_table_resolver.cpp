@@ -58,18 +58,24 @@ private:
         YQL_ENSURE(entries.size() == TableKeys.Size());
 
         for (auto& entry : entries) {
-            if (entry.Status != NSchemeCache::TSchemeCacheNavigate::EStatus::Ok) {
-                timer.reset();
-                if (entry.Status == NSchemeCache::TSchemeCacheNavigate::EStatus::PathErrorUnknown) {
+            switch (entry.Status) {
+                case NSchemeCache::TSchemeCacheNavigate::EStatus::Ok:
+                    break;
+
+                case NSchemeCache::TSchemeCacheNavigate::EStatus::PathErrorUnknown:
+                case NSchemeCache::TSchemeCacheNavigate::EStatus::PathNotTable:
+                case NSchemeCache::TSchemeCacheNavigate::EStatus::TableCreationNotComplete:
+                    ReplyErrorAndDie(Ydb::StatusIds::SCHEME_ERROR,
+                        YqlIssue({}, NYql::TIssuesIds::KIKIMR_SCHEME_MISMATCH, TStringBuilder()
+                            << "Table scheme error `" << JoinPath(entry.Path) << "`: " << entry.Status << '.'));
+                    return;
+
+                default:
                     ReplyErrorAndDie(Ydb::StatusIds::UNAVAILABLE,
                         YqlIssue({}, NYql::TIssuesIds::KIKIMR_TEMPORARILY_UNAVAILABLE, TStringBuilder()
                             << "Failed to resolve table `" << JoinPath(entry.Path) << "`: " << entry.Status << '.'));
-                } else {
-                    ReplyErrorAndDie(Ydb::StatusIds::SCHEME_ERROR,
-                        YqlIssue({}, NYql::TIssuesIds::KIKIMR_SCHEME_ERROR, TStringBuilder()
-                            << "Failed to resolve table `" << JoinPath(entry.Path) << "`: " << entry.Status << '.'));
-                }
-                return;
+                    return;
+
             }
 
             auto* table = TableKeys.FindTablePtr(entry.TableId);
@@ -81,8 +87,8 @@ private:
                 return;
             }
 
-            if (entry.Kind == NSchemeCache::TSchemeCacheNavigate::KindOlapTable) {
-                YQL_ENSURE(entry.OlapTableInfo || entry.OlapStoreInfo);
+            if (entry.Kind == NSchemeCache::TSchemeCacheNavigate::KindColumnTable) {
+                YQL_ENSURE(entry.ColumnTableInfo || entry.OlapStoreInfo);
                 // NOTE: entry.SysViewInfo might not be empty for OLAP stats virtual tables
                 table->TableKind = ETableKind::Olap;
             } else if (entry.TableId.IsSystemView()) {
@@ -125,7 +131,7 @@ private:
                 if (!columnId) {
                     timer.reset();
                     ReplyErrorAndDie(Ydb::StatusIds::SCHEME_ERROR,
-                        YqlIssue({}, NYql::TIssuesIds::KIKIMR_SCHEME_ERROR, TStringBuilder()
+                        YqlIssue({}, NYql::TIssuesIds::KIKIMR_SCHEME_MISMATCH, TStringBuilder()
                             << "Unknown column `" << columnName << "` at table `" << JoinPath(entry.Path) << "`."));
                     return;
                 }
@@ -191,12 +197,12 @@ private:
 
                 timer.reset();
                 ReplyErrorAndDie(Ydb::StatusIds::SCHEME_ERROR,
-                    YqlIssue({}, NYql::TIssuesIds::KIKIMR_SCHEME_ERROR, TStringBuilder()
+                    YqlIssue({}, NYql::TIssuesIds::KIKIMR_SCHEME_MISMATCH, TStringBuilder()
                         << "Failed to resolve table " << path << " keys: " << entry.Status << '.'));
                 return;
             }
 
-            for (auto& partition : entry.KeyDescription->Partitions) {
+            for (auto& partition : entry.KeyDescription->GetPartitions()) {
                 YQL_ENSURE(partition.Range);
             }
 
@@ -229,6 +235,16 @@ private:
                     auto& table = TableKeys.GetOrAddTable(MakeTableId(op.GetTable()), op.GetTable().GetPath());
                     for (auto& column : op.GetColumns()) {
                         table.Columns.emplace(column.GetName(), TKqpTableKeys::TColumn());
+                    }
+                }
+
+                for (const auto& input : stage.GetInputs()) {
+                    if (input.GetTypeCase() == NKqpProto::TKqpPhyConnection::kStreamLookup) {
+                        const auto& streamLookup = input.GetStreamLookup();
+                        auto& table = TableKeys.GetOrAddTable(MakeTableId(streamLookup.GetTable()), streamLookup.GetTable().GetPath());
+                        for (auto& column : input.GetStreamLookup().GetColumns()) {
+                            table.Columns.emplace(column, TKqpTableKeys::TColumn());
+                        }
                     }
                 }
             }

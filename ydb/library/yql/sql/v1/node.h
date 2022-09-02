@@ -391,6 +391,7 @@ namespace NSQLTranslationV1 {
     class TCallDirectRow final : public TCallNode {
         TPtr DoClone() const final;
     public:
+        TCallDirectRow(TPosition pos, const TString& opName, i32 minArgs, i32 maxArgs, const TVector<TNodePtr>& args);
         TCallDirectRow(TPosition pos, const TString& opName, const TVector<TNodePtr>& args);
     protected:
         bool DoInit(TContext& ctx, ISource* src) override;
@@ -1152,6 +1153,7 @@ namespace NSQLTranslationV1 {
         TVector<TChangefeedDescription> AddChangefeeds;
         TVector<TChangefeedDescription> AlterChangefeeds;
         TVector<TIdentifier> DropChangefeeds;
+        TMaybe<std::pair<TIdentifier, TIdentifier>> RenameIndexTo;
 
         bool IsEmpty() const {
             return AddColumns.empty() && DropColumns.empty() && AlterColumns.empty()
@@ -1159,7 +1161,8 @@ namespace NSQLTranslationV1 {
                 && !TableSettings.IsSet()
                 && AddIndexes.empty() && DropIndexes.empty()
                 && !RenameTo.Defined()
-                && AddChangefeeds.empty() && AlterChangefeeds.empty() && DropChangefeeds.empty();
+                && AddChangefeeds.empty() && AlterChangefeeds.empty() && DropChangefeeds.empty()
+                && !RenameIndexTo.Defined();
         }
     };
 
@@ -1264,7 +1267,7 @@ namespace NSQLTranslationV1 {
     TNodePtr BuildSubqueryRef(TNodePtr subquery, const TString& alias, int tupleIndex = -1);
     TNodePtr BuildSourceNode(TPosition pos, TSourcePtr source, bool checkExist = false);
     TSourcePtr BuildMuxSource(TPosition pos, TVector<TSourcePtr>&& sources);
-    TSourcePtr BuildFakeSource(TPosition pos, bool missingFrom = false);
+    TSourcePtr BuildFakeSource(TPosition pos, bool missingFrom = false, bool inSubquery = false);
     TSourcePtr BuildNodeSource(TPosition pos, const TNodePtr& node, bool wrapToList = false);
     TSourcePtr BuildTableSource(TPosition pos, const TTableRef& table, const TString& label = TString());
     TSourcePtr BuildInnerSource(TPosition pos, TNodePtr node, const TString& service, const TDeferredAtom& cluster, const TString& label = TString());

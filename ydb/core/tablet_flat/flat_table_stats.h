@@ -31,15 +31,18 @@ namespace NTable {
         TPartStats& operator-=(const TPartStats& rhs);
     };
 
-    struct TSelectStats {
+    struct TIteratorStats {
+        ui64 DeletedRowSkips = 0;
+        ui64 InvisibleRowSkips = 0;
+    };
+
+    struct TSelectStats : TIteratorStats {
         ui64 Sieved = 0;
         ui64 Weeded = 0;
         ui64 NoKey = 0;
-        ui64 Invisible = 0;
     };
 
     struct TCompactionStats {
-        THashSet<ui64> PartOwners;
         ui64 PartCount = 0;
         ui64 MemRowCount = 0;
         ui64 MemDataSize = 0;

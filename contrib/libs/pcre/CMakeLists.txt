@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(pcre16)
+add_subdirectory(pcre32)
 
 add_library(contrib-libs-pcre)
 target_compile_options(contrib-libs-pcre PUBLIC
@@ -14,6 +16,7 @@ target_compile_options(contrib-libs-pcre PUBLIC
 target_compile_options(contrib-libs-pcre PRIVATE
   -DHAVE_CONFIG_H
   -DARCADIA_PCRE_ENABLE_JIT
+  -Wno-everything
 )
 target_include_directories(contrib-libs-pcre PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/pcre

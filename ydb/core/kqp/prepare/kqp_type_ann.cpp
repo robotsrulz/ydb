@@ -320,7 +320,7 @@ TStatus AnnotateReadTableRanges(const TExprNode::TPtr& node, TExprContext& ctx, 
 TStatus AnnotateLookupTable(const TExprNode::TPtr& node, TExprContext& ctx, const TString& cluster,
     const TKikimrTablesData& tablesData, bool withSystemColumns)
 {
-    if (!EnsureArgsCount(*node, TKqlLookupIndex::Match(node.Get()) ? 4 : 3, ctx)) {
+    if (!EnsureArgsCount(*node, TKqlLookupIndexBase::Match(node.Get()) ? 4 : 3, ctx)) {
         return TStatus::Error;
     }
 
@@ -368,8 +368,8 @@ TStatus AnnotateLookupTable(const TExprNode::TPtr& node, TExprContext& ctx, cons
     auto structType = lookupType->Cast<TStructExprType>();
 
     ui32 keyColumnsCount = 0;
-    if (TKqlLookupIndex::Match(node.Get())) {
-        auto index = node->Child(TKqlLookupIndex::idx_Index);
+    if (TKqlLookupIndexBase::Match(node.Get())) {
+        auto index = node->Child(TKqlLookupIndexBase::idx_Index);
         if (!EnsureAtom(*index, ctx)) {
             return TStatus::Error;
         }
@@ -841,6 +841,85 @@ TStatus AnnotateOlapFilterExists(const TExprNode::TPtr& node, TExprContext& ctx)
     return TStatus::Ok;
 }
 
+TStatus AnnotateOlapAgg(const TExprNode::TPtr& node, TExprContext& ctx) {
+    if (!EnsureArgsCount(*node, 3, ctx)) {
+        return TStatus::Error;
+    }
+
+    auto* input = node->Child(TKqpOlapAgg::idx_Input);
+
+    const TTypeAnnotationNode* itemType;
+    if (!EnsureNewSeqType<false, false, true>(*input, ctx, &itemType)) {
+        return TStatus::Error;
+    }
+
+    if (!EnsureStructType(input->Pos(), *itemType, ctx)) {
+        return TStatus::Error;
+    }
+
+    auto structType = itemType->Cast<TStructExprType>();
+
+    if (!EnsureTuple(*node->Child(TKqpOlapAgg::idx_Aggregates), ctx)) {
+        return TStatus::Error;
+    }
+
+    TVector<const TItemExprType*> aggTypes;
+    for (auto agg : node->Child(TKqpOlapAgg::idx_Aggregates)->ChildrenList()) {
+        auto aggName = agg->Child(TKqpOlapAggOperation::idx_Name);
+        auto opType = agg->Child(TKqpOlapAggOperation::idx_Type);
+        auto colName = agg->Child(TKqpOlapAggOperation::idx_Column);
+        if (!EnsureAtom(*opType, ctx)) {
+            ctx.AddError(TIssue(
+                ctx.GetPosition(node->Pos()),
+                TStringBuilder() << "Expected operation type in OLAP aggregation, got: " << opType->Content()
+            ));
+            return TStatus::Error;
+        }
+        if (!EnsureAtom(*colName, ctx)) {
+            ctx.AddError(TIssue(
+                ctx.GetPosition(node->Pos()),
+                TStringBuilder() << "Expected column name in OLAP aggregation, got: " << colName->Content()
+            ));
+            return TStatus::Error;
+        }
+        if (!EnsureAtom(*aggName, ctx)) {
+            ctx.AddError(TIssue(
+                ctx.GetPosition(node->Pos()),
+                TStringBuilder() << "Expected aggregate column generated name in OLAP aggregation, got: " << aggName->Content()
+            ));
+            return TStatus::Error;
+        }
+        if (opType->Content() == "count") {
+            aggTypes.push_back(ctx.MakeType<TItemExprType>(aggName->Content(), ctx.MakeType<TDataExprType>(EDataSlot::Uint64)));
+        } else if (opType->Content() == "some") {
+            aggTypes.push_back(ctx.MakeType<TItemExprType>(aggName->Content(), structType->FindItemType(colName->Content())));
+        } else {
+            ctx.AddError(TIssue(
+                ctx.GetPosition(node->Pos()),
+                TStringBuilder() << "Unsupported operation type in OLAP aggregation, got: " << opType->Content()
+            ));
+            return TStatus::Error;
+        }
+    }
+
+    if (!EnsureTuple(*node->Child(TKqpOlapAgg::idx_KeyColumns), ctx)) {
+        return TStatus::Error;
+    }
+    for (auto keyCol : node->Child(TKqpOlapAgg::idx_KeyColumns)->ChildrenList()) {
+        if (!EnsureAtom(*keyCol, ctx)) {
+            ctx.AddError(TIssue(
+                ctx.GetPosition(node->Pos()),
+                TStringBuilder() << "Expected column name in OLAP key columns, got: " << keyCol->Content()
+            ));
+            return TStatus::Error;
+        }
+        aggTypes.push_back(ctx.MakeType<TItemExprType>(keyCol->Content(), structType->FindItemType(keyCol->Content())));
+    }
+
+    node->SetTypeAnn(MakeSequenceType(input->GetTypeAnn()->GetKind(), *ctx.MakeType<TStructExprType>(aggTypes), ctx));
+    return TStatus::Ok;
+}
+
 TStatus AnnotateKqpTxInternalBinding(const TExprNode::TPtr& node, TExprContext& ctx) {
     if (!EnsureArgsCount(*node, 2, ctx)) {
         return TStatus::Error;
@@ -1029,6 +1108,65 @@ TStatus AnnotateKqpEnsure(const TExprNode::TPtr& node, TExprContext& ctx) {
     return TStatus::Ok;
 }
 
+TStatus AnnotateStreamLookupConnection(const TExprNode::TPtr& node, TExprContext& ctx, const TString& cluster,
+    const TKikimrTablesData& tablesData, bool withSystemColumns) {
+
+    if (!EnsureArgsCount(*node, 4, ctx)) {
+        return TStatus::Error;
+    }
+
+    if (!EnsureCallable(*node->Child(TKqpCnStreamLookup::idx_Output), ctx)) {
+        return TStatus::Error;
+    }
+
+    if (!TDqOutput::Match(node->Child(TKqpCnStreamLookup::idx_Output))) {
+        ctx.AddError(TIssue(ctx.GetPosition(node->Child(TDqCnMerge::idx_Output)->Pos()),
+            TStringBuilder() << "Expected " << TDqOutput::CallableName()));
+        return TStatus::Error;
+    }
+
+    auto table = ResolveTable(node->Child(TKqpCnStreamLookup::idx_Table), ctx, cluster, tablesData);
+    if (!table.second) {
+        return TStatus::Error;
+    }
+
+    auto lookupKeysTypeNode = node->Child(TKqpCnStreamLookup::idx_LookupKeysType);
+    if (!EnsureType(*lookupKeysTypeNode, ctx)) {
+        return TStatus::Error;
+    }
+
+    auto lookupKeysType = lookupKeysTypeNode->GetTypeAnn()->Cast<TTypeExprType>()->GetType();
+    if (!EnsureListType(node->Pos(), *lookupKeysType, ctx)) {
+        return TStatus::Error;
+    }
+
+    auto lookupKeyType = lookupKeysType->Cast<TListExprType>()->GetItemType();
+    if (!EnsureStructType(node->Pos(), *lookupKeyType, ctx)) {
+        return TStatus::Error;
+    }
+
+    const auto& lookupKeyColumns = lookupKeyType->Cast<TStructExprType>()->GetItems();
+    for (const auto& keyColumn : lookupKeyColumns) {
+        if (!table.second->GetKeyColumnIndex(TString(keyColumn->GetName()))) {
+            return TStatus::Error;
+        }
+    }
+
+    if (!EnsureTupleOfAtoms(*node->Child(TKqpCnStreamLookup::idx_Columns), ctx)) {
+        return TStatus::Error;
+    }
+
+    TCoAtomList columns{node->ChildPtr(TKqpCnStreamLookup::idx_Columns)};
+
+    auto rowType = GetReadTableRowType(ctx, tablesData, cluster, table.first, columns, withSystemColumns);
+    if (!rowType) {
+        return TStatus::Error;
+    }
+
+    node->SetTypeAnn(ctx.MakeType<TStreamExprType>(rowType));
+    return TStatus::Ok;
+}
+
 } // namespace
 
 TAutoPtr<IGraphTransformer> CreateKqpTypeAnnotationTransformer(const TString& cluster,
@@ -1095,8 +1233,16 @@ TAutoPtr<IGraphTransformer> CreateKqpTypeAnnotationTransformer(const TString& cl
                 return AnnotateOlapFilterExists(input, ctx);
             }
 
+            if (TKqpOlapAgg::Match(input.Get())) {
+                return AnnotateOlapAgg(input, ctx);
+            }
+
             if (TKqpCnMapShard::Match(input.Get()) || TKqpCnShuffleShard::Match(input.Get())) {
                 return AnnotateDqConnection(input, ctx);
+            }
+
+            if (TKqpCnStreamLookup::Match(input.Get())) {
+                return AnnotateStreamLookupConnection(input, ctx, cluster, *tablesData, config->SystemColumnsEnabled());
             }
 
             if (TKqpTxResultBinding::Match(input.Get())) {

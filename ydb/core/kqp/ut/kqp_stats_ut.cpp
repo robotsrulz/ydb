@@ -14,19 +14,23 @@ using namespace NYdb::NTable;
 
 Y_UNIT_TEST_SUITE(KqpStats) {
 
-Y_UNIT_TEST(MultiTxStatsFullExp) {
-    TKikimrRunner kikimr;
-    NExperimental::TStreamQueryClient db{kikimr.GetDriver()};
-    auto settings = NExperimental::TExecuteStreamQuerySettings();
-    settings.ProfileMode(NYdb::NExperimental::EStreamQueryProfileMode::Full);
+Y_UNIT_TEST_TWIN(MultiTxStatsFullExp, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
+    auto db = kikimr.GetTableClient();
 
-    auto it = db.ExecuteStreamQuery(R"(
+    TStreamExecScanQuerySettings settings;
+    settings.CollectQueryStats(ECollectQueryStatsMode::Profile);
+
+    auto it = db.StreamExecuteScanQuery(R"(
         SELECT * FROM `/Root/EightShard` WHERE Key BETWEEN 150 AND 266 ORDER BY Data LIMIT 4;
     )", settings).GetValueSync();
 
     auto res = CollectStreamResult(it);
-    UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
-    UNIT_ASSERT_VALUES_EQUAL(res.ResultSetYson, R"([[[1];[202u];["Value2"]];[[2];[201u];["Value1"]];[[3];[203u];["Value3"]]])");
+    CompareYson(R"([
+        [[1];[202u];["Value2"]];
+        [[2];[201u];["Value1"]];
+        [[3];[203u];["Value3"]]
+    ])", res.ResultSetYson);
 
     UNIT_ASSERT(res.PlanJson);
     NJson::TJsonValue plan;
@@ -35,8 +39,8 @@ Y_UNIT_TEST(MultiTxStatsFullExp) {
     UNIT_ASSERT_EQUAL(node.GetMap().at("Stats").GetMapSafe().at("TotalTasks").GetIntegerSafe(), 2);
 }
 
-Y_UNIT_TEST(JoinNoStats) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_TWIN(JoinNoStats, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
     auto db = kikimr.GetTableClient();
     TStreamExecScanQuerySettings settings;
     settings.CollectQueryStats(ECollectQueryStatsMode::None);
@@ -53,15 +57,19 @@ Y_UNIT_TEST(JoinNoStats) {
     UNIT_ASSERT(!res.PlanJson);
 }
 
-Y_UNIT_TEST(JoinStatsBasic) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_TWIN(JoinStatsBasic, UseSessionActor) {
+    auto settings = TKikimrSettings()
+        .SetEnableKqpSessionActor(UseSessionActor)
+        .SetEnableKqpScanQueryStreamLookup(false);  // TODO: enable stream lookup KIKIMR-14294
+
+    TKikimrRunner kikimr(settings);
     auto db = kikimr.GetTableClient();
-    TStreamExecScanQuerySettings settings;
-    settings.CollectQueryStats(ECollectQueryStatsMode::Basic);
+    TStreamExecScanQuerySettings querySettings;
+    querySettings.CollectQueryStats(ECollectQueryStatsMode::Basic);
 
     auto it = db.StreamExecuteScanQuery(R"(
         SELECT count(*) FROM `/Root/EightShard` AS t JOIN `/Root/KeyValue` AS kv ON t.Data = kv.Key;
-    )", settings).GetValueSync();
+    )", querySettings).GetValueSync();
 
     auto res = CollectStreamResult(it);
     UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
@@ -85,8 +93,8 @@ Y_UNIT_TEST(JoinStatsBasic) {
     UNIT_ASSERT(!res.PlanJson);
 }
 
-Y_UNIT_TEST(MultiTxStatsFull) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_TWIN(MultiTxStatsFull, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
     auto db = kikimr.GetTableClient();
     TStreamExecScanQuerySettings settings;
     settings.CollectQueryStats(ECollectQueryStatsMode::Full);
@@ -114,8 +122,8 @@ Y_UNIT_TEST(MultiTxStatsFull) {
     UNIT_ASSERT_EQUAL(node.GetMap().at("Stats").GetMapSafe().at("TotalTasks").GetIntegerSafe(), 2);
 }
 
-Y_UNIT_TEST(DeferredEffects) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_TWIN(DeferredEffects, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
     TString planJson;
@@ -181,8 +189,8 @@ Y_UNIT_TEST(DeferredEffects) {
     UNIT_ASSERT(std::atoi(ru->second.c_str()) > 1);
 }
 
-Y_UNIT_TEST(DataQueryWithEffects) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_TWIN(DataQueryWithEffects, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -206,7 +214,7 @@ Y_UNIT_TEST(DataQueryWithEffects) {
 }
 
 Y_UNIT_TEST(DataQueryOldEngine) {
-    TKikimrRunner kikimr;
+    auto kikimr = KikimrRunnerEnableSessionActor(false);
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -223,8 +231,8 @@ Y_UNIT_TEST(DataQueryOldEngine) {
     AssertSuccessResult(result);
 }
 
-Y_UNIT_TEST(DataQueryMulti) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_TWIN(DataQueryMulti, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -247,8 +255,8 @@ Y_UNIT_TEST(DataQueryMulti) {
     UNIT_ASSERT_EQUAL_C(plan.GetMapSafe().at("Plan").GetMapSafe().at("Plans").GetArraySafe().size(), 0, result.GetQueryPlan());
 }
 
-Y_UNIT_TEST_NEW_ENGINE(RequestUnitForBadRequestExecute) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_QUAD(RequestUnitForBadRequestExecute, UseNewEngine, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -265,8 +273,8 @@ Y_UNIT_TEST_NEW_ENGINE(RequestUnitForBadRequestExecute) {
     UNIT_ASSERT(result.GetConsumedRu() > 0);
 }
 
-Y_UNIT_TEST_NEW_ENGINE(RequestUnitForBadRequestExplicitPrepare) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_QUAD(RequestUnitForBadRequestExplicitPrepare, UseNewEngine, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -282,8 +290,8 @@ Y_UNIT_TEST_NEW_ENGINE(RequestUnitForBadRequestExplicitPrepare) {
     UNIT_ASSERT(result.GetConsumedRu() > 0);
 }
 
-Y_UNIT_TEST_NEW_ENGINE(RequestUnitForSuccessExplicitPrepare) {
-    TKikimrRunner kikimr;
+Y_UNIT_TEST_QUAD(RequestUnitForSuccessExplicitPrepare, UseNewEngine, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor);
     auto db = kikimr.GetTableClient();
     auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -298,6 +306,58 @@ Y_UNIT_TEST_NEW_ENGINE(RequestUnitForSuccessExplicitPrepare) {
     UNIT_ASSERT(atoi(ru->second.c_str()) > 1);
     UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SUCCESS);
     UNIT_ASSERT(result.GetConsumedRu() > 1);
+}
+
+Y_UNIT_TEST_QUAD(RequestUnitForExecute, UseNewEngine, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseNewEngine && UseSessionActor);
+    auto db = kikimr.GetTableClient();
+    auto session = db.CreateSession().GetValueSync().GetSession();
+
+    auto query = Q1_(R"(
+        SELECT COUNT(*) FROM TwoShard;
+    )");
+
+    auto settings = TExecDataQuerySettings()
+        .KeepInQueryCache(true)
+        .ReportCostInfo(true);
+
+    // Cached/uncached executions
+    for (ui32 i = 0; i < 2; ++i) {
+        auto result = session.ExecuteDataQuery(query, TTxControl::BeginTx().CommitTx(), settings).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        Cerr << "Consumed units: " << result.GetConsumedRu() << Endl;
+        UNIT_ASSERT(result.GetConsumedRu() > 1);
+
+        auto ru = result.GetResponseMetadata().find(NYdb::YDB_CONSUMED_UNITS_HEADER);
+        UNIT_ASSERT(ru != result.GetResponseMetadata().end());
+        UNIT_ASSERT(atoi(ru->second.c_str()) > 1);
+    }
+}
+
+Y_UNIT_TEST_TWIN(StatsProfile, UseSessionActor) {
+    auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
+    auto db = kikimr.GetTableClient();
+    auto session = db.CreateSession().GetValueSync().GetSession();
+
+    TExecDataQuerySettings settings;
+    settings.CollectQueryStats(ECollectQueryStatsMode::Profile);
+
+    auto result = session.ExecuteDataQuery(R"(
+        SELECT COUNT(*) FROM TwoShard;
+    )", TTxControl::BeginTx().CommitTx(), settings).ExtractValueSync();
+    UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+    Cerr << result.GetQueryPlan() << Endl;
+
+    NJson::TJsonValue plan;
+    NJson::ReadJsonTree(result.GetQueryPlan(), &plan, true);
+
+    auto node1 = FindPlanNodeByKv(plan, "Node Type", "Aggregate-TableFullScan");
+    UNIT_ASSERT_EQUAL(node1.GetMap().at("Stats").GetMapSafe().at("ComputeNodes").GetArraySafe().size(), 2);
+
+    auto node2 = FindPlanNodeByKv(plan, "Node Type", "Aggregate");
+    UNIT_ASSERT_EQUAL(node2.GetMap().at("Stats").GetMapSafe().at("ComputeNodes").GetArraySafe().size(), 1);
 }
 
 } // suite

@@ -81,7 +81,7 @@ public:
     class TGroupFitter;
     class TSelfHealActor;
 
-    using TVSlotReadyTimestampQ = std::list<std::pair<TInstant, TVSlotInfo*>>;
+    using TVSlotReadyTimestampQ = std::list<std::pair<TMonotonic, TVSlotInfo*>>;
 
     class TVSlotInfo : public TIndirectReferable<TVSlotInfo> {
     public:
@@ -120,28 +120,33 @@ public:
     private:
         TVSlotReadyTimestampQ& VSlotReadyTimestampQ;
         TVSlotReadyTimestampQ::iterator VSlotReadyTimestampIter;
-        NKikimrBlobStorage::EVDiskStatus Status = NKikimrBlobStorage::EVDiskStatus::INIT_PENDING;
 
         // VDisk will be considered READY during this period after reporting its READY state
         static constexpr TDuration ReadyStablePeriod = TDuration::Seconds(15);
 
     public:
+        NKikimrBlobStorage::EVDiskStatus Status = NKikimrBlobStorage::EVDiskStatus::INIT_PENDING;
         bool IsReady = false;
 
     public:
-        void SetStatus(NKikimrBlobStorage::EVDiskStatus status, TInstant now) {
+        void SetStatus(NKikimrBlobStorage::EVDiskStatus status, TMonotonic now) {
             if (status != Status) {
                 Status = status;
                 IsReady = false;
                 if (status == NKikimrBlobStorage::EVDiskStatus::READY) {
-                    const TInstant readyAfter = now + ReadyStablePeriod; // vdisk will be treated as READY one shortly, but not now
-                    Y_VERIFY(VSlotReadyTimestampIter == TVSlotReadyTimestampQ::iterator());
-                    Y_VERIFY(Group);
-                    VSlotReadyTimestampIter = VSlotReadyTimestampQ.emplace(VSlotReadyTimestampQ.end(), readyAfter, this);
+                    PutInVSlotReadyTimestampQ(now);
                 } else {
                     DropFromVSlotReadyTimestampQ();
                 }
             }
+        }
+
+        void PutInVSlotReadyTimestampQ(TMonotonic now) {
+            const TMonotonic readyAfter = now + ReadyStablePeriod; // vdisk will be treated as READY one shortly, but not now
+            Y_VERIFY(VSlotReadyTimestampIter == TVSlotReadyTimestampQ::iterator());
+            Y_VERIFY(Group);
+            Y_VERIFY_DEBUG(VSlotReadyTimestampQ.empty() || VSlotReadyTimestampQ.back().first <= readyAfter);
+            VSlotReadyTimestampIter = VSlotReadyTimestampQ.emplace(VSlotReadyTimestampQ.end(), readyAfter, this);
         }
 
         void DropFromVSlotReadyTimestampQ() {
@@ -155,8 +160,8 @@ public:
             VSlotReadyTimestampIter = {};
         }
 
-        NKikimrBlobStorage::EVDiskStatus GetStatus() const {
-            return Status;
+        bool IsInVSlotReadyTimestampQ() const {
+            return VSlotReadyTimestampIter != TVSlotReadyTimestampQ::iterator();
         }
 
         ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -494,12 +499,29 @@ public:
         bool PersistedDown = false; // the value stored in the database
         bool SeenOperational = false;
 
+        Table::DecommitStatus::Type DecommitStatus = NKikimrBlobStorage::TGroupDecommitStatus::NONE;
+
+        TMaybe<Table::VirtualGroupName::Type> VirtualGroupName;
+        TMaybe<Table::VirtualGroupState::Type> VirtualGroupState;
+        TMaybe<Table::HiveId::Type> HiveId;
+        TMaybe<Table::BlobDepotConfig::Type> BlobDepotConfig;
+        TMaybe<Table::BlobDepotId::Type> BlobDepotId;
+        TMaybe<Table::ErrorReason::Type> ErrorReason;
+        TMaybe<Table::NeedAlter::Type> NeedAlter;
+        bool CommitInProgress = false;
+
         bool Down = false; // is group are down right now (not selectable)
         TVector<TIndirectReferable<TVSlotInfo>::TPtr> VDisksInGroup;
         TGroupLatencyStats LatencyStats;
         TBoxStoragePoolId StoragePoolId;
         mutable TStorageStatusFlags StatusFlags;
         bool ContentChanged = false;
+        bool MoodChanged = false;
+
+        TActorId VirtualGroupSetupMachineId;
+
+        // nodes waiting for this group to become listable
+        THashSet<TNodeId> WaitingNodes;
 
         // group's geometry; it doesn't ever change since the group is created
         const ui32 NumFailRealms = 0;
@@ -514,6 +536,11 @@ public:
             NKikimrBlobStorage::TGroupStatus::E OperatingStatus = NKikimrBlobStorage::TGroupStatus::UNKNOWN;
             // status derived by adding underlying PDisk status (some of them are assumed to be not working ones)
             NKikimrBlobStorage::TGroupStatus::E ExpectedStatus = NKikimrBlobStorage::TGroupStatus::UNKNOWN;
+
+            void MakeWorst(NKikimrBlobStorage::TGroupStatus::E operating, NKikimrBlobStorage::TGroupStatus::E expected) {
+                OperatingStatus = Max(OperatingStatus, operating);
+                ExpectedStatus = Max(ExpectedStatus, expected);
+            }
         } Status;
 
         // group status depends on the IsReady value for every VDisk; so it has to be updated every time there is possible
@@ -541,7 +568,15 @@ public:
                     Table::EncryptedGroupKey,
                     Table::GroupKeyNonce,
                     Table::MainKeyVersion,
-                    Table::SeenOperational
+                    Table::SeenOperational,
+                    Table::DecommitStatus,
+                    Table::VirtualGroupName,
+                    Table::VirtualGroupState,
+                    Table::HiveId,
+                    Table::BlobDepotConfig,
+                    Table::BlobDepotId,
+                    Table::ErrorReason,
+                    Table::NeedAlter
                 > adapter(
                     &TGroupInfo::Generation,
                     &TGroupInfo::Owner,
@@ -554,7 +589,15 @@ public:
                     &TGroupInfo::EncryptedGroupKey,
                     &TGroupInfo::GroupKeyNonce,
                     &TGroupInfo::MainKeyVersion,
-                    &TGroupInfo::SeenOperational
+                    &TGroupInfo::SeenOperational,
+                    &TGroupInfo::DecommitStatus,
+                    &TGroupInfo::VirtualGroupName,
+                    &TGroupInfo::VirtualGroupState,
+                    &TGroupInfo::HiveId,
+                    &TGroupInfo::BlobDepotConfig,
+                    &TGroupInfo::BlobDepotId,
+                    &TGroupInfo::ErrorReason,
+                    &TGroupInfo::NeedAlter
                 );
             callback(&adapter);
         }
@@ -604,6 +647,13 @@ public:
             Y_VERIFY(VDisksInGroup.size() == Topology->GetTotalVDisksNum());
         }
 
+        bool Listable() const {
+            return VDisksInGroup
+                || !VirtualGroupState
+                || *VirtualGroupState == NKikimrBlobStorage::EVirtualGroupState::WORKING
+                || *VirtualGroupState == NKikimrBlobStorage::EVirtualGroupState::CREATE_FAILED;
+        }
+
         void ClearVDisksInGroup() {
             std::fill(VDisksInGroup.begin(), VDisksInGroup.end(), nullptr);
         }
@@ -633,24 +683,36 @@ public:
             return values;
         }
 
-        TPDiskCategory::EDeviceType GetCommonDeviceType() const {
+        NPDisk::EDeviceType GetCommonDeviceType() const {
             if (VDisksInGroup) {
-                const TPDiskCategory::EDeviceType type = VDisksInGroup.front()->PDisk->Kind.Type();
+                const NPDisk::EDeviceType type = VDisksInGroup.front()->PDisk->Kind.Type();
                 for (const TVSlotInfo *vslot : VDisksInGroup) {
                     if (type != vslot->PDisk->Kind.Type()) {
-                        return TPDiskCategory::DEVICE_TYPE_UNKNOWN;
+                        return NPDisk::DEVICE_TYPE_UNKNOWN;
                     }
                 }
                 return type;
             } else {
-                return TPDiskCategory::DEVICE_TYPE_UNKNOWN;
+                return NPDisk::DEVICE_TYPE_UNKNOWN;
             }
         }
 
         void FillInGroupParameters(NKikimrBlobStorage::TEvControllerSelectGroupsResult::TGroupParameters *params) const {
-            FillInResources(params->MutableAssuredResources(), true);
-            FillInResources(params->MutableCurrentResources(), false);
-            FillInVDiskResources(params);
+            if (!VDisksInGroup) {
+                for (auto *p : {params->MutableAssuredResources(), params->MutableCurrentResources()}) {
+                    p->SetSpace(1'000'000'000'000);
+                    p->SetIOPS(1'000);
+                    p->SetReadThroughput(100'000'000);
+                    p->SetWriteThroughput(100'000'000);
+                }
+                params->SetAllocatedSize(1'000'000'000'000);
+                params->SetAvailableSize(1'000'000'000'000);
+                params->SetSpaceColor(NKikimrBlobStorage::TPDiskSpaceColor::GREEN);
+            } else {
+                FillInResources(params->MutableAssuredResources(), true);
+                FillInResources(params->MutableCurrentResources(), false);
+                FillInVDiskResources(params);
+            }
         }
 
         void FillInResources(NKikimrBlobStorage::TEvControllerSelectGroupsResult::TGroupParameters::TResources *pb, bool countMaxSlots) const {
@@ -761,6 +823,7 @@ public:
         TInstant LastDisconnectTimestamp;
         // in-mem only
         std::map<TString, NPDisk::TDriveData> KnownDrives;
+        THashSet<TGroupId> WaitingForGroups;
 
         template<typename T>
         static void Apply(TBlobStorageController* /*controller*/, T&& callback) {
@@ -1220,7 +1283,7 @@ public:
         TMaybe<Table::Guid::Type> Guid;
         Table::LifeStage::Type LifeStage = NKikimrBlobStorage::TDriveLifeStage::UNKNOWN;
         Table::Kind::Type Kind = 0;
-        Table::PDiskType::Type PDiskType = PDiskTypeToPDiskType(TPDiskCategory::DEVICE_TYPE_UNKNOWN);
+        Table::PDiskType::Type PDiskType = PDiskTypeToPDiskType(NPDisk::DEVICE_TYPE_UNKNOWN);
         TMaybe<Table::PDiskConfig::Type> PDiskConfig;
 
         TDriveSerialInfo() = default;
@@ -1335,6 +1398,7 @@ private:
     TMap<TGroupSpecies, TVector<TGroupId>> IndexGroupSpeciesToGroup;
     TMap<TNodeId, TNodeInfo> Nodes;
     Schema::Group::ID::Type NextGroupID = 0;
+    Schema::Group::ID::Type NextVirtualGroupId = 0;
     Schema::State::NextStoragePoolId::Type NextStoragePoolId = 0;
     ui32 DefaultMaxSlots = 0;
     ui32 PDiskSpaceMarginPromille = 0;
@@ -1528,7 +1592,8 @@ private:
     TDeque<TAutoPtr<IEventHandle>> InitQueue;
     THashMap<Schema::Group::Owner::Type, Schema::Group::ID::Type> OwnerIdIdxToGroup;
 
-    void ReadGroups(TSet<ui32>& groupIDsToRead, bool discard, TEvBlobStorage::TEvControllerNodeServiceSetUpdate *result);
+    void ReadGroups(TSet<ui32>& groupIDsToRead, bool discard, TEvBlobStorage::TEvControllerNodeServiceSetUpdate *result,
+            TNodeId nodeId);
 
     void ReadPDisk(const TPDiskId& pdiskId, const TPDiskInfo& pdisk,
             TEvBlobStorage::TEvControllerNodeServiceSetUpdate *result,
@@ -1546,6 +1611,11 @@ private:
         }
         for (TActorId *ptr : {&SelfHealId, &StatProcessorActorId, &SystemViewsCollectorId}) {
             if (const TActorId actorId = std::exchange(*ptr, {})) {
+                TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
+            }
+        }
+        for (const auto& [id, info] : GroupMap) {
+            if (const auto& actorId = info->VirtualGroupSetupMachineId) {
                 TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
             }
         }
@@ -1793,6 +1863,7 @@ public:
             hFunc(TEvBlobStorage::TEvControllerScrubQueryStartQuantum, Handle);
             hFunc(TEvBlobStorage::TEvControllerScrubQuantumFinished, Handle);
             hFunc(TEvBlobStorage::TEvControllerScrubReportQuantumInProgress, Handle);
+            hFunc(TEvBlobStorage::TEvControllerGroupDecommittedNotify, Handle);
             cFunc(TEvPrivate::EvScrub, ScrubState.HandleTimer);
             cFunc(TEvPrivate::EvVSlotReadyUpdate, VSlotReadyUpdate);
         }
@@ -1836,6 +1907,7 @@ public:
             fFunc(TEvBlobStorage::EvControllerScrubQueryStartQuantum, EnqueueIncomingEvent);
             fFunc(TEvBlobStorage::EvControllerScrubQuantumFinished, EnqueueIncomingEvent);
             fFunc(TEvBlobStorage::EvControllerScrubReportQuantumInProgress, EnqueueIncomingEvent);
+            fFunc(TEvBlobStorage::EvControllerGroupDecommittedNotify, EnqueueIncomingEvent);
             fFunc(TEvPrivate::EvScrub, EnqueueIncomingEvent);
             fFunc(TEvPrivate::EvVSlotReadyUpdate, EnqueueIncomingEvent);
             cFunc(TEvPrivate::EvVSlotNotReadyHistogramUpdate, VSlotNotReadyHistogramUpdate);
@@ -1849,7 +1921,7 @@ public:
         }
 
         if (const TDuration time = TDuration::Seconds(timer.Passed()); time >= TDuration::MilliSeconds(100)) {
-            STLOG(PRI_ERROR, BS_CONTROLLER, BSC07, "StateWork event processing took too much time", (Type, type),
+            STLOG(PRI_ERROR, BS_CONTROLLER, BSC00, "StateWork event processing took too much time", (Type, type),
                 (Duration, time));
         }
     }
@@ -1877,6 +1949,12 @@ public:
         UpdateSystemViews();
         UpdateSelfHealCounters();
         SignalTabletActive(TActivationContext::AsActorContext());
+
+        for (const auto& [id, info] : GroupMap) {
+            if (info->VirtualGroupState) {
+                StartVirtualGroupSetupMachine(info.Get());
+            }
+        }
     }
 
     void UpdatePDisksCounters() {
@@ -1915,6 +1993,17 @@ public:
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // VIRTUAL GROUP MANAGEMENT
+
+    class TVirtualGroupSetupMachine;
+
+    void CommitVirtualGroupUpdates(TConfigState& state);
+
+    void StartVirtualGroupSetupMachine(TGroupInfo *group);
+
+    void Handle(TEvBlobStorage::TEvControllerGroupDecommittedNotify::TPtr ev);
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // VSLOT READINESS EVALUATION
 
     TVSlotReadyTimestampQ VSlotReadyTimestampQ;
@@ -1926,7 +2015,7 @@ public:
         Y_VERIFY(VSlotReadyUpdateScheduled);
         VSlotReadyUpdateScheduled = false;
 
-        const TInstant now = TActivationContext::Now();
+        const TMonotonic now = TActivationContext::Monotonic();
         THashSet<TGroupInfo*> groups;
         for (auto it = VSlotReadyTimestampQ.begin(); it != VSlotReadyTimestampQ.end() && it->first <= now;
                 it = VSlotReadyTimestampQ.erase(it)) {
@@ -2053,4 +2142,3 @@ public:
 
 } //NBsController
 } // NKikimr
-

@@ -25,7 +25,10 @@
 #include <util/stream/file.h>
 #include <util/stream/pipe.h>
 #include <util/generic/size_literals.h>
+#include <util/generic/maybe.h>
 #include <util/string/cast.h>
+#include <util/string/strip.h>
+#include <util/string/builder.h>
 
 namespace NYql::NTaskRunnerProxy {
 
@@ -83,6 +86,7 @@ public:
         Y_VERIFY(pipe(output) == 0);
         Y_VERIFY(pipe(error) == 0);
 
+        PrepareForExec();
         Pid = fork();
         Y_VERIFY(Pid >= 0);
 
@@ -117,11 +121,14 @@ public:
         Stdin = MakeHolder<TPipedOutput>(input[1]);
         Stdout = MakeHolder<TPipedInput>(output[0]);
         Stderr = MakeHolder<TPipedInput>(error[0]);
+        YQL_CLOG(DEBUG, ProviderDq) << "Forked child, pid: " << Pid;
 #endif
     }
 
     virtual void Kill() {
 #ifndef _win_
+        // todo: investigate why ain't killed sometimes
+        YQL_CLOG(DEBUG, ProviderDq) << "Kill child, pid: " << Pid;
         kill(Pid, 9);
 #endif
     }
@@ -131,7 +138,7 @@ public:
         return true;
 #else
         int status;
-        YQL_LOG(DEBUG) << "Check Pid " << Pid;
+        YQL_CLOG(TRACE, ProviderDq) << "Check Pid " << Pid;
         return waitpid(Pid, &status, WNOHANG) <= 0;
 #endif
     }
@@ -173,35 +180,37 @@ protected:
     THolder<TPipedOutput> Stdin;
     THolder<TPipedInput> Stdout;
     THolder<TPipedInput> Stderr;
+    TVector<TString> EnvElems;
+    TVector<char*> ExecArgs;
+    TVector<char*> ExecEnv;
 
     int Pid = -1;
 
-    virtual void Exec() {
-        char ** args;
-        args = new char*[Args.size() + 1];
-        ui32 i;
-        for (i = 0; i < Args.size(); ++i) {
-            args[i] = (char*) Args[i].c_str();
+    virtual void PrepareForExec() {
+        ExecArgs.resize(Args.size() + 1, nullptr);
+        for (size_t i = 0; i < Args.size(); ++i) {
+            ExecArgs[i] = const_cast<char*>(Args[i].c_str());
         }
-        args[i] = nullptr;
 
-        for (i = 3; i < 32768; ++i) {
+        ExecEnv.resize(Env.size() + 1, nullptr);
+        EnvElems.reserve(Env.size());
+        size_t i = 0;
+        for (const auto& [k, v] : Env) {
+            EnvElems.push_back(k + "=" + v);
+            ExecEnv[i++] = const_cast<char*>(EnvElems.back().c_str());
+        }
+    }
+
+    virtual void Exec() {
+        for (int i = 3; i < 32768; ++i) {
             close(i);
         }
-
-        char** env;
-        env = new char*[Env.size() + 1];
-        i = 0;
-        for (const auto& [k, v] : Env) {
-            env[i++] = (char*)(k + "=" + v).c_str();
-        }
-        env[i++] = nullptr;
 
         if (!WorkDir.empty()) {
             NFs::SetCurrentWorkingDirectory(WorkDir);
         }
 
-        if (execve(ExeName.c_str(), (char*const*)args, (char*const*)env) == -1) {
+        if (execve(ExeName.c_str(), ExecArgs.data(), ExecEnv.data()) == -1) {
             ythrow TSystemError() << "Cannot execl";
         }
     }
@@ -256,7 +265,7 @@ struct TProcessHolder {
                 auto it = Processes.begin();
                 while (it != Processes.end()) {
                     if (!it->second->IsAlive()) {
-                        YQL_LOG(DEBUG) << "Remove dead process";
+                        YQL_CLOG(DEBUG, ProviderDq) << "Remove dead process";
                         stopList.emplace_back(std::move(it->second));
                         it = Processes.erase(it);
                     } else {
@@ -282,7 +291,7 @@ struct TProcessHolder {
 
 struct TPortoSettings {
     bool Enable;
-    ui64 MemoryLimit;
+    TMaybe<ui64> MemoryLimit;
     TString Layer;
     TString ContainerNamePrefix;
 
@@ -307,24 +316,24 @@ public:
         , PortoCtl(portoCtl)
         , PortoLayer(portoSettings.Layer)
         , MemoryLimit(portoSettings.MemoryLimit)
-        , ContainerName(WorkDir.substr(WorkDir.rfind("/")+1))
+        , ContainerName(WorkDir.substr(WorkDir.rfind("/") + 1))
         , InternalWorkDir_("mnt/work")
         , InternalExeDir("usr/local/bin")
         , TmpDir("TmpDir" + ContainerName)
     {
         NFs::MakeDirectory(TmpDir);
         auto pos = ExeName.rfind("/");
-        TString name = ExeName.substr(pos+1);
+        TString name = ExeName.substr(pos + 1);
 
         if (portoSettings.ContainerNamePrefix) {
             ContainerName = portoSettings.ContainerNamePrefix + "/" + ContainerName;
         }
 
-        YQL_LOG(DEBUG) << "HardLink " << ExeName << "'" << WorkDir + "/" + name << "'";
+        YQL_CLOG(DEBUG, ProviderDq) << "HardLink " << ExeName << "'" << WorkDir << "/" << name << "'";
         if (NFs::HardLink(ExeName, WorkDir + "/" + name)) {
             ExeName = WorkDir + "/" + name;
         } else {
-            YQL_LOG(DEBUG) << "HardLink Failed " << ExeName << "'" << WorkDir + "/" + name << "'";
+            YQL_CLOG(DEBUG, ProviderDq) << "HardLink Failed " << ExeName << "'" << WorkDir << "/" << name << "'";
         }
     }
 
@@ -339,56 +348,75 @@ public:
     }
 
 private:
+
+    TString GetPortoSetting(const TString& name) const {
+        TShellCommand cmd(PortoCtl, {"get", ContainerName, name});
+        cmd.Run().Wait();
+        return Strip(cmd.GetOutput());
+    }
+
+    void SetPortoSetting(const TString& name, const TString& value) const {
+        TShellCommand cmd(PortoCtl, {"set", ContainerName, name, value});
+        cmd.Run().Wait();
+    }
+
     void Kill() override {
-        try {
-            // see YQL-13760
-            TShellCommand cmd1(PortoCtl, {"get", ContainerName, "anon_limit"});
-            cmd1.Run().Wait();
-            i64 anonLimit = FromString<i64>(cmd1.GetOutput());
-            TShellCommand cmd2(PortoCtl, {"get", ContainerName, "anon_usage"});
-            cmd2.Run().Wait();
-            i64 anonUsage = FromString<i64>(cmd2.GetOutput());
-            if (anonUsage >= anonLimit) {
-                TShellCommand cmd3(PortoCtl, {"set", ContainerName, "anon_limit",
-                        ToString(anonUsage+(1<<20))});
-                cmd3.Run().Wait();
+        if (MemoryLimit) {
+            try {
+                // see YQL-13760
+                i64 anonLimit = -1;
+                i64 anonUsage = -1;
+                if (auto val = GetPortoSetting("anon_limit")) {
+                    if (!TryFromString(val, anonLimit)) {
+                        anonLimit = -1;
+                    }
+                }
+                if (auto val = GetPortoSetting("anon_usage")) {
+                    if (!TryFromString(val, anonUsage)) {
+                        anonUsage = -1;
+                    }
+                }
+                if (anonLimit != -1 && anonUsage != -1 &&  anonUsage >= anonLimit) {
+                    SetPortoSetting("anon_limit", ToString(anonUsage + 1_MB));
+                }
+            } catch (...) {
+                YQL_CLOG(DEBUG, ProviderDq) << "Cannot set anon_limit: " << CurrentExceptionMessage();
             }
-        } catch (...) {
-            YQL_LOG(DEBUG) << "Cannot set anon_limit: " << CurrentExceptionMessage();
         }
+
         try {
             TShellCommand cmd(PortoCtl, {"destroy", ContainerName});
             cmd.Run().Wait();
         } catch (...) {
-            YQL_LOG(DEBUG) << "Cannot destroy: " << CurrentExceptionMessage();
+            YQL_CLOG(DEBUG, ProviderDq) << "Cannot destroy: " << CurrentExceptionMessage();
         }
         TChildProcess::Kill();
     }
 
-    void Exec() override {
+    void PrepareForExec() override {
         auto pos = ExeName.rfind("/");
         TString exeDir = ExeName.substr(0, pos);
-        TString exeName = ExeName.substr(pos+1);
+        TString exeName = ExeName.substr(pos + 1);
 
-        TString command = InternalExeDir +"/"+ exeName + " ";
-        for (ui64 i = 1; i < Args.size(); ++i) {
-            command += Args[i] + " ";
+        TStringBuilder command;
+        command << InternalExeDir << '/' << exeName << ' ';
+        for (size_t i = 1; i < Args.size(); ++i) {
+            command << Args[i] << ' ';
         }
 
         TString caps = "CHOWN;DAC_OVERRIDE;FOWNER;KILL;SETPCAP;IPC_LOCK;SYS_CHROOT;SYS_PTRACE;MKNOD;AUDIT_WRITE;SETFCAP";
-        TString env;
+        TStringBuilder env;
         for (const auto& [k, v] : Env) {
-            env += k + "=" + v + ";";
+            env << k << '=' << v << ';';
         }
-        env += "TMPDIR=/tmp;";
+        env << "TMPDIR=/tmp;";
 
-        TString bind;
-        //bind += WorkDir + " " + InternalWorkDir() + " ro;";
-        bind += WorkDir + " " + InternalWorkDir() + " rw;"; // see YQL-11392
-        bind += exeDir + " " + InternalExeDir + " ro;";
-        bind += TmpDir + " /tmp rw;";
+        TStringBuilder bind;
+        bind << WorkDir << ' ' << InternalWorkDir() << " rw;"; // see YQL-11392
+        bind << exeDir << ' ' << InternalExeDir << " ro;";
+        bind << TmpDir << " /tmp rw;";
 
-        TVector<TString> vargs = {
+        ArgsElems = TVector<TString>{
             "portoctl",
             "exec",
             "-L",
@@ -400,35 +428,36 @@ private:
             "bind=" + bind,
             "root_readonly=true",
             "weak=false",
-            "cpu_policy=idle",
-            "anon_limit=" + ToString(MemoryLimit)
+            "cpu_policy=idle"
         };
-
-        char ** args;
-        args = new char*[vargs.size() + 1];
-        ui32 i;
-        for (i = 0; i < vargs.size(); ++i) {
-            args[i] = (char*) vargs[i].c_str();
+        if (MemoryLimit) {
+            ArgsElems.push_back("anon_limit=" + ToString(*MemoryLimit));
         }
-        args[i] = nullptr;
+        ExecArgs.resize(ArgsElems.size() + 1, nullptr);
+        for (size_t i = 0; i < ArgsElems.size(); ++i) {
+            ExecArgs[i] = const_cast<char*>(ArgsElems[i].c_str());
+        }
+    }
 
-        for (i = 3; i < 32768; ++i) {
+    void Exec() override {
+        for (int i = 3; i < 32768; ++i) {
             close(i);
         }
 
-        if (execvp(PortoCtl.c_str(), (char*const*)args) == -1) {
+        if (execvp(PortoCtl.c_str(), ExecArgs.data()) == -1) {
             ythrow TSystemError() << "Cannot execl";
         }
     }
 
     const TString PortoCtl;
     const TString PortoLayer;
-    const ui64 MemoryLimit;
+    const TMaybe<ui64> MemoryLimit;
     TString ContainerName;
 
     const TString InternalWorkDir_;
     const TString InternalExeDir;
     const TString TmpDir;
+    TVector<TString> ArgsElems;
 };
 
 /*______________________________________________________________________________________________*/
@@ -736,7 +765,7 @@ public:
         return InputIndex;
     }
 
-    const TDqSourceStats* GetStats() const override {
+    const TDqAsyncInputBufferStats* GetStats() const override {
         try {
             NDqProto::TCommandHeader header;
             header.SetVersion(4);
@@ -789,7 +818,7 @@ public:
 private:
     ui64 TaskId;
     ui64 InputIndex;
-    mutable TDqSourceStats Stats;
+    mutable TDqAsyncInputBufferStats Stats;
 
     IPipeTaskRunner* TaskRunner;
     IInputStream& Input;
@@ -1226,9 +1255,9 @@ public:
         while ((size = input.Read(buf, sizeof(buf))) > 0) {
             auto str = TString(buf, size);
             Stderr += str;
-            YQL_LOG(DEBUG) << "stderr (" << StageId << " " << TraceId << " ) > `" << str << "'";
+            YQL_CLOG(DEBUG, ProviderDq) << "stderr (" << StageId << " " << TraceId << " ) > `" << str << "'";
         }
-        YQL_LOG(DEBUG) << "stderr (" << StageId << " " << TraceId << " ) finished";
+        YQL_CLOG(DEBUG, ProviderDq) << "stderr (" << StageId << " " << TraceId << " ) finished";
     }
 
     ui64 GetTaskId() const override {
@@ -1286,7 +1315,7 @@ public:
         return new TOutputChannel(Task.GetId(), channelId, Input, Output);
     }
 
-    IDqSource::TPtr GetSource(ui64 index) override {
+    IDqAsyncInputBuffer::TPtr GetSource(ui64 index) override {
         return new TDqSource(Task.GetId(), index, this);
     }
 
@@ -1421,7 +1450,8 @@ public:
     }
 
     void Prepare(const NDqProto::TDqTask& task, const TDqTaskRunnerMemoryLimits& memoryLimits,
-        const IDqTaskRunnerExecutionContext& execCtx, const TDqTaskRunnerParameterProvider&) override
+        const IDqTaskRunnerExecutionContext& execCtx, const TDqTaskRunnerParameterProvider&,
+        const std::shared_ptr<NKikimr::NMiniKQL::TPatternWithEnv>&) override
     {
         Y_UNUSED(memoryLimits);
         Y_UNUSED(execCtx);
@@ -1463,7 +1493,7 @@ public:
         return channel;
     }
 
-    IDqSource::TPtr GetSource(ui64 inputIndex) override {
+    IDqAsyncInputBuffer::TPtr GetSource(ui64 inputIndex) override {
         auto& source = Sources[inputIndex];
         if (!source) {
             source = new TDqSource(
@@ -1501,6 +1531,14 @@ public:
         return sink;
     }
 
+    std::pair<NUdf::TUnboxedValue, IDqAsyncInputBuffer::TPtr> GetInputTransform(ui64 /*inputIndex*/) override {
+        return {};
+    }
+
+    std::pair<IDqAsyncOutputBuffer::TPtr, IDqOutputConsumer::TPtr> GetOutputTransform(ui64 /*outputIndex*/) override {
+        return {};
+    }
+
     const NKikimr::NMiniKQL::TTypeEnvironment& GetTypeEnv() const override {
         return Delegate->GetTypeEnv();
     }
@@ -1523,6 +1561,10 @@ public:
 
     bool IsAllocatorAttached() override {
         return Delegate->IsAllocatorAttached();
+    }
+
+    IRandomProvider* GetRandomProvider() const override {
+        return nullptr;
     }
 
     void UpdateStats() override {
@@ -1563,7 +1605,7 @@ private:
     mutable TDqTaskRunnerStats Stats;
 
     THashMap<ui64, IDqInputChannel::TPtr> InputChannels;
-    THashMap<ui64, IDqSource::TPtr> Sources;
+    THashMap<ui64, IDqAsyncInputBuffer::TPtr> Sources;
     THashMap<ui64, IDqOutputChannel::TPtr> OutputChannels;
     THashMap<ui64, IDqAsyncOutputBuffer::TPtr> Sinks;
 };
@@ -1608,7 +1650,7 @@ public:
         , EnablePorto(options.EnablePorto)
         , PortoSettings({
                 EnablePorto,
-                TDqSettings::TDefault::PortoMemoryLimit,
+                Nothing(),
                 options.PortoLayer,
                 options.ContainerName
             })
@@ -1736,7 +1778,7 @@ private:
     {
         auto localPath = MakeLocalPath(name.GetPath());
         NFs::MakeDirectoryRecursive(base + "/" + localPath.Parent().GetPath(), NFs::FP_NONSECRET_FILE, false);
-        YQL_LOG(DEBUG) << "HardLink '" << path << "-> '" << (base + "/" + localPath.GetPath()) << "'";
+        YQL_CLOG(DEBUG, ProviderDq) << "HardLink '" << path << "-> '" << (base + "/" + localPath.GetPath()) << "'";
         YQL_ENSURE(NFs::HardLink(path, base + "/" + localPath.GetPath()));
         return localPath.GetPath();
     }
@@ -1757,10 +1799,10 @@ private:
         try {
             conf->Dispatch(settings);
         } catch (...) { /* ignore unknown settings */ }
-        portoSettings.Enable = EnablePorto && conf->EnablePorto.Get().GetOrElse(TDqSettings::TDefault::EnablePorto);
-        portoSettings.MemoryLimit = conf->_PortoMemoryLimit.Get().GetOrElse(TDqSettings::TDefault::PortoMemoryLimit);
+        portoSettings.Enable = EnablePorto && conf->_EnablePorto.Get().GetOrElse(TDqSettings::TDefault::EnablePorto);
+        portoSettings.MemoryLimit = conf->_PortoMemoryLimit.Get();
         if (portoSettings.Enable) {
-            YQL_LOG(DEBUG) << "Porto enabled";
+            YQL_CLOG(DEBUG, ProviderDq) << "Porto enabled";
         }
 
         TString exePath;
@@ -1800,9 +1842,9 @@ private:
         } else {
             command = MakeHolder<TChildProcess>(exePath, args, env, cacheDir + "/Slot-" + ToString(containerId));
         }
-        YQL_LOG(DEBUG) << "Executing " << exePath;
+        YQL_CLOG(DEBUG, ProviderDq) << "Executing " << exePath;
         for (const auto& arg: args) {
-            YQL_LOG(DEBUG) << "Arg: " << arg;
+            YQL_CLOG(DEBUG, ProviderDq) << "Arg: " << arg;
         }
         command->Run();
         return command;

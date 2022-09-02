@@ -17,61 +17,61 @@ namespace NKikimr {
     // ResultingCounterForEvent -- returns dynamic counter *ResMsgs for an event
     ////////////////////////////////////////////////////////////////////////////////////////////
     template <class TEvent>
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &,
                 TEvent &) {
-        static NMonitoring::TDynamicCounters::TCounterPtr dummy;
+        static ::NMonitoring::TDynamicCounters::TCounterPtr dummy;
         return dummy;
     }
 
     template <>
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVPut::TPtr &) {
         return vctx->IFaceMonGroup->PutResMsgsPtr();
     }
 
     template <>
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVMultiPut::TPtr &) {
         return vctx->IFaceMonGroup->MultiPutResMsgsPtr();
     }
 
     template <>
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVGet::TPtr &) {
         return vctx->IFaceMonGroup->GetResMsgsPtr();
     }
 
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVBlock::TPtr &) {
         return vctx->IFaceMonGroup->BlockResMsgsPtr();
     }
 
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVCollectGarbage::TPtr &) {
         return vctx->IFaceMonGroup->GCResMsgsPtr();
     }
 
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVGetBarrier::TPtr &) {
         return vctx->IFaceMonGroup->GetBarrierResMsgsPtr();
     }
 
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVMovedPatch::TPtr &) {
         return vctx->IFaceMonGroup->MovedPatchMsgsPtr();
     }
 
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVPatchFoundParts::TPtr &) {
         return vctx->IFaceMonGroup->PatchFoundPartsMsgsPtr();
     }
 
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVPatchXorDiffResult::TPtr &) {
         return vctx->IFaceMonGroup->PatchXorDiffResMsgsPtr();
     }
 
-    inline const NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
+    inline const ::NMonitoring::TDynamicCounters::TCounterPtr &ResultingCounterForEvent(const TVDiskContextPtr &vctx,
                 TEvBlobStorage::TEvVPatchResult::TPtr &) {
         return vctx->IFaceMonGroup->PatchResMsgsPtr();
     }
@@ -107,11 +107,11 @@ namespace NKikimr {
             cookie = record.GetCookie();
         }
         const auto oosStatus = vctx->GetOutOfSpaceState().GetGlobalStatusFlags();
-        const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+        const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
 
         return std::make_unique<TEvBlobStorage::TEvVMovedPatchResult>(status, originalId, patchedId, vdiskID, cookie,
             oosStatus, now, ev->Get()->GetCachedByteSize(), &record, skeletonFrontIDPtr, counterPtr, nullptr,
-            std::move(ev->TraceId), vdiskIncarnationGuid, errorReason);
+            vdiskIncarnationGuid, errorReason);
     }
 
     static inline std::unique_ptr<TEvBlobStorage::TEvVPatchFoundParts>
@@ -125,10 +125,10 @@ namespace NKikimr {
         if (record.HasCookie()) {
             cookie = record.GetCookie();
         }
-        const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+        const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
 
         return std::make_unique<TEvBlobStorage::TEvVPatchFoundParts>(status, originalId, patchedId, vdiskID, cookie, now,
-            errorReason, &record, skeletonFrontIDPtr, counterPtr, nullptr, std::move(ev->TraceId), vdiskIncarnationGuid);
+            errorReason, &record, skeletonFrontIDPtr, counterPtr, nullptr, vdiskIncarnationGuid);
     }
 
     static inline std::unique_ptr<TEvBlobStorage::TEvVPatchResult>
@@ -143,10 +143,10 @@ namespace NKikimr {
         if (record.HasCookie()) {
             cookie = record.GetCookie();
         }
-        const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+        const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
 
         auto res = std::make_unique<TEvBlobStorage::TEvVPatchResult>(status, originalId, patchedId, vdiskID, cookie,
-            now, &record, skeletonFrontIDPtr, counterPtr, nullptr, std::move(ev->TraceId), vdiskIncarnationGuid);
+            now, &record, skeletonFrontIDPtr, counterPtr, nullptr, vdiskIncarnationGuid);
         res->SetStatus(status, errorReason);
         return res;
     }
@@ -158,9 +158,9 @@ namespace NKikimr {
 
         Y_UNUSED(errorReason, vdiskID, vdiskIncarnationGuid);
         auto &record = ev->Get()->Record;
-        const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+        const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
         return std::make_unique<TEvBlobStorage::TEvVPatchXorDiffResult>(status, now, &record, skeletonFrontIDPtr,
-            counterPtr, nullptr, std::move(ev->TraceId));
+            counterPtr, nullptr);
     }
 
     static inline std::unique_ptr<TEvBlobStorage::TEvVPutResult>
@@ -176,11 +176,11 @@ namespace NKikimr {
         const auto oosStatus = vctx->GetOutOfSpaceState().GetGlobalStatusFlags();
         const auto handleClass = record.GetHandleClass();
         const NVDiskMon::TLtcHistoPtr &histoPtr = vctx->Histograms.GetHistogram(handleClass);
-        const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+        const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
 
         return std::make_unique<TEvBlobStorage::TEvVPutResult>(status, id, vdiskID, cookie, oosStatus, now,
                 ev->Get()->GetCachedByteSize(), &record, skeletonFrontIDPtr, counterPtr, histoPtr,
-                bufferSizeBytes, std::move(ev->TraceId), vdiskIncarnationGuid, errorReason);
+                bufferSizeBytes, vdiskIncarnationGuid, errorReason);
     }
 
     static inline std::unique_ptr<TEvBlobStorage::TEvVBlockResult>
@@ -189,10 +189,10 @@ namespace NKikimr {
             TEvBlobStorage::TEvVBlock::TPtr &ev, const TInstant &now, const TActorIDPtr &skeletonFrontIDPtr,
             const TVDiskID &vdiskID, ui64 vdiskIncarnationGuid)
     {
-        const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+        const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
         return std::make_unique<TEvBlobStorage::TEvVBlockResult>(status, actual, vdiskID, now,
             ev->Get()->GetCachedByteSize(), &ev->Get()->Record, skeletonFrontIDPtr, counterPtr,
-            nullptr, std::move(ev->TraceId), vdiskIncarnationGuid);
+            nullptr, vdiskIncarnationGuid);
     }
 
     static inline std::unique_ptr<TEvBlobStorage::TEvVCollectGarbageResult>
@@ -204,10 +204,10 @@ namespace NKikimr {
         const auto tabletId = record.GetTabletId();
         const auto gen = record.GetRecordGeneration();
         const auto channel = record.GetChannel();
-        const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+        const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
         return std::make_unique<TEvBlobStorage::TEvVCollectGarbageResult>(status, tabletId, gen, channel, vdiskID, now,
                 ev->Get()->GetCachedByteSize(), &record, skeletonFrontIDPtr, counterPtr, nullptr,
-                std::move(ev->TraceId), vdiskIncarnationGuid);
+                vdiskIncarnationGuid);
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -269,10 +269,10 @@ namespace NKikimr {
             const ui64 bufferSizeBytes = ev->Get()->GetBufferBytes();
             const auto handleClass = record.GetHandleClass();
             const NVDiskMon::TLtcHistoPtr &histoPtr = vctx->Histograms.GetHistogram(handleClass);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
             auto result = std::make_unique<TEvBlobStorage::TEvVMultiPutResult>(status, vdiskID, cookie, now,
                 ev->Get()->GetCachedByteSize(), &record, skeletonFrontIDPtr, counterPtr, histoPtr, bufferSizeBytes,
-                std::move(ev->TraceId), vdiskIncarnationGuid, errorReason);
+                vdiskIncarnationGuid, errorReason);
             Y_VERIFY(record.ItemsSize() == statuses.size());
             for (ui64 itemIdx = 0; itemIdx < record.ItemsSize(); ++itemIdx) {
                 auto &item = record.GetItems(itemIdx);
@@ -314,10 +314,10 @@ namespace NKikimr {
                 cookie = record.GetCookie();
             const auto handleClass = record.GetHandleClass();
             const NVDiskMon::TLtcHistoPtr &histoPtr = vctx->Histograms.GetHistogram(handleClass);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
             auto result = std::make_unique<TEvBlobStorage::TEvVGetResult>(status, vdiskID, now,
                 ev->Get()->GetCachedByteSize(), &record, skeletonFrontIDPtr, counterPtr, histoPtr,
-                std::move(ev->TraceId), cookie, ev->GetChannel(), vdiskIncarnationGuid);
+                cookie, ev->GetChannel(), vdiskIncarnationGuid);
             // range query
             if (record.HasRangeQuery()) {
                 const NKikimrBlobStorage::TRangeQuery *q = &record.GetRangeQuery();
@@ -357,10 +357,10 @@ namespace NKikimr {
                         const TIntrusivePtr<TBlobStorageGroupInfo>& groupInfo)
         {
             Y_UNUSED(vdiskIncarnationGuid);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
             auto result = std::make_unique<TEvBlobStorage::TEvVGetBlockResult>(status, ev->Get()->Record.GetTabletId(),
                 vdiskID, now, ev->Get()->GetCachedByteSize(), &ev->Get()->Record, skeletonFrontIDPtr, counterPtr,
-                nullptr, std::move(ev->TraceId));
+                nullptr);
             SetRacingGroupInfo(ev->Get()->Record, result->Record, groupInfo);
             return result;
         }
@@ -384,10 +384,9 @@ namespace NKikimr {
                         const TIntrusivePtr<TBlobStorageGroupInfo>& groupInfo)
         {
             Y_UNUSED(vdiskIncarnationGuid);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
             auto result = std::make_unique<TEvBlobStorage::TEvVGetBarrierResult>(status,vdiskID, now,
-                ev->Get()->GetCachedByteSize(), &ev->Get()->Record, skeletonFrontIDPtr, counterPtr, nullptr,
-                std::move(ev->TraceId));
+                ev->Get()->GetCachedByteSize(), &ev->Get()->Record, skeletonFrontIDPtr, counterPtr, nullptr);
             SetRacingGroupInfo(ev->Get()->Record, result->Record, groupInfo);
             return result;
         }
@@ -399,9 +398,8 @@ namespace NKikimr {
                         const TIntrusivePtr<TBlobStorageGroupInfo>& /*groupInfo*/)
         {
             Y_UNUSED(vdiskIncarnationGuid);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
-            return std::make_unique<TEvBlobStorage::TEvVDbStatResult>(status, vdiskID, now, counterPtr, nullptr,
-                std::move(ev->TraceId));
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            return std::make_unique<TEvBlobStorage::TEvVDbStatResult>(status, vdiskID, now, counterPtr, nullptr);
         }
 
         static inline std::unique_ptr<IEventBase>
@@ -411,10 +409,10 @@ namespace NKikimr {
                         const TIntrusivePtr<TBlobStorageGroupInfo>& /*groupInfo*/)
         {
             Y_UNUSED(vdiskIncarnationGuid);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
             auto flags = vctx->GetOutOfSpaceState().GetLocalStatusFlags();
             return std::make_unique<TEvBlobStorage::TEvVSyncResult>(status, vdiskID, flags, now, counterPtr, nullptr,
-                std::move(ev->TraceId), ev->GetChannel());
+                ev->GetChannel());
         }
 
         static inline std::unique_ptr<IEventBase>
@@ -424,10 +422,10 @@ namespace NKikimr {
                         const TIntrusivePtr<TBlobStorageGroupInfo>& /*groupInfo*/)
         {
             Y_UNUSED(vdiskIncarnationGuid);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
             ui64 cookie = ev->Get()->Record.GetCookie();
             return std::make_unique<TEvBlobStorage::TEvVSyncFullResult>(status, vdiskID, cookie, now, counterPtr, nullptr,
-                std::move(ev->TraceId), ev->GetChannel());
+                ev->GetChannel());
         }
 
         static inline std::unique_ptr<IEventBase>
@@ -437,9 +435,36 @@ namespace NKikimr {
                         const TIntrusivePtr<TBlobStorageGroupInfo>& /*groupInfo*/)
         {
             Y_UNUSED(vdiskIncarnationGuid);
-            const NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
+            const ::NMonitoring::TDynamicCounters::TCounterPtr &counterPtr = ResultingCounterForEvent(vctx, ev);
             return std::make_unique<TEvBlobStorage::TEvVSyncGuidResult>(status, vdiskID, now, counterPtr, nullptr,
-                std::move(ev->TraceId), ev->GetChannel());
+                ev->GetChannel());
+        }
+
+        static inline std::unique_ptr<IEventBase>
+        ErroneousResult(const TVDiskContextPtr& /*vctx*/, const NKikimrProto::EReplyStatus status, const TString& errorReason,
+                        TEvBlobStorage::TEvVAssimilate::TPtr& /*ev*/, const TInstant& /*now*/,
+                        const TActorIDPtr &/*skeletonFrontIDPtr*/, const TVDiskID &vdiskID, ui64 /*vdiskIncarnationGuid*/,
+                        const TIntrusivePtr<TBlobStorageGroupInfo>& /*groupInfo*/)
+        {
+            return std::make_unique<TEvBlobStorage::TEvVAssimilateResult>(status, errorReason, vdiskID);
+        }
+
+        static inline std::unique_ptr<IEventBase>
+        ErroneousResult(const TVDiskContextPtr& /*vctx*/, const NKikimrProto::EReplyStatus status, const TString& errorReason,
+                        TEvBlobStorage::TEvVTakeSnapshot::TPtr& /*ev*/, const TInstant& /*now*/,
+                        const TActorIDPtr &/*skeletonFrontIDPtr*/, const TVDiskID &vdiskID, ui64 /*vdiskIncarnationGuid*/,
+                        const TIntrusivePtr<TBlobStorageGroupInfo>& /*groupInfo*/)
+        {
+            return std::make_unique<TEvBlobStorage::TEvVTakeSnapshotResult>(status, errorReason, vdiskID);
+        }
+
+        static inline std::unique_ptr<IEventBase>
+        ErroneousResult(const TVDiskContextPtr& /*vctx*/, const NKikimrProto::EReplyStatus status, const TString& errorReason,
+                        TEvBlobStorage::TEvVReleaseSnapshot::TPtr& /*ev*/, const TInstant& /*now*/,
+                        const TActorIDPtr &/*skeletonFrontIDPtr*/, const TVDiskID &vdiskID, ui64 /*vdiskIncarnationGuid*/,
+                        const TIntrusivePtr<TBlobStorageGroupInfo>& /*groupInfo*/)
+        {
+            return std::make_unique<TEvBlobStorage::TEvVReleaseSnapshotResult>(status, errorReason, vdiskID);
         }
     } // NErrBuilder
 

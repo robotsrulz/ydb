@@ -73,8 +73,6 @@
                                                 "PlanNodeId": 1,
                                                 "Operators": [
                                                     {
-                                                        "GroupBy": "0",
-                                                        "Aggregation": "Inc(state)",
                                                         "Name": "Aggregate"
                                                     },
                                                     {
@@ -95,11 +93,10 @@
                                 ],
                                 "Operators": [
                                     {
-                                        "Name": "Limit",
-                                        "Limit": "1001"
+                                        "Name": "Aggregate"
                                     }
                                 ],
-                                "Node Type": "Limit"
+                                "Node Type": "Aggregate"
                             }
                         ],
                         "Node Type": "Precompute_0_0",
@@ -137,7 +134,8 @@
                         "PlanNodeType": "ResultSet"
                     }
                 ],
-                "Node Type": "Query"
+                "Node Type": "Query",
+                "PlanNodeType": "Query"
             }
         },
         {
@@ -188,8 +186,6 @@
                                                 "PlanNodeId": 1,
                                                 "Operators": [
                                                     {
-                                                        "GroupBy": "0",
-                                                        "Aggregation": "Inc(state)",
                                                         "Name": "Aggregate"
                                                     },
                                                     {
@@ -210,11 +206,10 @@
                                 ],
                                 "Operators": [
                                     {
-                                        "Name": "Limit",
-                                        "Limit": "1001"
+                                        "Name": "Aggregate"
                                     }
                                 ],
-                                "Node Type": "Limit"
+                                "Node Type": "Aggregate"
                             }
                         ],
                         "Node Type": "Precompute_0_0",
@@ -252,7 +247,8 @@
                         "PlanNodeType": "ResultSet"
                     }
                 ],
-                "Node Type": "Query"
+                "Node Type": "Query",
+                "PlanNodeType": "Query"
             }
         },
         {
@@ -281,22 +277,19 @@
                                 "PlanNodeId": 1,
                                 "Operators": [
                                     {
-                                        "Iterator": "Take",
+                                        "Iterator": "[{column0: 1 * 2 * 3 * 4 * 5}]",
                                         "Name": "Iterator"
-                                    },
-                                    {
-                                        "Name": "Limit",
-                                        "Limit": "1001"
                                     }
                                 ],
-                                "Node Type": "ConstantExpr-Limit"
+                                "Node Type": "ConstantExpr"
                             }
                         ],
                         "Node Type": "ResultSet_0_0",
                         "PlanNodeType": "ResultSet"
                     }
                 ],
-                "Node Type": "Query"
+                "Node Type": "Query",
+                "PlanNodeType": "Query"
             }
         },
         {

@@ -1,5 +1,7 @@
 #include "node_warden_impl.h"
 
+#include <ydb/core/blobstorage/crypto/secured_block.h>
+#include <ydb/core/blobstorage/pdisk/drivedata_serializer.h>
 #include <ydb/library/pdisk_io/file_params.h>
 
 using namespace NKikimr;
@@ -12,7 +14,9 @@ TVector<NPDisk::TDriveData> TNodeWarden::ListLocalDrives() {
         TString raw = TFileInput(MockDevicesPath).ReadAll();
         if (google::protobuf::TextFormat::ParseFromString(raw, &MockDevicesConfig)) {
             for (const auto& device : MockDevicesConfig.GetDevices()) {
-                drives.emplace_back(device);
+                NPDisk::TDriveData data;
+                DriveDataToDriveData(device, data);
+                drives.push_back(data);
             }
         } else {
             STLOG(PRI_WARN, BS_NODE, NW01, "Error parsing mock devices protobuf from file", (Path, MockDevicesPath));
@@ -56,7 +60,13 @@ void TNodeWarden::Bootstrap() {
     WhiteboardId = NNodeWhiteboard::MakeNodeWhiteboardServiceId(LocalNodeId);
 
     Become(&TThis::StateOnline, TDuration::Seconds(10), new TEvPrivate::TEvSendDiskMetrics());
-    Schedule(TDuration::Seconds(10), new TEvPrivate::TEvUpdateNodeDrives());
+
+    const auto& dyn = AppData()->DynamicNameserviceConfig;
+    ui32 maxStaticNodeId = dyn ? dyn->MaxStaticNodeId : Max<ui32>();
+    bool checkNodeDrives = (LocalNodeId <= maxStaticNodeId);
+    if (checkNodeDrives) {
+        Schedule(TDuration::Seconds(10), new TEvPrivate::TEvUpdateNodeDrives());
+    }
 
     NLwTraceMonPage::ProbeRegistry().AddProbesList(LWTRACE_GET_PROBES(BLOBSTORAGE_PROVIDER));
 
@@ -462,6 +472,9 @@ bool ObtainKey(TEncryptionKey *key, const NKikimrProto::TKeyRecord& record) {
 
     key->Version = version;
     key->Id = keyId;
+
+    SecureWipeBuffer((ui8*)data.Detach(), data.size());
+
     return true;
 }
 

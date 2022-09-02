@@ -23,7 +23,7 @@ public:
     void Register(NMonitoring::IMonPage* page) override;
     NMonitoring::TIndexMonPage* RegisterIndexPage(const TString& path, const TString& title) override;
     NMonitoring::IMonPage* RegisterActorPage(TRegisterActorPageFields fields) override;
-    NMonitoring::IMonPage* RegisterCountersPage(const TString& path, const TString& title, TIntrusivePtr<NMonitoring::TDynamicCounters> counters) override;
+    NMonitoring::IMonPage* RegisterCountersPage(const TString& path, const TString& title, TIntrusivePtr<::NMonitoring::TDynamicCounters> counters) override;
     NMonitoring::IMonPage* FindPage(const TString& relPath) override;
 
 protected:
@@ -32,10 +32,18 @@ protected:
     TActorSystem* ActorSystem = {};
     TActorId HttpProxyActorId;
     TActorId HttpMonServiceActorId;
-    std::vector<NMonitoring::IMonPage*> ActorMonPages;
+    TActorId NodeProxyServiceActorId;
+
+    struct TActorMonPageInfo {
+        NMonitoring::TMonPagePtr Page;
+        TString Path;
+    };
+
+    TMutex Mutex;
+    std::vector<TActorMonPageInfo> ActorMonPages;
     std::vector<TActorId> ActorServices;
 
-    void RegisterActorMonPage(NMonitoring::IMonPage* page);
+    void RegisterActorMonPage(const TActorMonPageInfo& pageInfo);
 };
 
 } // NActors

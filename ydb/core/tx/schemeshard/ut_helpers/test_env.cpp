@@ -503,8 +503,15 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
     app.SetEnableNotNullColumns(opts.EnableNotNullColumns_);
     app.SetEnableOlapSchemaOperations(opts.EnableOlapSchemaOperations_);
     app.SetEnableProtoSourceIdInfo(opts.EnableProtoSourceIdInfo_);
+    app.SetEnablePqBilling(opts.EnablePqBilling_);
     app.SetEnableBackgroundCompaction(opts.EnableBackgroundCompaction_);
     app.FeatureFlags.SetEnablePublicApiExternalBlobs(true);
+    app.SetEnableMoveIndex(opts.EnableMoveIndex_);
+
+    if (opts.DisableStatsBatching_.value_or(false)) {
+        app.SchemeShardConfig.SetStatsMaxBatchSize(0);
+        app.SchemeShardConfig.SetStatsBatchTimeoutMs(0);
+    }
 
     for (const auto& sid : opts.SystemBackupSIDs_) {
         app.AddSystemBackupSID(sid);
@@ -525,7 +532,7 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
     }
 
     TActorId sender = runtime.AllocateEdgeActor();
-    //CreateTestBootstrapper(runtime, CreateTestTabletInfo(MakeBSControllerID(TTestTxConfig::DomainUid), TTabletTypes::FLAT_BS_CONTROLLER), &CreateFlatBsController);
+    //CreateTestBootstrapper(runtime, CreateTestTabletInfo(MakeBSControllerID(TTestTxConfig::DomainUid), TTabletTypes::BSController), &CreateFlatBsController);
     BootSchemeShard(runtime, schemeRoot);
     BootTxAllocator(runtime, txAllocator);
     BootFakeCoordinator(runtime, coordinator, CoordinatorState);
@@ -834,11 +841,11 @@ void NSchemeShardUT_Private::TTestEnv::InitRootStoragePools(NActors::TTestActorR
 
 
 void NSchemeShardUT_Private::TTestEnv::BootSchemeShard(NActors::TTestActorRuntime &runtime, ui64 schemeRoot) {
-    CreateTestBootstrapper(runtime, CreateTestTabletInfo(schemeRoot, TTabletTypes::FLAT_SCHEMESHARD), SchemeShardFactory);
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(schemeRoot, TTabletTypes::SchemeShard), SchemeShardFactory);
 }
 
 void NSchemeShardUT_Private::TTestEnv::BootTxAllocator(NActors::TTestActorRuntime &runtime, ui64 tabletId) {
-    CreateTestBootstrapper(runtime, CreateTestTabletInfo(tabletId, TTabletTypes::TX_ALLOCATOR), &CreateTxAllocator);
+    CreateTestBootstrapper(runtime, CreateTestTabletInfo(tabletId, TTabletTypes::TxAllocator), &CreateTxAllocator);
 }
 
 NSchemeShardUT_Private::TTestWithReboots::TTestWithReboots(bool killOnCommit, NSchemeShardUT_Private::TTestEnv::TSchemeShardFactory ssFactory)
@@ -1007,5 +1014,7 @@ NSchemeShardUT_Private::TTestEnvOptions NSchemeShardUT_Private::TTestWithReboots
             .EnablePipeRetries(false)
             .EnableAsyncIndexes(true)
             .EnableNotNullColumns(true)
-            .EnableProtoSourceIdInfo(true);
+            .EnableProtoSourceIdInfo(true)
+            .DisableStatsBatching(true)
+            .EnableMoveIndex(true);
 }

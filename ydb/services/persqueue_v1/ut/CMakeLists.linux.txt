@@ -6,10 +6,10 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(new_schemecache_ut)
 
 add_executable(ydb-services-persqueue_v1-ut)
 target_compile_options(ydb-services-persqueue_v1-ut PRIVATE
-  -DACTORLIB_HUGE_PB_SIZE
   -DUSE_CURRENT_UDF_ABI_VERSION
 )
 target_include_directories(ydb-services-persqueue_v1-ut PRIVATE
@@ -18,12 +18,14 @@ target_include_directories(ydb-services-persqueue_v1-ut PRIVATE
 target_link_libraries(ydb-services-persqueue_v1-ut PUBLIC
   contrib-libs-cxxsupp
   yutil
-  library-cpp-lfalloc
+  cpp-malloc-tcmalloc
+  libs-tcmalloc-no_percpu_cache
   library-cpp-cpuid_check
   cpp-testing-unittest_main
   ydb-services-persqueue_v1
   library-cpp-getopt
   library-cpp-svnversion
+  cpp-digest-md5
   ydb-core-testlib
   ydb-library-aclib
   library-persqueue-topic_parser
@@ -31,6 +33,8 @@ target_link_libraries(ydb-services-persqueue_v1-ut PUBLIC
   ydb_persqueue_core-ut-ut_utils
   cpp-client-ydb_persqueue_public
   cpp-client-ydb_table
+  cpp-client-ydb_topic
+  cpp-client-ydb_proto
 )
 target_link_options(ydb-services-persqueue_v1-ut PRIVATE
   -ldl
@@ -47,6 +51,8 @@ target_sources(ydb-services-persqueue_v1-ut PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/services/persqueue_v1/persqueue_common_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/services/persqueue_v1/persqueue_compat_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/services/persqueue_v1/ut/rate_limiter_test_setup.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/services/persqueue_v1/ut/functions_executor_wrapper.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/services/persqueue_v1/ut/topic_service_ut.cpp
 )
 add_test(
   NAME

@@ -130,24 +130,10 @@ StrictJoinKeyTypes является [scoped](#pragmascope) настройкой.
 | Флаг | false |
 
 Приводит неявное задание рамки окна при наличии ORDER BY в соответствие со стандартом.
-Если AnsiCurrentRow не установлен, то окно `(ORDER BY key)` эквивлентно `(ORDER BY key ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`.
+Если AnsiCurrentRow не установлен, то окно `(ORDER BY key)` эквивалентно `(ORDER BY key ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`.
 Стандарт же требует, чтобы такое окно вело себя как `(ORDER BY key RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`.
 Разница состоит в трактовке `CURRENT ROW`. В режиме `ROWS` `CURRENT ROW` трактуется буквально – текущая строка в партиции.
-А в режиме `RANGE` конец рамки `CURRENT ROW` означает "последния строка в партиции с ключем сортировки равным текущей строке". 
-
-### AnsiOrderByLimitInUnionAll
-
-| Тип значения | По умолчанию |
-| --- | --- |
-| Флаг | false |
-
-Приводит поведение UNION ALL в соответствие со стандартом при наличии `ORDER BY/LIMIT/DISCARD/INSERT INTO` в объединяемых подзапросах. А именно:
-* `ORDER BY/LIMIT/INSERT INTO` допускается только после последнего подзапроса;
-* `DISCARD` допускается только перед первым подзапросом;
-* указанные операторы действуют на результат `UNION ALL` (в отличии от текущего поведения, когда они действуют на подзапрос);
-* чтобы применить оператор к подзапросу, подзапрос необходимо взять в скобки.
-
-Явным образом выбрать старое поведению можно указав прагму `DisableAnsiOrderByLimitInUnionAll`. Если никакой прагмы не задано, то выдается предупреждение и работает старый вариант.
+А в режиме `RANGE` конец рамки `CURRENT ROW` означает "последняя строка в партиции с ключом сортировки, равным текущей строке". 
 
 ### OrderedColumns {#orderedcolumns}
 `OrderedColumns` / `DisableOrderedColumns`

@@ -2,6 +2,7 @@
 #include "defs.h"
 #include "keyvalue_intermediate.h"
 #include "keyvalue_request_stat.h"
+#include "keyvalue_helpers.h"
 #include <ydb/public/lib/base/msgbus.h>
 #include <ydb/core/keyvalue/protos/events.pb.h>
 
@@ -23,6 +24,9 @@ struct TEvKeyValue {
         EvPeriodicRefresh,
         EvReportWriteLatency,
         EvUpdateWeights,
+        EvCompleteGC,
+        EvPartitialCompleteGC,
+        EvContinueGC,
 
         EvRead = EvRequest + 16,
         EvReadRange,
@@ -192,6 +196,24 @@ struct TEvKeyValue {
 
     struct TEvPeriodicRefresh : public TEventLocal<TEvPeriodicRefresh, EvPeriodicRefresh> {
         TEvPeriodicRefresh() { }
+    };
+
+    struct TEvCompleteGC : public TEventLocal<TEvCompleteGC, EvCompleteGC> {
+        TEvCompleteGC() { }
+    };
+
+    struct TEvPartitialCompleteGC : public TEventLocal<TEvPartitialCompleteGC, EvPartitialCompleteGC> {
+        TMaybe<NKeyValue::THelpers::TGenerationStep> CollectedGenerationStep;
+        TVector<TLogoBlobID> CollectedDoNotKeep;
+
+        TEvPartitialCompleteGC() { }
+    };
+
+    struct TEvContinueGC : public TEventLocal<TEvContinueGC, EvContinueGC> {
+        TVector<TLogoBlobID> Buffer;
+        TEvContinueGC(TVector<TLogoBlobID> &&buffer)
+            : Buffer(std::move(buffer))
+        { }
     };
 };
 

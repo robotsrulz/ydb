@@ -204,47 +204,49 @@ protected:
         }
     };
 
-    struct TTxStoreCollect : public NTabletFlatExecutor::ITransaction {
+    using TExecuteMethod = void (TKeyValueState::*)(ISimpleDb &db, const TActorContext &ctx);
+    using TCompleteMethod = void (TKeyValueState::*)(const TActorContext &ctx);
+
+    template <typename TDerived, TExecuteMethod ExecuteMethod, TCompleteMethod CompleteMethod>
+    struct TTxUniversal : NTabletFlatExecutor::ITransaction {
         TKeyValueFlat *Self;
 
-        TTxStoreCollect(TKeyValueFlat *keyValueFlat)
+        TTxUniversal(TKeyValueFlat *keyValueFlat)
             : Self(keyValueFlat)
         {}
 
         bool Execute(NTabletFlatExecutor::TTransactionContext &txc, const TActorContext &ctx) override {
-            LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << txc.Tablet << " TTxStoreCollect Execute");
+            LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << txc.Tablet << ' ' << TDerived::Name << " Execute");
             TSimpleDbFlat db(txc.DB);
-            Self->State.StoreCollectExecute(db, ctx);
+            (Self->State.*ExecuteMethod)(db, ctx);
             return true;
         }
 
         void Complete(const TActorContext &ctx) override {
             LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << Self->TabletID()
-                    << " TTxStoreCollect Complete");
-            Self->State.StoreCollectComplete(ctx);
+                    << ' ' << TDerived::Name << " Complete");
+            (Self->State.*CompleteMethod)(ctx);
         }
     };
 
-    struct TTxEraseCollect : public NTabletFlatExecutor::ITransaction {
-        TKeyValueFlat *Self;
+#ifdef KV_SIMPLE_TX
+#error "KV_SIMPLE_TX already exist"
+#else
+#define KV_SIMPLE_TX(name) \
+    struct TTx ## name : public TTxUniversal<TTx ## name, \
+            &TKeyValueState:: name ## Execute, \
+            &TKeyValueState:: name ## Complete> \
+    { \
+        static constexpr auto Name = "TTx" #name; \
+        using TTxUniversal::TTxUniversal; \
+    }
+#endif
 
-        TTxEraseCollect(TKeyValueFlat *keyValueFlat)
-            : Self(keyValueFlat)
-        {}
-
-        bool Execute(NTabletFlatExecutor::TTransactionContext &txc, const TActorContext &ctx) override {
-            LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << txc.Tablet << " TTxEraseCollect Execute");
-            TSimpleDbFlat db(txc.DB);
-            Self->State.EraseCollectExecute(db, ctx);
-            return true;
-        }
-
-        void Complete(const TActorContext &ctx) override {
-            LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << Self->TabletID()
-                    << " TTxEraseCollect Complete");
-            Self->State.EraseCollectComplete(ctx);
-        }
-    };
+    KV_SIMPLE_TX(StoreCollect);
+    KV_SIMPLE_TX(EraseCollect);
+    KV_SIMPLE_TX(RegisterInitialGCCompletion);
+    KV_SIMPLE_TX(CompleteGC);
+    KV_SIMPLE_TX(PartitialCompleteGC);
 
     TKeyValueState State;
     TDeque<TAutoPtr<IEventHandle>> InitialEventsQueue;
@@ -310,6 +312,19 @@ protected:
         Execute(new TTxEraseCollect(this), ctx);
     }
 
+    void Handle(TEvKeyValue::TEvCompleteGC::TPtr &ev, const TActorContext &ctx) {
+        LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
+                << " Handle TEvCompleteGC " << ev->Get()->ToString());
+        State.OnEvCompleteGC();
+        Execute(new TTxCompleteGC(this), ctx);
+    }
+
+    void  Handle(TEvKeyValue::TEvPartitialCompleteGC::TPtr &ev, const TActorContext &ctx) {
+        LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
+                << " Handle TEvPartitialCompleteGC " << ev->Get()->ToString());
+        Execute(new TTxPartitialCompleteGC(this), ctx);
+    }
+
     void Handle(TEvKeyValue::TEvCollect::TPtr &ev, const TActorContext &ctx) {
         LOG_DEBUG_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
                 << " Handle TEvCollect " << ev->Get()->ToString());
@@ -324,7 +339,7 @@ protected:
             }
             CollectorActorId = ctx.RegisterWithSameMailbox(CreateKeyValueCollector(ctx.SelfID, State.GetCollectOperation(),
                 Info(), Executor()->Generation(), State.GetPerGenerationCounter(), isSpringCleanup));
-            State.OnEvCollectDone(perGenerationCounterStepSize, ctx);
+            State.OnEvCollectDone(perGenerationCounterStepSize, CollectorActorId, ctx);
         } else {
             LOG_ERROR_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
                     << " Handle TEvCollect: PerGenerationCounter overflow prevention restart.");
@@ -373,23 +388,27 @@ protected:
             return;
         }
 
-        if (ev->Cookie == (ui64)TKeyValueState::ECollectCookie::SoftInitial) {
-            NKikimrProto::EReplyStatus status = ev->Get()->Status;
-            if (status == NKikimrProto::OK) {
-                State.RegisterInitialCollectResult(ctx);
-            } else {
-                LOG_ERROR_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
-                    << " received not ok TEvCollectGarbageResult"
-                    << " Status# " << NKikimrProto::EReplyStatus_Name(status)
-                    << " ErrorReason# " << ev->Get()->ErrorReason);
-                Send(SelfId(), new TKikimrEvents::TEvPoisonPill);
-            }
+        if (ev->Cookie != (ui64)TKeyValueState::ECollectCookie::SoftInitial) {
+            LOG_CRIT_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
+                << " received TEvCollectGarbageResult with unexpected Cookie# " << ev->Cookie);
+            Send(SelfId(), new TKikimrEvents::TEvPoisonPill);
             return;
         }
 
-        LOG_CRIT_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
-            << " received TEvCollectGarbageResult with unexpected Cookie# " << ev->Cookie);
-        Send(SelfId(), new TKikimrEvents::TEvPoisonPill);
+        NKikimrProto::EReplyStatus status = ev->Get()->Status;
+        if (status != NKikimrProto::OK) {
+            LOG_ERROR_S(ctx, NKikimrServices::KEYVALUE, "KeyValue# " << TabletID()
+                << " received not ok TEvCollectGarbageResult"
+                << " Status# " << NKikimrProto::EReplyStatus_Name(status)
+                << " ErrorReason# " << ev->Get()->ErrorReason);
+            Send(SelfId(), new TKikimrEvents::TEvPoisonPill);
+            return;
+        }
+
+        bool isLast = State.RegisterInitialCollectResult(ctx);
+        if (isLast) {
+            Execute(new TTxRegisterInitialGCCompletion(this));
+        }
     }
 
     void Handle(TEvKeyValue::TEvRequest::TPtr ev, const TActorContext &ctx) {
@@ -496,6 +515,8 @@ public:
             hFunc(TEvKeyValue::TEvAcquireLock, Handle);
 
             HFunc(TEvKeyValue::TEvEraseCollect, Handle);
+            HFunc(TEvKeyValue::TEvCompleteGC, Handle);
+            HFunc(TEvKeyValue::TEvPartitialCompleteGC, Handle);
             HFunc(TEvKeyValue::TEvCollect, Handle);
             HFunc(TEvKeyValue::TEvStoreCollect, Handle);
             HFunc(TEvKeyValue::TEvRequest, Handle);

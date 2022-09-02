@@ -305,7 +305,7 @@ public:
 
             const auto volumeChannelsResolved = context.SS->ResolveChannelsByPoolKinds(
                 poolKinds,
-                path.DomainId(),
+                path.GetPathIdForDomain(),
                 *volumeChannelsBinding);
 
             if (!volumeChannelsResolved) {
@@ -316,7 +316,7 @@ public:
             context.SS->SetNbsChannelsParams(ecps, *volumeChannelsBinding);
         } else {
             const ui32 volumeProfileId = 0;
-            if (!context.SS->ResolveTabletChannels(volumeProfileId, path.DomainId(), *volumeChannelsBinding)) {
+            if (!context.SS->ResolveTabletChannels(volumeProfileId, path.GetPathIdForDomain(), *volumeChannelsBinding)) {
                 result.SetError(NKikimrScheme::StatusInvalidParameter,
                                 "Unable to construct channel binding for volume with the profile");
                 return false;
@@ -387,7 +387,7 @@ public:
 
         const auto partitionChannelsResolved = context.SS->ResolveChannelsByPoolKinds(
             partitionPoolKinds,
-            path.DomainId(),
+            path.GetPathIdForDomain(),
             *partitionChannelsBinding
         );
         if (!partitionChannelsResolved) {
@@ -613,13 +613,18 @@ public:
 
         auto newVolumeSpace = volume->GetVolumeSpace();
 
-        auto domainDir = context.SS->PathsById.at(path.DomainId());
+        auto domainDir = context.SS->PathsById.at(path.GetPathIdForDomain());
         Y_VERIFY(domainDir);
 
         auto checkedSpaceChange = domainDir->CheckVolumeSpaceChange(newVolumeSpace, oldVolumeSpace, errStr);
         if (!checkedSpaceChange) {
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
             volume->ForgetAlter();
+            return result;
+        }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxAlterBlockStoreVolume, errStr))
+        {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
             return result;
         }
 

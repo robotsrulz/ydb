@@ -36,6 +36,7 @@ public:
         Self->Keeper.Clear();
         Self->Domains.clear();
         Self->BlockedOwners.clear();
+        Self->RegisteredDataCenterNodes.clear();
 
         Self->Domains[Self->RootDomainKey].Path = Self->RootDomainName;
         Self->Domains[Self->RootDomainKey].HiveId = rootHiveId;
@@ -306,6 +307,8 @@ public:
                 if (node.CanBeDeleted()) {
                     db.Table<Schema::Node>().Key(nodeId).Delete();
                     Self->Nodes.erase(nodeId);
+                } else if (node.IsUnknown() && node.LocationAcquired) {
+                    Self->AddRegisteredDataCentersNode(node.Location.GetDataCenterId(), node.Id);
                 }
                 if (!nodeRowset.Next())
                     return false;
@@ -415,13 +418,87 @@ public:
                     }
                 }
 
-                std::unordered_map<TFollowerGroup*, ui32> followersPerGroup;
+                TOwnerIdxType::TValueType owner = tabletRowset.GetValue<Schema::Tablet::Owner>();
+                Self->OwnerToTablet.emplace(owner, tabletId);
+                tablet.Owner = owner;
 
-                auto tabletFollowerGroupRowset = db.Table<Schema::TabletFollowerGroup>().Range(tabletId).Select();
-                if (!tabletFollowerGroupRowset.IsReady())
+                tablet.TabletStorageInfo.Reset(new TTabletStorageInfo(tabletId, tablet.Type));
+                tablet.TabletStorageInfo->Version = tabletRowset.GetValueOrDefault<Schema::Tablet::TabletStorageVersion>();
+                tablet.TabletStorageInfo->TenantPathId = tablet.GetTenant();
+
+                if (!tabletRowset.Next())
                     return false;
-                while (!tabletFollowerGroupRowset.EndOfSet()) {
-                    TFollowerGroup& followerGroup = tablet.AddFollowerGroup();
+            }
+        }
+
+        {
+            auto tabletChannelRowset = db.Table<Schema::TabletChannel>().Select();
+            if (!tabletChannelRowset.IsReady())
+                return false;
+
+            while (!tabletChannelRowset.EndOfSet()) {
+                TTabletId tabletId = tabletChannelRowset.GetValue<Schema::TabletChannel::Tablet>();
+                TLeaderTabletInfo* tablet = Self->FindTabletEvenInDeleting(tabletId);
+                if (tablet) {
+                    ui32 channelId = tabletChannelRowset.GetValue<Schema::TabletChannel::Channel>();
+                    TString storagePool = tabletChannelRowset.GetValue<Schema::TabletChannel::StoragePool>();
+                    Y_VERIFY(tablet->BoundChannels.size() == channelId);
+                    tablet->BoundChannels.emplace_back();
+                    NKikimrStoragePool::TChannelBind& bind = tablet->BoundChannels.back();
+                    if (tabletChannelRowset.HaveValue<Schema::TabletChannel::Binding>()) {
+                        bind = tabletChannelRowset.GetValue<Schema::TabletChannel::Binding>();
+                    }
+                    bind.SetStoragePoolName(storagePool);
+                    Self->InitDefaultChannelBind(bind);
+                    tablet->TabletStorageInfo->Channels.emplace_back(channelId, storagePool);
+
+                    if (tabletChannelRowset.GetValue<Schema::TabletChannel::NeedNewGroup>()) {
+                        tablet->ChannelProfileNewGroup.set(channelId);
+                    }
+                }
+                if (!tabletChannelRowset.Next())
+                    return false;
+            }
+        }
+
+        {
+            auto tabletChannelGenRowset = db.Table<Schema::TabletChannelGen>().Select();
+            if (!tabletChannelGenRowset.IsReady())
+                return false;
+
+            while (!tabletChannelGenRowset.EndOfSet()) {
+                TTabletId tabletId = tabletChannelGenRowset.GetValue<Schema::TabletChannelGen::Tablet>();
+                TLeaderTabletInfo* tablet = Self->FindTabletEvenInDeleting(tabletId);
+                if (tablet) {
+                    ui32 channelId = tabletChannelGenRowset.GetValue<Schema::TabletChannelGen::Channel>();
+                    ui32 generationId = tabletChannelGenRowset.GetValue<Schema::TabletChannelGen::Generation>();
+                    ui32 groupId = tabletChannelGenRowset.GetValue<Schema::TabletChannelGen::Group>();
+                    TInstant timestamp = TInstant::MilliSeconds(tabletChannelGenRowset.GetValueOrDefault<Schema::TabletChannelGen::Timestamp>());
+                    while (tablet->TabletStorageInfo->Channels.size() <= channelId) {
+                        tablet->TabletStorageInfo->Channels.emplace_back();
+                        tablet->TabletStorageInfo->Channels.back().Channel = tablet->TabletStorageInfo->Channels.size() - 1;
+                    }
+                    TTabletChannelInfo& channel = tablet->TabletStorageInfo->Channels[channelId];
+                    channel.History.emplace_back(generationId, groupId, timestamp);
+                }
+                if (!tabletChannelGenRowset.Next())
+                    return false;
+            }
+        }
+
+        for (auto& [tabletId, tabletInfo] : Self->Tablets) {
+            tabletInfo.AcquireAllocationUnits();
+        }
+
+        {
+            auto tabletFollowerGroupRowset = db.Table<Schema::TabletFollowerGroup>().Select();
+            if (!tabletFollowerGroupRowset.IsReady())
+                return false;
+            while (!tabletFollowerGroupRowset.EndOfSet()) {
+                TTabletId tabletId = tabletFollowerGroupRowset.GetValue<Schema::TabletFollowerGroup::TabletID>();
+                TLeaderTabletInfo* tablet = Self->FindTabletEvenInDeleting(tabletId);
+                if (tablet) {
+                    TFollowerGroup& followerGroup = tablet->AddFollowerGroup();
                     followerGroup.Id = tabletFollowerGroupRowset.GetValue<Schema::TabletFollowerGroup::GroupID>();
                     followerGroup.SetFollowerCount(tabletFollowerGroupRowset.GetValue<Schema::TabletFollowerGroup::FollowerCount>());
                     followerGroup.AllowLeaderPromotion = tabletFollowerGroupRowset.GetValueOrDefault<Schema::TabletFollowerGroup::AllowLeaderPromotion>();
@@ -442,20 +519,25 @@ public:
                     followerGroup.LocalNodeOnly = tabletFollowerGroupRowset.GetValueOrDefault<Schema::TabletFollowerGroup::LocalNodeOnly>();
                     followerGroup.FollowerCountPerDataCenter = tabletFollowerGroupRowset.GetValueOrDefault<Schema::TabletFollowerGroup::FollowerCountPerDataCenter>();
                     followerGroup.RequireDifferentNodes = tabletFollowerGroupRowset.GetValueOrDefault<Schema::TabletFollowerGroup::RequireDifferentNodes>();
-                    followersPerGroup.emplace(&followerGroup, 0);
-                    if (!tabletFollowerGroupRowset.Next())
-                        return false;
                 }
-
-                auto tabletFollowerRowset = db.Table<Schema::TabletFollowerTablet>().Range(tabletId).Select();
-                if (!tabletFollowerRowset.IsReady())
+                if (!tabletFollowerGroupRowset.Next())
                     return false;
-                while (!tabletFollowerRowset.EndOfSet()) {
+            }
+        }
+
+        {
+            auto tabletFollowerRowset = db.Table<Schema::TabletFollowerTablet>().Select();
+            if (!tabletFollowerRowset.IsReady())
+                return false;
+            while (!tabletFollowerRowset.EndOfSet()) {
+                TTabletId tabletId = tabletFollowerRowset.GetValue<Schema::TabletFollowerTablet::TabletID>();
+                TLeaderTabletInfo* tablet = Self->FindTabletEvenInDeleting(tabletId);
+                if (tablet) {
                     TFollowerGroupId followerGroupId = tabletFollowerRowset.GetValue<Schema::TabletFollowerTablet::GroupID>();
                     TFollowerId followerId = tabletFollowerRowset.GetValue<Schema::TabletFollowerTablet::FollowerID>();
                     TNodeId nodeId = tabletFollowerRowset.GetValue<Schema::TabletFollowerTablet::FollowerNode>();
-                    TFollowerGroup& followerGroup = tablet.GetFollowerGroup(followerGroupId);
-                    TFollowerTabletInfo& follower = tablet.AddFollower(followerGroup, followerId);
+                    TFollowerGroup& followerGroup = tablet->GetFollowerGroup(followerGroupId);
+                    TFollowerTabletInfo& follower = tablet->AddFollower(followerGroup, followerId);
                     follower.Statistics = tabletFollowerRowset.GetValueOrDefault<Schema::TabletFollowerTablet::Statistics>();
                     follower.InitTabletMetrics();
                     if (nodeId == 0) {
@@ -468,17 +550,22 @@ public:
                             follower.BecomeStopped();
                         }
                     }
-                    followersPerGroup[&followerGroup]++;
-                    if (!tabletFollowerRowset.Next())
-                        return false;
                 }
-
-                auto metricsRowset = db.Table<Schema::Metrics>().Range(tabletId).Select();
-                if (!metricsRowset.IsReady())
+                if (!tabletFollowerRowset.Next())
                     return false;
-                while (!metricsRowset.EndOfSet()) {
+            }
+        }
+
+        {
+            auto metricsRowset = db.Table<Schema::Metrics>().Select();
+            if (!metricsRowset.IsReady())
+                return false;
+            while (!metricsRowset.EndOfSet()) {
+                TTabletId tabletId = metricsRowset.GetValue<Schema::Metrics::TabletID>();
+                TLeaderTabletInfo* tablet = Self->FindTabletEvenInDeleting(tabletId);
+                if (tablet) {
                     TFollowerId followerId = metricsRowset.GetValue<Schema::Metrics::FollowerID>();
-                    auto* leaderOrFollower = tablet.FindTablet(followerId);
+                    auto* leaderOrFollower = tablet->FindTablet(followerId);
                     if (leaderOrFollower) {
                         leaderOrFollower->MutableResourceMetricsAggregates().MaximumCPU.InitiaizeFrom(metricsRowset.GetValueOrDefault<Schema::Metrics::MaximumCPU>());
                         leaderOrFollower->MutableResourceMetricsAggregates().MaximumMemory.InitiaizeFrom(metricsRowset.GetValueOrDefault<Schema::Metrics::MaximumMemory>());
@@ -486,77 +573,8 @@ public:
                         // do not reorder
                         leaderOrFollower->UpdateResourceUsage(metricsRowset.GetValueOrDefault<Schema::Metrics::ProtoMetrics>());
                     }
-                    if (!metricsRowset.Next())
-                        return false;
                 }
-
-                for (auto& pr : followersPerGroup) {
-                    TFollowerGroup& followerGroup(*pr.first);
-                    while (followerGroup.GetComputedFollowerCount(Self->GetDataCenters()) > pr.second) {
-                        TFollowerTabletInfo& follower = tablet.AddFollower(followerGroup);
-                        follower.InitTabletMetrics();
-                        follower.BecomeStopped();
-                        db.Table<Schema::TabletFollowerTablet>().Key(tabletId, follower.Id).Update(NIceDb::TUpdate<Schema::TabletFollowerTablet::FollowerNode>(0),
-                                                                                             NIceDb::TUpdate<Schema::TabletFollowerTablet::GroupID>(followerGroup.Id));
-                        ++pr.second;
-                    }
-                }
-
-                TOwnerIdxType::TValueType owner = tabletRowset.GetValue<Schema::Tablet::Owner>();
-                Self->OwnerToTablet.emplace(owner, tabletId);
-                tablet.Owner = owner;
-
-                {
-                    tablet.TabletStorageInfo.Reset(new TTabletStorageInfo(tabletId, tablet.Type));
-                    tablet.TabletStorageInfo->Version = tabletRowset.GetValueOrDefault<Schema::Tablet::TabletStorageVersion>();
-                    tablet.TabletStorageInfo->TenantPathId = tablet.GetTenant();
-
-                    auto tabletChannelRowset = db.Table<Schema::TabletChannel>().Range(tabletId).Select();
-                    if (!tabletChannelRowset.IsReady())
-                        return false;
-
-                    while (!tabletChannelRowset.EndOfSet()) {
-                        ui32 channelId = tabletChannelRowset.GetValue<Schema::TabletChannel::Channel>();
-                        TString storagePool = tabletChannelRowset.GetValue<Schema::TabletChannel::StoragePool>();
-                        Y_VERIFY(tablet.BoundChannels.size() == channelId);
-                        tablet.BoundChannels.emplace_back();
-                        NKikimrStoragePool::TChannelBind& bind = tablet.BoundChannels.back();
-                        if (tabletChannelRowset.HaveValue<Schema::TabletChannel::Binding>()) {
-                            bind = tabletChannelRowset.GetValue<Schema::TabletChannel::Binding>();
-                        }
-                        bind.SetStoragePoolName(storagePool);
-                        Self->InitDefaultChannelBind(bind);
-                        tablet.TabletStorageInfo->Channels.emplace_back(channelId, storagePool);
-
-                        TTabletChannelInfo& channel = tablet.TabletStorageInfo->Channels[channelId];
-
-                        if (tabletChannelRowset.GetValue<Schema::TabletChannel::NeedNewGroup>()) {
-                            tablet.ChannelProfileNewGroup.set(channelId);
-                        }
-
-                        auto tabletChannelGenRowset = db.Table<Schema::TabletChannelGen>().Range(tabletId, channelId).Select();
-                        if (!tabletChannelGenRowset.IsReady())
-                            return false;
-
-                        while (!tabletChannelGenRowset.EndOfSet()) {
-                            ui32 generationId = tabletChannelGenRowset.GetValue<Schema::TabletChannelGen::Generation>();
-                            ui32 groupId = tabletChannelGenRowset.GetValue<Schema::TabletChannelGen::Group>();
-                            TInstant timestamp = TInstant::MilliSeconds(tabletChannelGenRowset.GetValueOrDefault<Schema::TabletChannelGen::Timestamp>());
-                            channel.History.emplace_back(generationId, groupId, timestamp);
-                            if (!tabletChannelGenRowset.Next())
-                                return false;
-                        }
-                        Y_VERIFY(tablet.IsReadyToAssignGroups() || !channel.History.empty(), "TabletID=%" PRIu64, tabletId);
-
-                        if (!tabletChannelRowset.Next())
-                            return false;
-                    }
-                    Y_VERIFY(tablet.IsReadyToAssignGroups() || tablet.TabletStorageInfo->Channels.size() >= 2, "TabletID=%" PRIu64, tabletId);
-                }
-
-                tablet.AcquireAllocationUnits();
-
-                if (!tabletRowset.Next())
+                if (!metricsRowset.Next())
                     return false;
             }
         }
@@ -637,6 +655,8 @@ public:
 
         Self->Become(&TSelf::StateWork);
         Self->SetCounterTabletsTotal(tabletsTotal);
+        Self->TabletCounters->Simple()[NHive::COUNTER_SEQUENCE_FREE].Set(Self->Sequencer.FreeSize());
+        Self->TabletCounters->Simple()[NHive::COUNTER_SEQUENCE_ALLOCATED].Set(Self->Sequencer.AllocatedSequencesSize());
         Self->MigrationState = NKikimrHive::EMigrationState::MIGRATION_READY;
         ctx.Send(Self->SelfId(), new TEvPrivate::TEvBootTablets());
 

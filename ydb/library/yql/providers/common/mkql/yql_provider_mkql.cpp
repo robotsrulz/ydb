@@ -2063,7 +2063,7 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
         return ctx.ProgramBuilder.NewNull();
     });
 
-    AddCallable({"AsTagged","Untag"}, [](const TExprNode& node, TMkqlBuildContext& ctx) {
+    AddCallable({"AsTagged","Untag","WithWorld"}, [](const TExprNode& node, TMkqlBuildContext& ctx) {
         return MkqlBuildExpr(node.Head(), ctx);
     });
 
@@ -2153,7 +2153,7 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
         const auto funcType = BuildType(*typeNode, *typeNode->GetTypeAnn(), ctx.ProgramBuilder);
         const auto script = MkqlBuildExpr(*node.Child(3), ctx);
         const auto pos = ctx.ExprCtx.GetPosition(node.Pos());
-        return ctx.ProgramBuilder.ScriptUdf(scriptType, funcName, funcType, script,
+        return ctx.ProgramBuilder.ScriptUdf(node.Head().Content(), funcName, funcType, script,
             pos.File, pos.Row, pos.Column);
     });
 
@@ -2240,7 +2240,12 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
 
     AddCallable("PgConst", [](const TExprNode& node, TMkqlBuildContext& ctx) {
         auto type = AS_TYPE(TPgType, BuildType(node, *node.GetTypeAnn(), ctx.ProgramBuilder));
-        return ctx.ProgramBuilder.PgConst(type, node.Head().Content());
+        TRuntimeNode typeMod;
+        if (node.ChildrenSize() >= 3) {
+            typeMod = MkqlBuildExpr(*node.Child(2), ctx);
+        }
+
+        return ctx.ProgramBuilder.PgConst(type, node.Head().Content(), typeMod);
     });
 
     AddCallable("PgInternal0", [](const TExprNode& node, TMkqlBuildContext& ctx) {
@@ -2252,8 +2257,8 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
         auto name = node.Head().Content();
         auto id = FromString<ui32>(node.Child(1)->Content());
         std::vector<TRuntimeNode> args;
-        args.reserve(node.ChildrenSize() - 2);
-        for (ui32 i = 2; i < node.ChildrenSize(); ++i) {
+        args.reserve(node.ChildrenSize() - 3);
+        for (ui32 i = 3; i < node.ChildrenSize(); ++i) {
             args.push_back(MkqlBuildExpr(*node.Child(i), ctx));
         }
 
@@ -2278,7 +2283,12 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
     AddCallable("PgCast", [](const TExprNode& node, TMkqlBuildContext& ctx) {
         auto input = MkqlBuildExpr(*node.Child(0), ctx);
         auto returnType = BuildType(node, *node.GetTypeAnn(), ctx.ProgramBuilder);
-        return ctx.ProgramBuilder.PgCast(input, returnType);
+        TRuntimeNode typeMod;
+        if (node.ChildrenSize() >= 3) {
+            typeMod = MkqlBuildExpr(*node.Child(2), ctx);
+        }
+
+        return ctx.ProgramBuilder.PgCast(input, returnType, typeMod);
     });
 
     AddCallable("FromPg", [](const TExprNode& node, TMkqlBuildContext& ctx) {
@@ -2296,6 +2306,17 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
     AddCallable("WithContext", [](const TExprNode& node, TMkqlBuildContext& ctx) {
         auto input = MkqlBuildExpr(*node.Child(0), ctx);
         return ctx.ProgramBuilder.WithContext(input, node.Child(1)->Content());
+    });
+
+    AddCallable("PgArray", [](const TExprNode& node, TMkqlBuildContext& ctx) {
+        std::vector<TRuntimeNode> args;
+        args.reserve(node.ChildrenSize());
+        for (ui32 i = 0; i < node.ChildrenSize(); ++i) {
+            args.push_back(MkqlBuildExpr(*node.Child(i), ctx));
+        }
+
+        auto returnType = BuildType(node, *node.GetTypeAnn(), ctx.ProgramBuilder);
+        return ctx.ProgramBuilder.PgArray(args, returnType);
     });
 
     AddCallable("QueueCreate", [](const TExprNode& node, TMkqlBuildContext& ctx) {

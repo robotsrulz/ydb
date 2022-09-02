@@ -8,6 +8,9 @@
 
 
 add_library(clickhouse_client_udf INTERFACE)
+target_compile_options(clickhouse_client_udf INTERFACE
+  -DOS_LINUX
+)
 target_include_directories(clickhouse_client_udf INTERFACE
   ${CMAKE_SOURCE_DIR}/contrib/restricted/dragonbox
 )
@@ -18,7 +21,7 @@ target_link_libraries(clickhouse_client_udf INTERFACE
   public-udf-support
   contrib-libs-cctz
   contrib-restricted-boost
-  boost-libs-program_options
+  restricted-boost-program_options
   contrib-restricted-cityhash-1.0.2
   contrib-restricted-fast_float
   contrib-libs-pdqsort
@@ -32,15 +35,19 @@ target_link_libraries(clickhouse_client_udf INTERFACE
   libs-apache-arrow
   libs-apache-orc
   libs-apache-avro
+  yql-minikql-dom
   library-yql-utils
 )
 
 add_global_library_for(clickhouse_client_udf.global clickhouse_client_udf)
+target_compile_options(clickhouse_client_udf.global PUBLIC
+  -DOS_LINUX
+)
 target_compile_options(clickhouse_client_udf.global PRIVATE
   -DARCADIA_BUILD
-  -DOS_LINUX
   -DUSE_ARROW=0
   -DUSE_PARQUET=1
+  -DUSE_SNAPPY=1
   -DUSE_ORC=0
   -DUSE_AVRO=0
   -DUSE_UNWIND=0
@@ -49,14 +56,13 @@ target_compile_options(clickhouse_client_udf.global PRIVATE
   -DDBMS_VERSION_PATCH=0
   -Wno-unused-parameter
   -DUDF_ABI_VERSION_MAJOR=2
-  -DUDF_ABI_VERSION_MINOR=23
+  -DUDF_ABI_VERSION_MINOR=25
   -DUDF_ABI_VERSION_PATCH=0
 )
 target_include_directories(clickhouse_client_udf.global PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/restricted/dragonbox
 )
 target_include_directories(clickhouse_client_udf.global PRIVATE
-  ${CMAKE_SOURCE_DIR}/contrib/restricted/dragonbox
   ${CMAKE_SOURCE_DIR}/contrib/restricted/fast_float/include
   ${CMAKE_SOURCE_DIR}/contrib/libs/pdqsort
   ${CMAKE_SOURCE_DIR}/contrib/libs/lz4
@@ -74,7 +80,7 @@ target_link_libraries(clickhouse_client_udf.global PUBLIC
   public-udf-support
   contrib-libs-cctz
   contrib-restricted-boost
-  boost-libs-program_options
+  restricted-boost-program_options
   contrib-restricted-cityhash-1.0.2
   contrib-restricted-fast_float
   contrib-libs-pdqsort
@@ -88,6 +94,7 @@ target_link_libraries(clickhouse_client_udf.global PUBLIC
   libs-apache-arrow
   libs-apache-orc
   libs-apache-avro
+  yql-minikql-dom
   library-yql-utils
 )
 target_sources(clickhouse_client_udf.global PRIVATE
@@ -105,7 +112,6 @@ target_sources(clickhouse_client_udf.global PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/base/common/sleep.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/base/common/StringRef.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/base/common/getResource.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/base/common/phdr_cache.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/base/common/preciseExp10.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/AlignedBuffer.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/Allocator.cpp
@@ -114,7 +120,6 @@ target_sources(clickhouse_client_udf.global PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/CurrentMetrics.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/Epoll.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/escapeForFileName.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/filesystemHelpers.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/formatIPv6.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/formatReadable.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Common/getMultipleKeysFromConfig.cpp
@@ -222,6 +227,7 @@ target_sources(clickhouse_client_udf.global PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/IO/WriteBufferFromFileDescriptor.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/IO/WriteBufferFromFileDescriptorDiscardOnFailure.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/IO/WriteBufferFromPocoSocket.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/IO/WriteBufferValidUTF8.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Compression/CompressionCodecLZ4.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Compression/CompressionCodecMultiple.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Compression/CompressionCodecNone.cpp
@@ -435,10 +441,16 @@ target_sources(clickhouse_client_udf.global PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/AvroRowInputFormat.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/CHColumnToArrowColumn.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/CSVRowInputFormat.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/CSVRowOutputFormat.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/JSONAsStringRowInputFormat.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/JSONEachRowRowInputFormat.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/JSONEachRowRowOutputFormat.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/ORCBlockInputFormat.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/ParquetBlockInputFormat.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/ParquetBlockOutputFormat.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/RawBLOBRowInputFormat.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/TabSeparatedRowInputFormat.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/TabSeparatedRowOutputFormat.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/TSKVRowInputFormat.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/library/yql/udfs/common/clickhouse/client/src/Processors/Formats/Impl/TSKVRowOutputFormat.cpp
 )

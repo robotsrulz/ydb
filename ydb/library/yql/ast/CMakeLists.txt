@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(serialize)
+add_subdirectory(ut)
 
 add_library(library-yql-ast)
 target_link_libraries(library-yql-ast PUBLIC
@@ -18,6 +20,7 @@ target_link_libraries(library-yql-ast PUBLIC
   library-cpp-enumbitset
   cpp-string_utils-levenshtein_diff
   library-cpp-yson
+  cpp-yson-node
   yql-public-udf
   library-yql-utils
   yql-core-issue

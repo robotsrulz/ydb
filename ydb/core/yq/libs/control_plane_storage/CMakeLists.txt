@@ -6,6 +6,9 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(events)
+add_subdirectory(internal)
+add_subdirectory(proto)
 
 add_library(yq-libs-control_plane_storage)
 target_compile_options(yq-libs-control_plane_storage PRIVATE
@@ -27,12 +30,14 @@ target_link_libraries(yq-libs-control_plane_storage PUBLIC
   libs-control_plane_storage-proto
   yq-libs-db_schema
   libs-graph_params-proto
+  libs-quota_manager-events
   yq-libs-shared_resources
   yq-libs-ydb
   ydb-library-security
   api-protos
   cpp-client-ydb_scheme
   cpp-client-ydb_table
+  providers-s3-path_generator
   yql-public-issue
 )
 target_sources(yq-libs-control_plane_storage PRIVATE
@@ -48,4 +53,5 @@ target_sources(yq-libs-control_plane_storage PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/control_plane_storage/ydb_control_plane_storage_bindings.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/control_plane_storage/ydb_control_plane_storage_connections.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/control_plane_storage/ydb_control_plane_storage_queries.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/yq/libs/control_plane_storage/ydb_control_plane_storage_quotas.cpp
 )

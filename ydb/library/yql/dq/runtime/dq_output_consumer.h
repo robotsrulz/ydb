@@ -19,6 +19,7 @@ public:
 
     virtual bool IsFull() const = 0;
     virtual void Consume(NKikimr::NUdf::TUnboxedValue&& value) = 0;
+    virtual void Consume(NDqProto::TCheckpoint&& checkpoint) = 0;
     virtual void Finish() = 0;
 };
 
@@ -28,8 +29,7 @@ IDqOutputConsumer::TPtr CreateOutputMapConsumer(IDqOutput::TPtr output);
 
 IDqOutputConsumer::TPtr CreateOutputHashPartitionConsumer(
     TVector<IDqOutput::TPtr>&& outputs,
-    TVector<NUdf::TDataTypeId>&& keyColumnTypes, TVector<ui32>&& keyColumnIndices,
-    const NKikimr::NMiniKQL::TTypeEnvironment& typeEnv);
+    TVector<NKikimr::NMiniKQL::TType*>&& keyColumnTypes, TVector<ui32>&& keyColumnIndices);
 
 IDqOutputConsumer::TPtr CreateOutputBroadcastConsumer(TVector<IDqOutput::TPtr>&& outputs);
 

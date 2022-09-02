@@ -14,7 +14,7 @@ namespace {
         { EOutputFormat::JsonUnicode, "Input in json format, binary strings are decoded with unicode characters" },
         { EOutputFormat::JsonBase64, "Input in json format, binary strings are decoded with base64" },
         { EOutputFormat::Csv, "Input in csv format" },
-        { EOutputFormat::Tsv, "Input in tsv format" }
+        { EOutputFormat::Tsv, "Input in tsv format" },
     };
 
     THashMap<EOutputFormat, TString> FormatDescriptions = {
@@ -30,8 +30,20 @@ namespace {
         { EOutputFormat::JsonBase64Array, "Output in json format, binary strings are encoded with base64. "
                                            "Every resultset is a json array of rows. "
                                            "Every row is a separate json on a separate line." },
+        { EOutputFormat::JsonRawArray, "Output in json format, binary strings are not encoded."
+                                        "Every resultset is a json array of rows. "
+                                        "Every row is a separate binary data on a separate line"},
         { EOutputFormat::ProtoJsonBase64, "Output result protobuf in json format, binary strings are encoded with base64" },
         { EOutputFormat::Csv, "Output in csv format" },
+    };
+
+    THashMap<EMessagingFormat, TString> MessagingFormatDescriptions = {
+        { EMessagingFormat::Pretty, "Human readable output with metadata." },
+        { EMessagingFormat::SingleMessage, "Single message."}, // TODO(shmel1k@): improve
+        { EMessagingFormat::NewlineDelimited, "Newline delimited stream of messages."}, // TODO(shmel1k@): improve
+        { EMessagingFormat::Concatenated, "Concatenated output stream of messages."}, // TODO(shmel1k@): improve,
+        { EMessagingFormat::JsonStreamConcat, "Concatenated Json stream of envelopes with metadata and messages in the ""body"" attribute." }, // TODO(shmel1k@): improve,
+        { EMessagingFormat::JsonArray, "Json array of envelopes with metadata and messages in the ""body"" attribute." }, // TODO(shmel1k@): improve,
     };
 }
 
@@ -97,10 +109,27 @@ void TCommandWithFormat::AddFormats(TClientCommand::TConfig& config, const TVect
     AllowedFormats = allowedFormats;
 }
 
+void TCommandWithFormat::AddMessagingFormats(TClientCommand::TConfig& config, const TVector<EMessagingFormat>& allowedFormats) {
+    TStringStream description;
+    description << "Client-side format. Available options: ";
+    NColorizer::TColors colors = NColorizer::AutoColors(Cout);
+    for (const auto& format : allowedFormats) {
+        auto findResult = MessagingFormatDescriptions.find(format);
+        Y_VERIFY(findResult != MessagingFormatDescriptions.end(),
+            "Couldn't find description for %s output format", (TStringBuilder() << format).c_str());
+        description << "\n  " << colors.BoldColor() << format << colors.OldColor()
+            << "\n    " << findResult->second;
+    }
+    config.Opts->AddLongOption("format", description.Str())
+        .DefaultValue( "single-message" )
+        .RequiredArgument("STRING").StoreResult(&MessagingFormat);
+    AllowedMessagingFormats = allowedFormats;
+}
+
 void TCommandWithFormat::ParseFormats() {
     if (InputFormat != EOutputFormat::Default
             && std::find(AllowedInputFormats.begin(), AllowedInputFormats.end(), InputFormat) == AllowedInputFormats.end()) {
-        throw TMissUseException() << "Input format " << InputFormat << " is not available for this command";
+        throw TMisuseException() << "Input format " << InputFormat << " is not available for this command";
     }
 
 
@@ -108,9 +137,17 @@ void TCommandWithFormat::ParseFormats() {
         return;
     }
     if (std::find(AllowedFormats.begin(), AllowedFormats.end(), OutputFormat) == AllowedFormats.end()) {
-        throw TMissUseException() << "Output format " << OutputFormat << " is not available for this command";
+        throw TMisuseException() << "Output format " << OutputFormat << " is not available for this command";
     }
 }
+
+void TCommandWithFormat::ParseMessagingFormats() {
+    if (MessagingFormat != EMessagingFormat::SingleMessage
+            && std::find(AllowedMessagingFormats.begin(), AllowedMessagingFormats.end(), MessagingFormat) == AllowedMessagingFormats.end()) {
+        throw TMisuseException() << "Messaging format " << MessagingFormat << " is not available for this command";
+    }
+}
+
 
 void TQueryPlanPrinter::Print(const TString& plan) {
     switch (Format) {
@@ -142,7 +179,7 @@ void TQueryPlanPrinter::Print(const TString& plan) {
             PrintJson(plan);
             break;
         default:
-            throw TMissUseException() << "This command doesn't support " << Format << " output format";
+            throw TMisuseException() << "This command doesn't support " << Format << " output format";
     }
 }
 
@@ -302,7 +339,7 @@ void TResultSetPrinter::Print(const TResultSet& resultSet) {
         PrintCsv(resultSet);
         break;
     default:
-        throw TMissUseException() << "This command doesn't support " << Format << " output format";
+        throw TMisuseException() << "This command doesn't support " << Format << " output format";
     }
 }
 

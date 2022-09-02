@@ -552,11 +552,22 @@ namespace NTypeAnnImpl {
         }
 
         auto type = input->Head().GetTypeAnn()->Cast<TTypeExprType>()->GetType();
-        if (!EnsureDataType(input->Head().Pos(), *type, ctx.Expr)) {
+        if (input->IsCallable("DataOrOptionalData")) {
+            bool isOptional;
+            const TDataExprType* dataType;
+            if (!EnsureDataOrOptionalOfData(input->Pos(), type, isOptional, dataType, ctx.Expr)) {
+                return IGraphTransformer::TStatus::Error;
+            }
+            output = ctx.Expr.NewCallable(input->Pos(), dataType->GetName(), { input->ChildPtr(1) });
+            if (isOptional) {
+                output = ctx.Expr.NewCallable(input->Pos(), "Just", { output });
+            }
+        } else if (EnsureDataType(input->Head().Pos(), *type, ctx.Expr)) {
+            output = ctx.Expr.NewCallable(input->Pos(), type->Cast<TDataExprType>()->GetName(), { input->ChildPtr(1) });
+        } else {
             return IGraphTransformer::TStatus::Error;
         }
 
-        output = ctx.Expr.NewCallable(input->Pos(), type->Cast<TDataExprType>()->GetName(), { input->ChildPtr(1) });
         return IGraphTransformer::TStatus::Repeat;
     }
 
@@ -1196,7 +1207,7 @@ namespace NTypeAnnImpl {
             }
             for (auto& field: type->Cast<TStructExprType>()->GetItems()) {
                 auto itemType = field->GetItemType();
-                if (optional && itemType->GetKind() != ETypeAnnotationKind::Optional && itemType->GetKind() != ETypeAnnotationKind::Null) {
+                if (optional && !itemType->IsOptionalOrNull()) {
                     itemType = ctx.Expr.MakeType<TOptionalExprType>(itemType);
                 }
                 auto newField = ctx.Expr.MakeType<TItemExprType>(
@@ -1706,6 +1717,45 @@ namespace NTypeAnnImpl {
         return IGraphTransformer::TStatus::Ok;
     }
 
+    template <bool Forced>
+    IGraphTransformer::TStatus RemoveMembersWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+        Y_UNUSED(output);
+        if (!EnsureArgsCount(*input, 2, ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        if (!EnsureStructType(input->Head(), ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        if (!EnsureTuple(input->Tail(), ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        auto structType = input->Head().GetTypeAnn()->Cast<TStructExprType>();
+        TVector<const TItemExprType*> newItems = structType->GetItems();
+
+        for (const auto& child : input->Tail().Children()) {
+            if (!EnsureAtom(*child, ctx.Expr)) {
+                return IGraphTransformer::TStatus::Error;
+            }
+
+            auto memberName = child->Content();
+            EraseIf(newItems, [&](const auto& item) { return item->GetName() == memberName; });
+
+            if (!Forced && !FindOrReportMissingMember(memberName, input->Pos(), *structType, ctx)) {
+                return IGraphTransformer::TStatus::Error;
+            }
+        }
+
+        input->SetTypeAnn(ctx.Expr.MakeType<TStructExprType>(newItems));
+        if (!input->GetTypeAnn()->Cast<TStructExprType>()->Validate(input->Pos(), ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        return IGraphTransformer::TStatus::Ok;
+    }
+
     IGraphTransformer::TStatus RemovePrefixMembersWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
         if (!EnsureArgsCount(*input, 2, ctx.Expr)) {
             return IGraphTransformer::TStatus::Error;
@@ -2194,9 +2244,9 @@ namespace NTypeAnnImpl {
 
         const bool isLeftNumeric = IsDataTypeNumeric(dataType[0]->GetSlot());
         const bool isRightNumeric = IsDataTypeNumeric(dataType[1]->GetSlot());
-        bool isOk = false;
+        // bool isOk = false;
         if (isLeftNumeric && isRightNumeric) {
-            isOk = true;
+            // isOk = true;
             auto commonTypeSlot = GetNumericDataTypeByLevel(Max(GetNumericDataTypeLevel(dataType[0]->GetSlot()),
                 GetNumericDataTypeLevel(dataType[1]->GetSlot())));
             commonType = ctx.Expr.MakeType<TDataExprType>(commonTypeSlot);
@@ -2265,9 +2315,9 @@ namespace NTypeAnnImpl {
 
         const bool isLeftNumeric = IsDataTypeNumeric(dataType[0]->GetSlot());
         const bool isRightNumeric = IsDataTypeNumeric(dataType[1]->GetSlot());
-        bool isOk = false;
+        // bool isOk = false;
         if (isLeftNumeric && isRightNumeric) {
-            isOk = true;
+            // isOk = true;
             auto commonTypeSlot = GetNumericDataTypeByLevel(Max(GetNumericDataTypeLevel(dataType[0]->GetSlot()),
                 GetNumericDataTypeLevel(dataType[1]->GetSlot())));
             commonType = ctx.Expr.MakeType<TDataExprType>(commonTypeSlot);
@@ -2752,6 +2802,24 @@ namespace NTypeAnnImpl {
             if (!EnsureWorldType(*child, ctx.Expr)) {
                 return IGraphTransformer::TStatus::Error;
             }
+        }
+
+        input->SetTypeAnn(input->Head().GetTypeAnn());
+        return IGraphTransformer::TStatus::Ok;
+    }
+
+    IGraphTransformer::TStatus WithWorldWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+        Y_UNUSED(output);
+        if (!EnsureArgsCount(*input, 2, ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        if (!EnsureComputable(*input->Child(0), ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        if (!EnsureWorldType(*input->Child(1), ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
         }
 
         input->SetTypeAnn(input->Head().GetTypeAnn());
@@ -3905,7 +3973,7 @@ namespace NTypeAnnImpl {
     }
 
     template <bool Strong>
-    IGraphTransformer::TStatus CastWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+    IGraphTransformer::TStatus CastWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TExtContext& ctx) {
         if (!EnsureMinArgsCount(*input, 2, ctx.Expr)) {
             return IGraphTransformer::TStatus::Error;
         }
@@ -4000,10 +4068,17 @@ namespace NTypeAnnImpl {
                 }
 
                 if (sourceDataType->GetSlot() == EDataSlot::Yson && targetDataType->GetSlot() == EDataSlot::String) {
-                    auto issue = TIssue(ctx.Expr.GetPosition(input->Head().Pos()), "Consider using ToBytes to get internal representation of Yson type,"
-                        " or Yson::ConvertToString* methods to get string values");
-                    SetIssueCode(EYqlIssueCode::TIssuesIds_EIssueCode_CORE_CAST_YSON_JSON_BYTES, issue);
-                    if (!ctx.Expr.AddWarning(issue)) {
+                    const TString msg = "Consider using ToBytes to get internal representation of Yson type,"
+                                        " or Yson::ConvertToString* methods to get string values";
+                    if (ctx.Types.YsonCastToString) {
+                        auto issue = TIssue(ctx.Expr.GetPosition(input->Head().Pos()), msg);
+                        SetIssueCode(EYqlIssueCode::TIssuesIds_EIssueCode_CORE_CAST_YSON_JSON_BYTES, issue);
+                        if (!ctx.Expr.AddWarning(issue)) {
+                            return IGraphTransformer::TStatus::Error;
+                        }
+                    } else {
+                        ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Head().Pos()),
+                            TStringBuilder() << "Casting Yson to String is ambiguous. " << msg));
                         return IGraphTransformer::TStatus::Error;
                     }
                 }
@@ -4808,6 +4883,23 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
 
         input->SetTypeAnn(type);
         return IGraphTransformer::TStatus::Ok;
+    }
+
+    IGraphTransformer::TStatus AsOptionalTypeWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+        if (!EnsureArgsCount(*input, 1, ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        if (auto status = EnsureTypeRewrite(input->HeadRef(), ctx.Expr); status != IGraphTransformer::TStatus::Ok) {
+            return status;
+        }
+
+        if (input->Head().GetTypeAnn()->Cast<TTypeExprType>()->GetType()->IsOptionalOrNull()) {
+            output = input->HeadPtr();
+        } else {
+            output = ctx.Expr.NewCallable(input->Pos(), "OptionalType", { input->HeadPtr() });
+        }
+        return IGraphTransformer::TStatus::Repeat;
     }
 
     IGraphTransformer::TStatus OptionalWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
@@ -6042,7 +6134,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         }
 
         if (input->ChildrenSize() % 2U) {
-            ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Child(4)->Pos()), TStringBuilder() << "Expected even arguments."));
+            ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), TStringBuilder() << "Expected even number of arguments"));
             return IGraphTransformer::TStatus::Error;
         }
 
@@ -7009,8 +7101,8 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         }
 
         scriptType = NKikimr::NMiniKQL::CanonizeScriptType(scriptType);
-        auto canonizedModuleName = NKikimr::NMiniKQL::ScriptTypeAsStr(scriptType);
         bool isCustomPython = NKikimr::NMiniKQL::IsCustomPython(scriptType);
+        auto canonizedModuleName = isCustomPython ? moduleName : NKikimr::NMiniKQL::ScriptTypeAsStr(scriptType);
         bool foundModule = false;
 
         // resolve script udf from external resources (files / urls)
@@ -10581,7 +10673,9 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         if (op != "Exists" && op != "NotExists") {
             valueBaseType = RemoveAllOptionals(valueType);
             YQL_ENSURE(valueBaseType);
-            if (valueBaseType->GetKind() != ETypeAnnotationKind::Data) {
+            if (valueBaseType->GetKind() != ETypeAnnotationKind::Data &&
+                valueBaseType->GetKind() != ETypeAnnotationKind::Null)
+            {
                 ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Child(1)->Pos()),
                                          TStringBuilder() << "Expecting (optional) Data as second argument, but got: " << *valueType));
                 return IGraphTransformer::TStatus::Error;
@@ -10603,7 +10697,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
             return IGraphTransformer::TStatus::Error;
         }
 
-        if (valueBaseType && CanCompare<false>(RemoveAllOptionals(keyType), valueBaseType) != ECompareOptions::Comparable) {
+        if (valueBaseType && CanCompare<false>(RemoveAllOptionals(keyType), valueBaseType) == ECompareOptions::Uncomparable) {
             ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()),
                 TStringBuilder() << "Uncompatible key and value types: " << *keyType << " and " << *valueType));
             return IGraphTransformer::TStatus::Error;
@@ -10895,7 +10989,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         }
 
         for (const auto& x : itemType->Cast<TStructExprType>()->GetItems()) {
-            if (x->GetItemType()->GetKind() != ETypeAnnotationKind::Optional) {
+            if (!x->GetItemType()->IsOptionalOrNull()) {
                 ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Head().Pos()), TStringBuilder() << "Expected all columns to be optional. Non optional column: " << x->GetName()));
                 return IGraphTransformer::TStatus::Error;
             }
@@ -10905,8 +10999,23 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         return IGraphTransformer::TStatus::Ok;
     }
 
+    IGraphTransformer::TStatus AssumeStrictWrapper(const TExprNode::TPtr& input, TExprNode::TPtr& output, TContext& ctx) {
+        Y_UNUSED(output);
+        if (!EnsureArgsCount(*input, 1, ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        if (!EnsureComputable(input->Head(), ctx.Expr)) {
+            return IGraphTransformer::TStatus::Error;
+        }
+
+        input->SetTypeAnn(input->Head().GetTypeAnn());
+        return IGraphTransformer::TStatus::Ok;
+    }
+
     TSyncFunctionsMap::TSyncFunctionsMap() {
         Functions["Data"] = &DataWrapper;
+        Functions["DataOrOptionalData"] = &DataWrapper;
         Functions["DataSource"] = &DataSourceWrapper;
         Functions["Key"] = &KeyWrapper;
         Functions[LeftName] = &LeftWrapper;
@@ -10930,6 +11039,8 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["FlattenMembers"] = &FlattenMembersWrapper;
         Functions["SelectMembers"] = &SelectMembersWrapper<true>;
         Functions["FilterMembers"] = &SelectMembersWrapper<false>;
+        Functions["RemoveMembers"] = &RemoveMembersWrapper<false>;
+        Functions["ForceRemoveMembers"] = &RemoveMembersWrapper<true>;
         Functions["DivePrefixMembers"] = &DivePrefixMembersWrapper;
         Functions["FlattenByColumns"] = &FlattenByColumns;
         Functions["ExtractMembers"] = &ExtractMembersWrapper;
@@ -10984,6 +11095,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["ShiftRight"] = &ShiftWrapper;
         Functions["RotRight"] = &ShiftWrapper;
         Functions[SyncName] = &SyncWrapper;
+        Functions["WithWorld"] = &WithWorldWrapper;
         Functions["Concat"] = &ConcatWrapper;
         Functions["AggrConcat"] = &AggrConcatWrapper;
         Functions["Substring"] = &SubstringWrapper;
@@ -11064,6 +11176,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["AssumeSorted"] = &SortWrapper;
         Functions["AssumeUnique"] = &AssumeUniqueWrapper;
         Functions["AssumeAllMembersNullableAtOnce"] = &AssumeAllMembersNullableAtOnceWrapper;
+        Functions["AssumeStrict"] = &AssumeStrictWrapper;
         Functions["Top"] = &TopWrapper;
         Functions["TopSort"] = &TopWrapper;
         Functions["KeepTop"] = &KeepTopWrapper;
@@ -11078,8 +11191,6 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["AlterTo"] = &AlterToWrapper;
         Functions["ToIntegral"] = &ToIntegralWrapper;
         Functions["Cast"] = &OldCastWrapper;
-        Functions["SafeCast"] = &CastWrapper<false>;
-        Functions["StrictCast"] = &CastWrapper<true>;
         Functions["BitCast"] = &BitCastWrapper;
         Functions["WidenIntegral"] = &WidenIntegralWrapper;
         Functions["Default"] = &DefaultWrapper;
@@ -11128,6 +11239,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["StreamType"] = &TypeWrapper<ETypeAnnotationKind::Stream>;
         Functions["FlowType"] = &TypeWrapper<ETypeAnnotationKind::Flow>;
         Functions["Nothing"] = &NothingWrapper;
+        Functions["AsOptionalType"] = &AsOptionalTypeWrapper;
         Functions["List"] = &ListWrapper;
         Functions["DictType"] = &TypeWrapper<ETypeAnnotationKind::Dict>;
         Functions["Dict"] = &DictWrapper;
@@ -11220,6 +11332,8 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["MultiAggregate"] = &MultiAggregateWrapper;
         Functions["Aggregate"] = &AggregateWrapper;
         Functions["SqlAggregateAll"] = &SqlAggregateAllWrapper;
+        Functions["CountedAggregateAll"] = &CountedAggregateAllWrapper;
+        Functions["AggApply"] = &AggApplyWrapper;
         Functions["WinOnRows"] = &WinOnWrapper;
         Functions["WinOnGroups"] = &WinOnWrapper;
         Functions["WinOnRange"] = &WinOnWrapper;
@@ -11282,6 +11396,18 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["PgAggregationTraitsTuple"] = &PgAggregationTraitsWrapper;
         Functions["PgWindowTraitsTuple"] = &PgAggregationTraitsWrapper;
         Functions["PgInternal0"] = &PgInternal0Wrapper;
+        Functions["PgArray"] = &PgArrayWrapper;
+        Functions["PgTypeMod"] = &PgTypeModWrapper;
+        Functions["PgLike"] = &PgLikeWrapper;
+        Functions["PgILike"] = &PgLikeWrapper;
+        Functions["PgIn"] = &PgInWrapper;
+        Functions["PgBetween"] = &PgBetweenWrapper;
+        Functions["PgBetweenSym"] = &PgBetweenWrapper;
+        Functions["PgSubLink"] = &PgSubLinkWrapper;
+        Functions["PgGroupRef"] = &PgGroupRefWrapper;
+        Functions["PgGrouping"] = &PgGroupingWrapper;
+        Functions["PgGroupingSet"] = &PgGroupingSetWrapper;
+
         Functions["AutoDemuxList"] = &AutoDemuxListWrapper;
         Functions["AggrCountInit"] = &AggrCountInitWrapper;
         Functions["AggrCountUpdate"] = &AggrCountUpdateWrapper;
@@ -11462,6 +11588,8 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         ExtFunctions["AssumeColumnOrder"] = &AssumeColumnOrderWrapper;
         ExtFunctions["AssumeColumnOrderPartial"] = &AssumeColumnOrderWrapper;
         ExtFunctions["UnionAllPositional"] = &UnionAllPositionalWrapper;
+        ExtFunctions["SafeCast"] = &CastWrapper<false>;
+        ExtFunctions["StrictCast"] = &CastWrapper<true>;
 
         ColumnOrderFunctions["PgSetItem"] = &OrderForPgSetItem;
         ColumnOrderFunctions["AssumeColumnOrder"] = &OrderForAssumeColumnOrder;

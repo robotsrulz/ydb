@@ -130,7 +130,7 @@ const TPath::TChecker &TPath::TChecker::NotUnderDomainUpgrade(TPath::TChecker::E
     Failed = true;
     Status = status;
     Explain << "path is being upgraded as part of subdomain right now"
-            << ", domainId: " << Path.DomainId();
+            << ", domainId: " << Path.GetPathIdForDomain();
     return *this;
 }
 
@@ -332,12 +332,12 @@ const TPath::TChecker& TPath::TChecker::IsOlapStore(TPath::TChecker::EStatus sta
     return *this;
 }
 
-const TPath::TChecker& TPath::TChecker::IsOlapTable(TPath::TChecker::EStatus status) const {
+const TPath::TChecker& TPath::TChecker::IsColumnTable(TPath::TChecker::EStatus status) const {
     if (Failed) {
         return *this;
     }
 
-    if (Path.Base()->IsOlapTable()) {
+    if (Path.Base()->IsColumnTable()) {
         return *this;
     }
 
@@ -685,7 +685,7 @@ const TPath::TChecker& TPath::TChecker::IsTheSameDomain(const TPath &another, TP
         return *this;
     }
 
-    if (Path.DomainId() == another.DomainId()) {
+    if (Path.GetPathIdForDomain() == another.GetPathIdForDomain()) {
         return *this;
     }
 
@@ -796,8 +796,15 @@ const TPath::TChecker& TPath::TChecker::PathsLimit(ui64 delta, TPath::TChecker::
     }
 
     TSubDomainInfo::TPtr domainInfo = Path.DomainInfo();
+    const auto pathsTotal = domainInfo->GetPathsInside();
+    const auto backupPaths = domainInfo->GetBackupPaths();
 
-    if (!delta || domainInfo->GetPathsInside() + delta <= domainInfo->GetSchemeLimits().MaxPaths) {
+    Y_VERIFY_S(pathsTotal >= backupPaths, "Constraint violation"
+        << ": path: " << Path.PathString()
+        << ", paths total: " << pathsTotal
+        << ", backup paths: " << backupPaths);
+
+    if (!delta || (pathsTotal - backupPaths) + delta <= domainInfo->GetSchemeLimits().MaxPaths) {
         return *this;
     }
 
@@ -805,7 +812,8 @@ const TPath::TChecker& TPath::TChecker::PathsLimit(ui64 delta, TPath::TChecker::
     Status = status;
     Explain << "paths count has reached maximum value in the domain"
             << ", paths limit for domain: " << domainInfo->GetSchemeLimits().MaxPaths
-            << ", paths count inside domain: " << domainInfo->GetPathsInside()
+            << ", paths count inside domain: " << pathsTotal
+            << ", backup paths: " << backupPaths
             << ", intention to create new paths: " << delta;
     return *this;
 }
@@ -816,11 +824,16 @@ const TPath::TChecker& TPath::TChecker::DirChildrenLimit(ui64 delta, TPath::TChe
     }
 
     TSubDomainInfo::TPtr domainInfo = Path.DomainInfo();
-
     auto parent = Path.Parent();
-    ui64 aliveChildren = parent.Base()->GetAliveChildren();
+    const auto aliveChildren = parent.Base()->GetAliveChildren();
+    const auto backupChildren = parent.Base()->GetBackupChildren();
 
-    if (!delta || aliveChildren + delta <= domainInfo->GetSchemeLimits().MaxChildrenInDir) {
+    Y_VERIFY_S(aliveChildren >= backupChildren, "Constraint violation"
+        << ": path: " << parent.PathString()
+        << ", alive children: " << aliveChildren
+        << ", backup children: " << backupChildren);
+
+    if (!delta || (aliveChildren - backupChildren) + delta <= domainInfo->GetSchemeLimits().MaxChildrenInDir) {
         return *this;
     }
 
@@ -829,6 +842,7 @@ const TPath::TChecker& TPath::TChecker::DirChildrenLimit(ui64 delta, TPath::TChe
     Explain << "children count has reached maximum value in the dir"
             << ", children limit for domain dir: " << domainInfo->GetSchemeLimits().MaxChildrenInDir
             << ", children count inside dir: " << aliveChildren
+            << ", backup children: " << backupChildren
             << ", intention to create new children: " << delta;
     return *this;
 }
@@ -839,8 +853,15 @@ const TPath::TChecker& TPath::TChecker::ShardsLimit(ui64 delta, TPath::TChecker:
     }
 
     TSubDomainInfo::TPtr domainInfo = Path.DomainInfo();
+    const auto shardsTotal = domainInfo->GetShardsInside();
+    const auto backupShards = domainInfo->GetBackupShards();
 
-    if (!delta || domainInfo->GetShardsInside() + delta <= domainInfo->GetSchemeLimits().MaxShards) {
+    Y_VERIFY_S(shardsTotal >= backupShards, "Constraint violation"
+        << ": path: " << Path.PathString()
+        << ", shards total: " << shardsTotal
+        << ", backup shards: " << backupShards);
+
+    if (!delta || (shardsTotal - backupShards) + delta <= domainInfo->GetSchemeLimits().MaxShards) {
         return *this;
     }
 
@@ -848,7 +869,8 @@ const TPath::TChecker& TPath::TChecker::ShardsLimit(ui64 delta, TPath::TChecker:
     Status = status;
     Explain << "shards count has reached maximum value in the domain"
             << ", shards limit for domain: " << domainInfo->GetSchemeLimits().MaxShards
-            << ", shards count inside domain: " << domainInfo->GetShardsInside()
+            << ", shards count inside domain: " << shardsTotal
+            << ", backup shards: " << backupShards
             << ", intention to create new shards: " << delta;
     return *this;
 }
@@ -1080,7 +1102,7 @@ TPath TPath::Root(TSchemeShard* ss) {
     return result;
 }
 
-TString TPath::PathString() const { // O(result length) complexity
+TString TPath::PathString() const { //O(1) if resolved, in other case O(result length) complexity
     if (!NameParts) {
         return TString();
     }
@@ -1147,6 +1169,11 @@ TPath TPath::FirstExistedParent() const {
     return result;
 }
 
+TString TPath::GetDomainPathString() const {
+    // TODO: not effective because of creating vectors in Init() method. should keep subdomain path somethere in struct TSubDomainInfo
+    return Init(GetPathIdForDomain(), SS).PathString();
+}
+
 TSubDomainInfo::TPtr TPath::DomainInfo() const {
     Y_VERIFY(!IsEmpty());
     Y_VERIFY(Elements.size());
@@ -1154,11 +1181,17 @@ TSubDomainInfo::TPtr TPath::DomainInfo() const {
     return SS->ResolveDomainInfo(Elements.back());
 }
 
-TPathId TPath::DomainId() const {
+TPathId TPath::GetPathIdForDomain() const {
     Y_VERIFY(!IsEmpty());
     Y_VERIFY(Elements.size());
 
-    return SS->ResolveDomainId(Elements.back());
+    return SS->ResolvePathIdForDomain(Elements.back());
+}
+
+TPathId TPath::GetDomainKey() const {
+    Y_VERIFY(IsResolved());
+
+    return SS->GetDomainKey(Elements.back());
 }
 
 bool TPath::IsDomain() const {
@@ -1390,7 +1423,7 @@ bool TPath::IsUnderDomainUpgrade() const {
         return false;
     }
 
-    return SS->PathsById.at(DomainId())->PathState == NKikimrSchemeOp::EPathState::EPathStateUpgrade;
+    return SS->PathsById.at(GetPathIdForDomain())->PathState == NKikimrSchemeOp::EPathState::EPathStateUpgrade;
 }
 
 bool TPath::IsUnderCopying() const {
@@ -1619,6 +1652,12 @@ bool TPath::IsValidLeafName(TString& explain) const {
     if (AppData()->FeatureFlags.GetEnableSystemViews() && leaf == NSysView::SysPathName) {
         explain += TStringBuilder()
             << "path part '" << NSysView::SysPathName << "' is reserved by the system";
+        return false;
+    }
+
+    if (IsPathPartContainsOnlyDots(leaf)) {
+        explain += TStringBuilder()
+            << "is not allowed path part contains only dots '" << leaf << "'";
         return false;
     }
 

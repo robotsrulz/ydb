@@ -6,8 +6,11 @@
 #include <ydb/library/yql/ast/yql_expr.h>
 #include <ydb/library/yql/dq/common/dq_value.h>
 #include <ydb/core/kqp/provider/yql_kikimr_gateway.h>
+#include <ydb/core/tx/long_tx_service/public/lock_handle.h>
 
+#include <library/cpp/actors/wilson/wilson_trace.h>
 #include <library/cpp/actors/core/actorid.h>
+#include <library/cpp/lwtrace/shuttle.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -117,21 +120,25 @@ public:
         ui64 TotalReadSizeLimitBytes = 0;
         ui64 MkqlMemoryLimit = 0; // old engine compatibility
         ui64 PerShardKeysSizeLimitBytes = 0;
-        NYql::NDqProto::EDqStatsMode StatsMode = NYql::NDqProto::DQ_STATS_MODE_NONE;
+        Ydb::Table::QueryStatsCollection::Mode StatsMode = Ydb::Table::QueryStatsCollection::STATS_COLLECTION_NONE;
         bool DisableLlvmForUdfStages = false;
         bool LlvmEnabled = true;
         TKqpSnapshot Snapshot = TKqpSnapshot();
         NKikimrKqp::EIsolationLevel IsolationLevel = NKikimrKqp::ISOLATION_LEVEL_UNDEFINED;
         TMaybe<NKikimrKqp::TRlPath> RlPath;
         bool NeedTxId = true;
+
+        NLWTrace::TOrbit Orbit;
+        NWilson::TTraceId TraceId;
     };
 
     struct TExecPhysicalResult : public TGenericResult {
         NKikimrKqp::TExecuterTxResult ExecuterResult;
+        NLongTxService::TLockHandle LockHandle;
     };
 
     struct TAstQuerySettings {
-        NYql::NDqProto::EDqStatsMode StatsMode = NYql::NDqProto::DQ_STATS_MODE_NONE;
+        Ydb::Table::QueryStatsCollection::Mode CollectStats = Ydb::Table::QueryStatsCollection::STATS_COLLECTION_NONE;
     };
 
 public:

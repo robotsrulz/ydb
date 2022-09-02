@@ -27,7 +27,7 @@ class TBlobStorageController::TTxUpdateNodeDrives
                     << data.GetPath() << " "
                     << data.GetSerialNumber() << " "
                     << data.GetModelNumber() << " "
-                    << TPDiskCategory::DeviceTypeStr(PDiskTypeToPDiskType(data.GetDeviceType()), true) << " "
+                    << NPDisk::DeviceTypeStr(PDiskTypeToPDiskType(data.GetDeviceType()), true) << " "
                     << "}";
             }
             out << "]";
@@ -120,9 +120,11 @@ class TBlobStorageController::TTxUpdateNodeDrives
             } else {
                 Self->NodeForSerial[serial] = nodeId;
             }
-            auto [it, emplaced] = nodeInfo.KnownDrives.emplace(serial, data);
-            if (it->second.DeviceType == TPDiskCategory::DEVICE_TYPE_NVME) {
-                it->second.DeviceType = TPDiskCategory::DEVICE_TYPE_SSD;
+            NPDisk::TDriveData driveData;
+            DriveDataToDriveData(data, driveData);
+            auto [it, emplaced] = nodeInfo.KnownDrives.emplace(serial, driveData);
+            if (it->second.DeviceType == NPDisk::DEVICE_TYPE_NVME) {
+                it->second.DeviceType = NPDisk::DEVICE_TYPE_SSD;
             }
         }
     }
@@ -278,10 +280,10 @@ public:
             }
         }
 
-        Self->ReadGroups(groupIDsToRead, false, res.get());
+        Self->ReadGroups(groupIDsToRead, false, res.get(), nodeId);
         Y_VERIFY(groupIDsToRead.empty());
 
-        Self->ReadGroups(groupsToDiscard, true, res.get());
+        Self->ReadGroups(groupsToDiscard, true, res.get(), nodeId);
 
         for (auto it = Self->PDisks.lower_bound(minPDiskId); it != Self->PDisks.end() && it->first.NodeId == nodeId; ++it) {
             Self->ReadPDisk(it->first, *it->second, res.get(), NKikimrBlobStorage::INITIAL);
@@ -329,16 +331,17 @@ public:
 };
 
 void TBlobStorageController::ReadGroups(TSet<ui32>& groupIDsToRead, bool discard,
-        TEvBlobStorage::TEvControllerNodeServiceSetUpdate *result) {
+        TEvBlobStorage::TEvControllerNodeServiceSetUpdate *result, TNodeId nodeId) {
     for (auto it = groupIDsToRead.begin(); it != groupIDsToRead.end(); ) {
         const TGroupId groupId = *it;
-        if (TGroupInfo *group = FindGroup(groupId); group || discard) {
+        TGroupInfo *group = FindGroup(groupId);
+        if (group || discard) {
             NKikimrBlobStorage::TNodeWardenServiceSet *serviceSetProto = result->Record.MutableServiceSet();
             NKikimrBlobStorage::TGroupInfo *groupProto = serviceSetProto->AddGroups();
             if (!group) {
                 groupProto->SetGroupID(groupId);
                 groupProto->SetEntityStatus(NKikimrBlobStorage::DESTROY);
-            } else {
+            } else if (group->Listable()) {
                 const TStoragePoolInfo& info = StoragePools.at(group->StoragePoolId);
 
                 TMaybe<TKikimrScopeId> scopeId;
@@ -349,6 +352,10 @@ void TBlobStorageController::ReadGroups(TSet<ui32>& groupIDsToRead, bool discard
                 }
 
                 SerializeGroupInfo(groupProto, *group, info.Name, scopeId);
+            } else if (nodeId) {
+                // group is not listable, so we have to postpone the request from NW
+                group->WaitingNodes.insert(nodeId);
+                GetNode(nodeId).WaitingForGroups.insert(group->ID);
             }
 
             // this group is processed, remove it from the set
@@ -465,7 +472,14 @@ void TBlobStorageController::OnWardenDisconnected(TNodeId nodeId) {
         return; // there are still some connections from this NW
     }
 
+    for (const TGroupId groupId : std::exchange(node.WaitingForGroups, {})) {
+        if (TGroupInfo *group = FindGroup(groupId)) {
+            group->WaitingNodes.erase(nodeId);
+        }
+    }
+
     const TInstant now = TActivationContext::Now();
+    const TMonotonic mono = TActivationContext::Monotonic();
     std::vector<std::pair<TVSlotId, TInstant>> lastSeenReadyQ;
     for (auto it = PDisks.lower_bound(TPDiskId::MinForNode(nodeId)); it != PDisks.end() && it->first.NodeId == nodeId; ++it) {
         it->second->UpdateOperational(false);
@@ -480,9 +494,9 @@ void TBlobStorageController::OnWardenDisconnected(TNodeId nodeId) {
                 lastSeenReadyQ.emplace_back(it->second->VSlotId, now);
                 NotReadyVSlotIds.insert(it->second->VSlotId);
             }
-            it->second->SetStatus(NKikimrBlobStorage::EVDiskStatus::ERROR, now);
+            it->second->SetStatus(NKikimrBlobStorage::EVDiskStatus::ERROR, mono);
             const_cast<TGroupInfo*>(group)->CalculateGroupStatus();
-            sh->VDiskStatusUpdate.emplace_back(it->second->GetVDiskId(), it->second->GetStatus());
+            sh->VDiskStatusUpdate.emplace_back(it->second->GetVDiskId(), it->second->Status);
             ScrubState.UpdateVDiskState(&*it->second);
         }
     }

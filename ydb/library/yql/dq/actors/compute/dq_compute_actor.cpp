@@ -13,7 +13,7 @@ TDqExecutionSettings ExecutionSettings;
 
 bool IsDebugLogEnabled(const TActorSystem* actorSystem) {
     auto* settings = actorSystem->LoggerSettings();
-    return settings && settings->Satisfies(NActors::NLog::EPriority::PRI_DEBUG, NKikimrServices::KQP_TASKS_RUNNER);
+    return settings && settings->Satisfies(NActors::NLog::EPriority::PRI_DEBUG, NKikimrServices::KQP_COMPUTE);
 }
 
 } // anonymous namespace
@@ -33,10 +33,12 @@ public:
     static constexpr char ActorName[] = "DQ_COMPUTE_ACTOR";
 
     TDqComputeActor(const TActorId& executerId, const TTxId& txId, NDqProto::TDqTask&& task,
-        IDqSourceActorFactory::TPtr sourceActorFactory, IDqSinkFactory::TPtr sinkFactory,
+        IDqAsyncIoFactory::TPtr asyncIoFactory,
+        const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
         const TComputeRuntimeSettings& settings, const TComputeMemoryLimits& memoryLimits,
-        const TTaskRunnerFactory& taskRunnerFactory)
-        : TBase(executerId, txId, std::move(task), std::move(sourceActorFactory), std::move(sinkFactory), settings, memoryLimits)
+        const TTaskRunnerFactory& taskRunnerFactory,
+        ::NMonitoring::TDynamicCounterPtr taskCounters)
+        : TBase(executerId, txId, std::move(task), std::move(asyncIoFactory), functionRegistry, settings, memoryLimits, true, false, taskCounters)
         , TaskRunnerFactory(taskRunnerFactory)
     {}
 
@@ -46,7 +48,7 @@ public:
         TLogFunc logger;
         if (IsDebugLogEnabled(actorSystem)) {
             logger = [actorSystem, txId = this->GetTxId(), taskId = GetTask().GetId()] (const TString& message) {
-                LOG_DEBUG_S(*actorSystem, NKikimrServices::KQP_TASKS_RUNNER, "TxId: " << txId
+                LOG_DEBUG_S(*actorSystem, NKikimrServices::KQP_COMPUTE, "TxId: " << txId
                     << ", task: " << taskId << ": " << message);
             };
         }
@@ -67,11 +69,14 @@ private:
 
 
 IActor* CreateDqComputeActor(const TActorId& executerId, const TTxId& txId, NYql::NDqProto::TDqTask&& task,
-    IDqSourceActorFactory::TPtr sourceActorFactory, IDqSinkFactory::TPtr sinkFactory,
-    const TComputeRuntimeSettings& settings, const TComputeMemoryLimits& memoryLimits, const TTaskRunnerFactory& taskRunnerFactory)
+    IDqAsyncIoFactory::TPtr asyncIoFactory,
+    const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
+    const TComputeRuntimeSettings& settings, const TComputeMemoryLimits& memoryLimits,
+    const TTaskRunnerFactory& taskRunnerFactory,
+    ::NMonitoring::TDynamicCounterPtr taskCounters)
 {
-    return new TDqComputeActor(executerId, txId, std::move(task), std::move(sourceActorFactory),
-        std::move(sinkFactory), settings, memoryLimits, taskRunnerFactory);
+    return new TDqComputeActor(executerId, txId, std::move(task), std::move(asyncIoFactory),
+        functionRegistry, settings, memoryLimits, taskRunnerFactory, taskCounters);
 }
 
 } // namespace NDq

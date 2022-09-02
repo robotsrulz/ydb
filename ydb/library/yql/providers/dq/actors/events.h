@@ -22,9 +22,14 @@ namespace NYql::NDqs {
     struct TEvDqFailure : NActors::TEventPB<TEvDqFailure, NDqProto::TDqFailure, TDqExecuterEvents::ES_DQ_FAILURE> {
         TEvDqFailure() = default;
         explicit TEvDqFailure(NYql::NDqProto::StatusIds::StatusCode statusCode);
-        TEvDqFailure(NYql::NDqProto::StatusIds::StatusCode statusCode, const TIssues& issues, bool retriable = false, bool needFallback = false);
-        TEvDqFailure(NYql::NDqProto::StatusIds::StatusCode statusCode, const TIssue& issue, bool retriable = false, bool needFallback = false);
-        TEvDqFailure(NYql::NDqProto::StatusIds::StatusCode statusCode, const TString& error, bool retriable, bool needFallback);
+        TEvDqFailure(NYql::NDqProto::StatusIds::StatusCode statusCode, const TIssues& issues);
+        TEvDqFailure(NYql::NDqProto::StatusIds::StatusCode statusCode, const TIssue& issue);
+        TEvDqFailure(NYql::NDqProto::StatusIds::StatusCode statusCode, const TString& error);
+    };
+
+    struct TEvDqStats : NActors::TEventPB<TEvDqStats, NDqProto::TDqStats, TDqExecuterEvents::ES_STATS> {
+        TEvDqStats() = default;
+        TEvDqStats(const TIssues& issues);
     };
 
     struct TEvQueryResponse
@@ -115,7 +120,7 @@ namespace NYql::NDqs {
         DEFINE_SIMPLE_LOCAL_EVENT(TEvMessageProcessed, "");
 
         explicit TEvMessageProcessed(const TString& messageId);
-        
+
         const TString MessageId;
     };
 }

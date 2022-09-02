@@ -140,6 +140,8 @@ protected:
                                     GetDataBuffer(state, info),
                                     diskIdx == group.DiskIdx[0] ? TDiskPutRequest::ReasonInitial : TDiskPutRequest::ReasonError,
                                     diskIdx != group.DiskIdx[0],
+                                    state.ExtraBlockChecks,
+                                    state.Span,
                                     state.BlobIdx);
                                 s = TBlobState::ESituation::Sent;
                                 any |= {&info.GetTopology(), diskIdx};
@@ -172,6 +174,8 @@ protected:
                         TString(),
                         handoff ? TDiskPutRequest::ReasonError : TDiskPutRequest::ReasonInitial,
                         handoff,
+                        state.ExtraBlockChecks,
+                        state.Span,
                         state.BlobIdx);
                     part.Situation = TBlobState::ESituation::Sent;
                     any |= {&info.GetTopology(), (ui8)diskIdx};

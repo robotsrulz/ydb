@@ -136,9 +136,9 @@
             "Match": {"Type": "Callable", "Name": "KqlLookupTable"}
         },
         {
-            "Name": "TKqlLookupIndex",
+            "Name": "TKqlLookupIndexBase",
             "Base": "TKqlLookupTableBase",
-            "Match": {"Type": "Callable", "Name": "KqlLookupIndex"},
+            "Match": {"Type": "CallableBase"},
             "Children": [
                 {"Index": 3, "Name": "Index", "Type": "TCoAtom"}
             ]
@@ -147,6 +147,21 @@
             "Name": "TKqpLookupTable",
             "Base": "TKqlLookupTableBase",
             "Match": {"Type": "Callable", "Name": "KqpLookupTable"}
+        },
+        {
+            "Name": "TKqlStreamLookupTable",
+            "Base": "TKqlLookupTableBase",
+            "Match": {"Type": "Callable", "Name": "KqlStreamLookupTable"}
+        },
+        {
+            "Name": "TKqlLookupIndex",
+            "Base": "TKqlLookupIndexBase",
+            "Match": {"Type": "Callable", "Name": "KqlLookupIndex"}
+        },
+        {
+            "Name": "TKqlStreamLookupIndex",
+            "Base": "TKqlLookupIndexBase",
+            "Match": {"Type": "Callable", "Name": "KqlStreamLookupIndex"}
         },
         {
             "Name": "TKqlTableEffect",
@@ -327,6 +342,16 @@
             "Match": {"Type": "Callable", "Name": "KqpCnShuffleShard"}
         },
         {
+            "Name": "TKqpCnStreamLookup",
+            "Base": "TKqpConnection",
+            "Match": {"Type": "Callable", "Name": "KqpCnStreamLookup"},
+            "Children": [
+                {"Index": 1, "Name": "Table", "Type": "TKqpTable"},
+                {"Index": 2, "Name": "Columns", "Type": "TCoAtomList"},
+                {"Index": 3, "Name": "LookupKeysType", "Type": "TExprBase"}
+            ]
+        },
+        {
             "Name": "TKqpProgram",
             "Base": "TCallable",
             "Match": {"Type": "Callable", "Name": "KqpProgram"},
@@ -414,6 +439,29 @@
             "Match": {"Type": "Callable", "Name": "TKqpOlapFilterExists"},
             "Children": [
                 {"Index": 1, "Name": "Column", "Type": "TExprBase"}
+            ]
+        },
+        {
+            "Name": "TKqpOlapAggOperation",
+            "Base": "TExprBase",
+            "Match": {"Type": "Tuple"},
+            "Children": [
+                {"Index": 0, "Name": "Name", "Type": "TCoAtom"},
+                {"Index": 1, "Name": "Type", "Type": "TCoAtom"},
+                {"Index": 2, "Name": "Column", "Type": "TCoAtom"}
+            ]
+        },
+        {
+            "Name": "TKqpOlapAggOperationList",
+            "ListBase": "TKqpOlapAggOperation"
+        },
+        {
+            "Name": "TKqpOlapAgg",
+            "Base": "TKqpOlapOperationBase",
+            "Match": {"Type": "Callable", "Name": "TKqpOlapAgg"},
+            "Children": [
+                {"Index": 1, "Name": "Aggregates", "Type": "TKqpOlapAggOperationList"},
+                {"Index": 2, "Name": "KeyColumns", "Type": "TCoAtomList"}
             ]
         },
         {

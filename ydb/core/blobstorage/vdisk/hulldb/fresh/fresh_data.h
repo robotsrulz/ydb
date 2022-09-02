@@ -2,6 +2,7 @@
 
 #include "defs.h"
 #include "fresh_datasnap.h"
+#include <ydb/core/blobstorage/vdisk/protos/events.pb.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/hullds_settings.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/blobstorage_hullsatisfactionrank.h>
 
@@ -54,7 +55,7 @@ namespace NKikimr {
         void PutAppendix(std::shared_ptr<TFreshAppendix> &&a, ui64 firstLsn, ui64 lastLsn);
 
         // Compaction
-        bool NeedsCompaction(ui64 yardFreeUpToLsn) const;
+        bool NeedsCompaction(ui64 yardFreeUpToLsn, bool force) const;
         TIntrusivePtr<TFreshSegment> FindSegmentForCompaction();
         void CompactionSstCreated(TIntrusivePtr<TFreshSegment> &&freshSegment);
         void CompactionFinished();
@@ -72,6 +73,7 @@ namespace NKikimr {
         ui64 GetLastLsn() const;
         TSatisfactionRank GetSatisfactionRank() const;
         void OutputHtml(IOutputStream &str) const;
+        void OutputProto(NKikimrVDisk::FreshStat *stat) const;
 
         bool Empty() const {
             return (!Old || Old->Empty()) && (!Dreg || Dreg->Empty()) && (!Cur || Cur->Empty());
@@ -110,9 +112,11 @@ namespace NKikimr {
     }
 
     template <class TKey, class TMemRec>
-    bool TFreshData<TKey, TMemRec>::NeedsCompaction(ui64 yardFreeUpToLsn) const {
+    bool TFreshData<TKey, TMemRec>::NeedsCompaction(ui64 yardFreeUpToLsn, bool force) const {
         if (CompactionInProgress()) {
             return false;
+        } else if (force) {
+            return true;
         } else {
             const bool compactDregByYard = UseDreg && Dreg && Dreg->NeedsCompactionByYard(yardFreeUpToLsn);
             const bool compactCurByYard = Cur && Cur->NeedsCompactionByYard(yardFreeUpToLsn);
@@ -218,6 +222,19 @@ namespace NKikimr {
             Dreg->OutputHtml("Dreg", str);
         if (Old.Get())
             Old->OutputHtml("Old", str);
+    }
+
+    template <class TKey, class TMemRec>
+    void TFreshData<TKey, TMemRec>::OutputProto(NKikimrVDisk::FreshStat *stat) const {
+        if (Cur) {
+            Cur->OutputProto(stat->mutable_current());
+        }
+        if (Dreg) {
+            Dreg->OutputProto(stat->mutable_dreg());
+        }
+        if (Old) {
+            Old->OutputProto(stat->mutable_old());
+        }
     }
 
     template <class TKey, class TMemRec>

@@ -214,7 +214,13 @@ public:
         Y_VERIFY(parseOk);
 
         ui64 throughput = ((ui64)pqGroup->TotalPartitionCount) * config.GetPartitionConfig().GetWriteSpeedInBytesPerSecond();
-        ui64 storage = throughput * config.GetPartitionConfig().GetLifetimeSeconds();
+        const ui64 storage = [&config, &throughput]() {
+                        if (config.GetPartitionConfig().HasStorageLimitBytes()) {
+                            return config.GetPartitionConfig().GetStorageLimitBytes();
+                        } else {
+                            return throughput * config.GetPartitionConfig().GetLifetimeSeconds();
+                        }
+                    }();
 
         auto domainInfo = context.SS->ResolveDomainInfo(pathId);
         domainInfo->DecPathsInside();
@@ -238,10 +244,12 @@ public:
         ++parentDir->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir);
         context.SS->ClearDescribePathCaches(parentDir);
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
-
         context.SS->ClearDescribePathCaches(path);
-        context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentDir->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
+        }
 
         context.SS->ChangeTxState(db, OperationId, TTxState::Done);
         context.OnComplete.ActivateTx(OperationId);
@@ -467,6 +475,10 @@ public:
             result->SetError(NKikimrScheme::StatusMultipleModifications, "Drop over Create/Alter");
             return result;
         }
+        if (!context.SS->CheckInFlightLimit(TTxState::TxDropPQGroup, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxDropPQGroup, path.Base()->PathId);
         // Dirty hack: drop step must not be zero because 0 is treated as "hasn't been dropped"
@@ -491,10 +503,12 @@ public:
         ++parentDir.Base()->DirAlterVersion;
         context.SS->PersistPathDirAlterVersion(db, parentDir.Base());
         context.SS->ClearDescribePathCaches(parentDir.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, parentDir.Base()->PathId);
-
         context.SS->ClearDescribePathCaches(path.Base());
-        context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+
+        if (!context.SS->DisablePublicationsOfDropping) {
+            context.OnComplete.PublishToSchemeBoard(OperationId, parentDir.Base()->PathId);
+            context.OnComplete.PublishToSchemeBoard(OperationId, path.Base()->PathId);
+        }
 
         State = NextState();
         SetState(SelectStateFunc(State));

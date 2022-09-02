@@ -3,6 +3,7 @@ syntax = "proto3";
 import "ydb/core/protos/blobstorage_disk.proto";
 import "ydb/core/protos/blobstorage_disk_color.proto";
 import "ydb/core/protos/blobstorage_pdisk_config.proto";
+import "ydb/core/protos/blob_depot_config.proto";
 import "library/cpp/actors/protos/interconnect.proto";
 
 package NKikimrBlobStorage;
@@ -13,6 +14,13 @@ enum EPDiskType {
     SSD = 1; // solid state drives (SSD)
     NVME = 2; // PCIe-connected solid state drives (NVMe SSD)
     UNKNOWN_TYPE = 3; // used if device type is unknown or if group consists of different PDisk device types
+}
+
+// Virtual group life cycle state
+enum EVirtualGroupState {
+    NEW = 0; // just created
+    CREATE_FAILED = 1; // error while creating VirtualGroup
+    WORKING = 2; // operational
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -392,6 +400,11 @@ message TDropDonorDisk {
     NKikimrBlobStorage.TVDiskID VDiskId = 2;
 }
 
+message TWipeVDisk {
+    NKikimrBlobStorage.TVSlotId VSlotId = 1;
+    NKikimrBlobStorage.TVDiskID VDiskId = 2;
+}
+
 message TSetScrubPeriodicity {
     uint32 ScrubPeriodicity = 1; // in seconds; 0 = disable
 }
@@ -438,6 +451,28 @@ message TUpdateSettings {
     repeated bool EnableGroupLayoutSanitizer = 10;
 }
 
+message TBoxStoragePoolId {
+    uint64 BoxId = 1;
+    uint64 StoragePoolId = 2;
+}
+
+message TAllocateVirtualGroup {
+    string Name = 1;
+    uint64 HiveId = 2;
+    oneof StoragePool {
+        string StoragePoolName = 3;
+        TBoxStoragePoolId StoragePoolId = 4;
+    }
+    repeated NKikimrBlobDepot.TChannelProfile ChannelProfiles = 5;
+    uint64 BlobDepotId = 6; // when the tablet is already created; for testing purposes only
+}
+
+message TDecommitGroups {
+    repeated uint32 GroupIds = 1; // group ids to decommit
+    uint64 HiveId = 2; // hive under which it is required to create blob depot tablets
+    repeated NKikimrBlobDepot.TChannelProfile ChannelProfiles = 3; // where to store decommitted groups' data
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // INTERFACE PART
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -474,6 +509,9 @@ message TConfigRequest {
             TMigrateToSerial MigrateToSerial = 35;
             TSetPDiskSpaceMarginPromille SetPDiskSpaceMarginPromille = 37;
             TUpdateSettings UpdateSettings = 38;
+            TAllocateVirtualGroup AllocateVirtualGroup = 39;
+            TDecommitGroups DecommitGroups = 40;
+            TWipeVDisk WipeVDisk = 41;
 
             // commands intended for internal use
             TReassignGroupDisk ReassignGroupDisk = 19;
@@ -661,7 +699,9 @@ message TConfigResponse {
         repeated TMoveCommand MoveCommand = 10;
         repeated TPDiskStat PDiskStat = 11;
         repeated TReassignedItem ReassignedItem = 14;
+        repeated TWipeVDisk WipeVDisk = 17;
         TDeclareIntent Intent = 15;
+        bool Already = 16;
     }
 
     repeated TStatus Status = 1;

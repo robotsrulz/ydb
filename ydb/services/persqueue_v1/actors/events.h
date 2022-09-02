@@ -27,7 +27,9 @@ using namespace Ydb;
 struct TEvPQProxy {
     enum EEv {
         EvWriteInit = EventSpaceBegin(TKikimrEvents::ES_PQ_PROXY_NEW), // TODO: Replace 'NEW' with version or something
+        EvTopicWriteInit,
         EvWrite,
+        EvTopicWrite,
         EvDone,
         EvReadInit,
         EvMigrationReadInit,
@@ -58,6 +60,7 @@ struct TEvPQProxy {
         EvDeadlineExceeded,
         EvGetStatus,
         EvUpdateToken,
+        EvTopicUpdateToken,
         EvCommitRange,
         EvEnd
     };
@@ -71,11 +74,11 @@ struct TEvPQProxy {
 
 
     struct TEvAuthResultOk : public NActors::TEventLocal<TEvAuthResultOk, EvAuthResultOk> {
-        TEvAuthResultOk(const TTopicTabletsPairs&& topicAndTablets)
+        TEvAuthResultOk(const TTopicInitInfoMap&& topicAndTablets)
             : TopicAndTablets(std::move(topicAndTablets))
         { }
 
-        TTopicTabletsPairs TopicAndTablets;
+        TTopicInitInfoMap TopicAndTablets;
     };
 
     struct TEvSessionSetPreferredCluster : public NActors::TEventLocal<TEvSessionSetPreferredCluster, EvSessionSetPreferredCluster> {
@@ -123,8 +126,6 @@ struct TEvPQProxy {
         const TString SelectQ, UpdateQ, DeleteQ;
     };
 
-
-
     struct TEvWriteInit : public NActors::TEventLocal<TEvWriteInit, EvWriteInit> {
         TEvWriteInit(PersQueue::V1::StreamingWriteClientMessage&& req, const TString& peerName)
             : Request(std::move(req))
@@ -132,6 +133,16 @@ struct TEvPQProxy {
         { }
 
         PersQueue::V1::StreamingWriteClientMessage Request;
+        TString PeerName;
+    };
+
+    struct TEvTopicWriteInit : public NActors::TEventLocal<TEvTopicWriteInit, EvTopicWriteInit> {
+        TEvTopicWriteInit(Topic::StreamWriteMessage::FromClient&& req, const TString& peerName)
+            : Request(std::move(req))
+            , PeerName(peerName)
+        { }
+
+        Topic::StreamWriteMessage::FromClient Request;
         TString PeerName;
     };
 
@@ -143,18 +154,26 @@ struct TEvPQProxy {
         PersQueue::V1::StreamingWriteClientMessage Request;
     };
 
+    struct TEvTopicWrite : public NActors::TEventLocal<TEvTopicWrite, EvTopicWrite> {
+        explicit TEvTopicWrite(Topic::StreamWriteMessage::FromClient&& req)
+            : Request(std::move(req))
+        { }
+
+        Topic::StreamWriteMessage::FromClient Request;
+    };
+
     struct TEvDone : public NActors::TEventLocal<TEvDone, EvDone> {
         TEvDone()
         { }
     };
 
     struct TEvReadInit : public NActors::TEventLocal<TEvReadInit, EvReadInit> {
-        TEvReadInit(const PersQueue::V1::StreamingReadClientMessage& req, const TString& peerName)
+        TEvReadInit(const Topic::StreamReadMessage::FromClient& req, const TString& peerName)
             : Request(req)
             , PeerName(peerName)
         { }
 
-        PersQueue::V1::StreamingReadClientMessage Request;
+        Topic::StreamReadMessage::FromClient Request;
         TString PeerName;
     };
 
@@ -177,6 +196,14 @@ struct TEvPQProxy {
             , ReadTimestampMs(readTimestampMs)
         { }
 
+        explicit TEvRead(ui64 maxSize)
+            : Guid(CreateGuidAsString())
+            , MaxCount(0)
+            , MaxSize(maxSize)
+            , MaxTimeLagMs(0)
+            , ReadTimestampMs(0) {
+        }
+
         const TString Guid;
         ui64 MaxCount;
         ui64 MaxSize;
@@ -190,6 +217,14 @@ struct TEvPQProxy {
         { }
 
         PersQueue::V1::StreamingWriteClientMessage Request;
+    };
+
+    struct TEvTopicUpdateToken : public NActors::TEventLocal<TEvTopicUpdateToken, EvTopicUpdateToken> {
+        explicit TEvTopicUpdateToken(Topic::StreamWriteMessage::FromClient&& req)
+            : Request(std::move(req))
+        { }
+
+        Topic::StreamWriteMessage::FromClient Request;
     };
 
     struct TEvCloseSession : public NActors::TEventLocal<TEvCloseSession, EvCloseSession> {
@@ -220,14 +255,14 @@ struct TEvPQProxy {
     };
 
     struct TEvReadResponse : public NActors::TEventLocal<TEvReadResponse, EvReadResponse> {
-        explicit TEvReadResponse(PersQueue::V1::StreamingReadServerMessage&& resp, ui64 nextReadOffset, bool fromDisk, TDuration waitQuotaTime)
+        explicit TEvReadResponse(Topic::StreamReadMessage::FromServer&& resp, ui64 nextReadOffset, bool fromDisk, TDuration waitQuotaTime)
             : Response(std::move(resp))
             , NextReadOffset(nextReadOffset)
             , FromDisk(fromDisk)
             , WaitQuotaTime(waitQuotaTime)
         { }
 
-        PersQueue::V1::StreamingReadServerMessage Response;
+        Topic::StreamReadMessage::FromServer Response;
         ui64 NextReadOffset;
         bool FromDisk;
         TDuration WaitQuotaTime;
@@ -287,15 +322,15 @@ struct TEvPQProxy {
     };
 
     struct TEvStartRead : public NActors::TEventLocal<TEvStartRead, EvStartRead> {
-        TEvStartRead(const TPartitionId& partition, ui64 readOffset, ui64 commitOffset, bool verifyReadOffset)
-            : Partition(partition)
+        TEvStartRead(ui64 id, ui64 readOffset, ui64 commitOffset, bool verifyReadOffset)
+            : AssignId(id)
             , ReadOffset(readOffset)
             , CommitOffset(commitOffset)
             , VerifyReadOffset(verifyReadOffset)
             , Generation(0)
         { }
 
-        const TPartitionId Partition;
+        const ui64 AssignId;
         ui64 ReadOffset;
         ui64 CommitOffset;
         bool VerifyReadOffset;
@@ -303,19 +338,19 @@ struct TEvPQProxy {
     };
 
     struct TEvReleased : public NActors::TEventLocal<TEvReleased, EvReleased> {
-        TEvReleased(const TPartitionId& partition)
-            : Partition(partition)
+        TEvReleased(ui64 id)
+            : AssignId(id)
         { }
 
-        const TPartitionId Partition;
+        const ui64 AssignId;
     };
 
     struct TEvGetStatus : public NActors::TEventLocal<TEvGetStatus, EvGetStatus> {
-        TEvGetStatus(const TPartitionId& partition)
-            : Partition(partition)
+        TEvGetStatus(ui64 id)
+            : AssignId(id)
         { }
 
-        const TPartitionId Partition;
+        const ui64 AssignId;
     };
 
 

@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(cms-console-validators)
 target_link_libraries(cms-console-validators PUBLIC
@@ -15,6 +16,7 @@ target_link_libraries(cms-console-validators PUBLIC
   ydb-core-protos
   ydb-core-tablet
   api-protos
+  cpp-deprecated-atomic
 )
 target_sources(cms-console-validators PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/cms/console/validators/core_validators.cpp

@@ -19,6 +19,20 @@ static NProtoBuf::Timestamp MillisecToProtoTimeStamp(ui64 ms) {
     return timestamp;
 }
 
+template <typename TStoragePoolHolder>
+using TAddStoragePoolFunc = Ydb::Table::StoragePool* (TStoragePoolHolder::*)();
+
+template <typename TStoragePoolHolder>
+static void FillStoragePool(TStoragePoolHolder* out, TAddStoragePoolFunc<TStoragePoolHolder> func,
+        const NKikimrSchemeOp::TStorageSettings& in)
+{
+    if (in.GetAllowOtherKinds()) {
+        return;
+    }
+
+    std::invoke(func, out)->set_media(in.GetPreferredPoolKind());
+}
+
 template <typename TYdbProto>
 void FillColumnDescriptionImpl(TYdbProto& out,
         NKikimrMiniKQL::TType& splitKeyType, const NKikimrSchemeOp::TTableDescription& in) {
@@ -341,6 +355,69 @@ bool FillIndexDescription(NKikimrSchemeOp::TIndexedTableCreationConfig& out,
     return true;
 }
 
+void FillChangefeedDescription(Ydb::Table::DescribeTableResult& out,
+        const NKikimrSchemeOp::TTableDescription& in) {
+
+    for (const auto& stream : in.GetCdcStreams()) {
+        auto changefeed = out.add_changefeeds();
+
+        changefeed->set_name(stream.GetName());
+        changefeed->set_state(Ydb::Table::ChangefeedDescription::STATE_ENABLED);
+
+        switch (stream.GetMode()) {
+        case NKikimrSchemeOp::ECdcStreamMode::ECdcStreamModeKeysOnly:
+        case NKikimrSchemeOp::ECdcStreamMode::ECdcStreamModeUpdate:
+        case NKikimrSchemeOp::ECdcStreamMode::ECdcStreamModeNewImage:
+        case NKikimrSchemeOp::ECdcStreamMode::ECdcStreamModeOldImage:
+        case NKikimrSchemeOp::ECdcStreamMode::ECdcStreamModeNewAndOldImages:
+            changefeed->set_mode(static_cast<Ydb::Table::ChangefeedMode::Mode>(stream.GetMode()));
+            break;
+        default:
+            break;
+        }
+
+        switch (stream.GetFormat()) {
+        case NKikimrSchemeOp::ECdcStreamFormat::ECdcStreamFormatJson:
+            changefeed->set_format(Ydb::Table::ChangefeedFormat::FORMAT_JSON);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+bool FillChangefeedDescription(NKikimrSchemeOp::TCdcStreamDescription& out,
+        const Ydb::Table::Changefeed& in, Ydb::StatusIds::StatusCode& status, TString& error) {
+
+    out.SetName(in.name());
+
+    switch (in.mode()) {
+    case Ydb::Table::ChangefeedMode::MODE_KEYS_ONLY:
+    case Ydb::Table::ChangefeedMode::MODE_UPDATES:
+    case Ydb::Table::ChangefeedMode::MODE_NEW_IMAGE:
+    case Ydb::Table::ChangefeedMode::MODE_OLD_IMAGE:
+    case Ydb::Table::ChangefeedMode::MODE_NEW_AND_OLD_IMAGES:
+        out.SetMode(static_cast<NKikimrSchemeOp::ECdcStreamMode>(in.mode()));
+        break;
+    default:
+        status = Ydb::StatusIds::BAD_REQUEST;
+        error = "Invalid changefeed mode";
+        return false;
+    }
+
+    switch (in.format()) {
+    case Ydb::Table::ChangefeedFormat::FORMAT_JSON:
+        out.SetFormat(NKikimrSchemeOp::ECdcStreamFormat::ECdcStreamFormatJson);
+        break;
+    default:
+        status = Ydb::StatusIds::BAD_REQUEST;
+        error = "Invalid changefeed format";
+        return false;
+    }
+
+    return true;
+}
+
 void FillTableStats(Ydb::Table::DescribeTableResult& out,
         const NKikimrSchemeOp::TPathDescription& in, bool withPartitionStatistic) {
 
@@ -406,14 +483,16 @@ void FillStorageSettingsImpl(TYdbProto& out,
             settings->set_store_external_blobs(Ydb::FeatureFlag::DISABLED);
 
             if (family.HasStorageConfig()) {
+                using StorageSettings = Ydb::Table::StorageSettings;
+
                 if (family.GetStorageConfig().HasSysLog()) {
-                    settings->mutable_tablet_commit_log0()->set_media(family.GetStorageConfig().GetSysLog().GetPreferredPoolKind());
+                    FillStoragePool(settings, &StorageSettings::mutable_tablet_commit_log0, family.GetStorageConfig().GetSysLog());
                 }
                 if (family.GetStorageConfig().HasLog()) {
-                    settings->mutable_tablet_commit_log1()->set_media(family.GetStorageConfig().GetLog().GetPreferredPoolKind());
+                    FillStoragePool(settings, &StorageSettings::mutable_tablet_commit_log1, family.GetStorageConfig().GetLog());
                 }
                 if (family.GetStorageConfig().HasExternal()) {
-                    settings->mutable_external()->set_media(family.GetStorageConfig().GetExternal().GetPreferredPoolKind());
+                    FillStoragePool(settings, &StorageSettings::mutable_external, family.GetStorageConfig().GetExternal());
                 }
 
                 const ui32 externalThreshold = family.GetStorageConfig().GetExternalThreshold();
@@ -482,7 +561,7 @@ void FillColumnFamiliesImpl(TYdbProto& out,
         }
 
         if (family.HasStorageConfig() && family.GetStorageConfig().HasData()) {
-            r->mutable_data()->set_media(family.GetStorageConfig().GetData().GetPreferredPoolKind());
+            FillStoragePool(r, &Ydb::Table::ColumnFamily::mutable_data, family.GetStorageConfig().GetData());
         }
 
         if (family.HasColumnCodec()) {
@@ -697,7 +776,8 @@ void FillReadReplicasSettings(Ydb::Table::CreateTableRequest& out,
 }
 
 bool FillTableDescription(NKikimrSchemeOp::TModifyScheme& out,
-        const Ydb::Table::CreateTableRequest& in, Ydb::StatusIds::StatusCode& status, TString& error)
+        const Ydb::Table::CreateTableRequest& in, const TTableProfiles& profiles,
+        Ydb::StatusIds::StatusCode& status, TString& error)
 {
     auto& tableDesc = *out.MutableCreateTable();
 
@@ -706,6 +786,10 @@ bool FillTableDescription(NKikimrSchemeOp::TModifyScheme& out,
     }
 
     tableDesc.MutableKeyColumnNames()->CopyFrom(in.primary_key());
+
+    if (!profiles.ApplyTableProfile(in.profile(), tableDesc, status, error)) {
+        return false;
+    }
 
     TColumnFamilyManager families(tableDesc.MutablePartitionConfig());
     if (in.has_storage_settings() && !families.ApplyStorageSettings(in.storage_settings(), &status, &error)) {

@@ -1,9 +1,10 @@
 #include "skeleton_overload_handler.h"
-#include <ydb/core/blobstorage/base/wilson_events.h>
 #include <ydb/core/blobstorage/vdisk/common/vdisk_pdiskctx.h>
 #include <ydb/core/blobstorage/vdisk/hulldb/base/blobstorage_hullsatisfactionrank.h>
 #include <ydb/core/blobstorage/vdisk/hullop/blobstorage_hull.h>
 #include <ydb/core/util/queue_inplace.h>
+#include <ydb/core/base/wilson.h>
+#include <library/cpp/actors/wilson/wilson_span.h>
 
 namespace NKikimr {
 
@@ -13,13 +14,17 @@ namespace NKikimr {
     class TEmergencyQueue {
         struct TItem {
             std::unique_ptr<IEventHandle> Ev;
+            NWilson::TSpan Span;
 
             TItem() = default;
 
             template<typename T>
             TItem(TAutoPtr<TEventHandle<T>> ev)
                 : Ev(ev.Release())
-            {}
+                , Span(TWilson::VDiskInternals, std::move(Ev->TraceId), "VDisk.Skeleton.EmergencyQueue")
+            {
+                Ev->TraceId = Span.GetTraceId();
+            }
         };
 
         // emergency queue of 'put' events
@@ -96,6 +101,7 @@ namespace NKikimr {
             auto item = Queue.Head();
             Y_VERIFY(item);
             TAutoPtr<IEventHandle> ev = item->Ev.release();
+            item->Span.EndOk();
             Queue.Pop();
             switch (ev->GetTypeRewrite()) {
                 case TEvBlobStorage::EvVMovedPatch: {
@@ -210,30 +216,6 @@ namespace NKikimr {
         return proceedFurther;
     }
 
-    bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVMovedPatch::TPtr &ev, const TActorContext &ctx, IActor *skeleton) {
-        return PostponeEventPrivate(ev, ctx, skeleton);
-    }
-
-    bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVPatchStart::TPtr &ev, const TActorContext &ctx, IActor *skeleton) {
-        return PostponeEventPrivate(ev, ctx, skeleton);
-    }
-
-    bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVPut::TPtr &ev, const TActorContext &ctx, IActor *skeleton) {
-        return PostponeEventPrivate(ev, ctx, skeleton);
-    }
-
-    bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVMultiPut::TPtr &ev, const TActorContext &ctx, IActor *skeleton) {
-        return PostponeEventPrivate(ev, ctx, skeleton);
-    }
-
-    bool TOverloadHandler::PostponeEvent(TEvLocalSyncData::TPtr &ev, const TActorContext &ctx, IActor *skeleton) {
-        return PostponeEventPrivate(ev, ctx, skeleton);
-    }
-
-    bool TOverloadHandler::PostponeEvent(TEvAnubisOsirisPut::TPtr &ev, const TActorContext &ctx, IActor *skeleton) {
-        return PostponeEventPrivate(ev, ctx, skeleton);
-    }
-
     void TOverloadHandler::ToWhiteboard(const TOverloadHandler *this_, NKikimrWhiteboard::TVDiskSatisfactionRank &v) {
         if (this_) {
             this_->DynamicPDiskWeightsManager->ToWhiteboard(v);
@@ -258,14 +240,20 @@ namespace NKikimr {
     }
 
     template <class TEv>
-    inline bool TOverloadHandler::PostponeEventPrivate(TEv &ev, const TActorContext &ctx, IActor *skeleton) {
+    inline bool TOverloadHandler::PostponeEvent(TAutoPtr<TEventHandle<TEv>> &ev) {
         if (DynamicPDiskWeightsManager->StopPuts() || !EmergencyQueue->Empty()) {
-            WILSON_TRACE_FROM_ACTOR(ctx, *skeleton, &ev->TraceId, EvPutIntoEmergQueue);
             EmergencyQueue->Push(ev);
             return true;
         } else {
             return false;
         }
     }
+
+    template bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVMovedPatch::TPtr &ev);
+    template bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVPatchStart::TPtr &ev);
+    template bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVPut::TPtr &ev);
+    template bool TOverloadHandler::PostponeEvent(TEvBlobStorage::TEvVMultiPut::TPtr &ev);
+    template bool TOverloadHandler::PostponeEvent(TEvLocalSyncData::TPtr &ev);
+    template bool TOverloadHandler::PostponeEvent(TEvAnubisOsirisPut::TPtr &ev);
 
 } // NKikimr

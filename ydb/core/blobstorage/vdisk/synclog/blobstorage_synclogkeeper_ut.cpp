@@ -73,10 +73,10 @@ namespace NKikimr {
         TIntrusivePtr<TVDiskContext> vctx = new TVDiskContext(
                 TActorId(),
                 groupInfo.PickTopology(),
-                new NMonitoring::TDynamicCounters(),
+                new ::NMonitoring::TDynamicCounters(),
                 TVDiskID(),
                 nullptr,
-                TPDiskCategory::DEVICE_TYPE_UNKNOWN);
+                NPDisk::DEVICE_TYPE_UNKNOWN);
 
         const ui64 pdiskGuid = 19283489374;
         const ui32 chunkSize = 512u << 10u;

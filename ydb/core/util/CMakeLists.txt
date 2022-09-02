@@ -6,11 +6,14 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(btree_benchmark)
+add_subdirectory(ut)
 
 add_library(ydb-core-util)
 target_link_libraries(ydb-core-util PUBLIC
   contrib-libs-cxxsupp
   yutil
+  cpp-actors-core
   actors-interconnect-mock
   cpp-actors-util
   cpp-containers-stack_vector
@@ -21,6 +24,7 @@ target_link_libraries(ydb-core-util PUBLIC
   library-cpp-random_provider
   ydb-core-base
   ydb-core-protos
+  cpp-deprecated-atomic
 )
 target_sources(ydb-core-util PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/util/address_classifier.cpp

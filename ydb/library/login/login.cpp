@@ -1,5 +1,4 @@
-#undef __STDC_FORMAT_MACROS
-#include <contrib/libs/jwt-cpp/jwt.h>
+#include <contrib/libs/jwt-cpp/include/jwt-cpp/jwt.h>
 #include <library/cpp/digest/argonish/argon2.h>
 #include <library/cpp/string_utils/base64/base64.h>
 #include <library/cpp/json/json_value.h>
@@ -314,7 +313,7 @@ TLoginProvider::TValidateTokenResponse TLoginProvider::ValidateToken(const TVali
             auto verifier = jwt::verify()
                 .allow_algorithm(jwt::algorithm::ps256(key->PublicKey));
             if (Audience) {
-                verifier.with_audience({Audience});
+                verifier.with_audience(std::set<std::string>({Audience}));
             }
             verifier.verify(decoded_token);
             response.User = decoded_token.get_subject();

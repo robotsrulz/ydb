@@ -20,7 +20,7 @@ static void SendTransactionStatus(const TActorId &proxy, TEvTxProxy::TEvProposeT
     ctx.Send(proxy, new TEvTxProxy::TEvProposeTransactionStatus(status, txid, stepId));
 }
 
-static TAutoPtr<TTransactionProposal> MakeTransactionProposal(TEvTxProxy::TEvProposeTransaction::TPtr &ev, NMonitoring::TDynamicCounters::TCounterPtr &counter) {
+static TAutoPtr<TTransactionProposal> MakeTransactionProposal(TEvTxProxy::TEvProposeTransaction::TPtr &ev, ::NMonitoring::TDynamicCounters::TCounterPtr &counter) {
     const TActorId &sender = ev->Sender;
     const NKikimrTx::TEvProposeTransaction &record = ev->Get()->Record;
 
@@ -368,10 +368,8 @@ void TTxCoordinator::TryInitMonCounters(const TActorContext &ctx) {
     MonCounters.StepPlannedTx = MonCounters.Coordinator->GetCounter("Step/PlannedTx", true);
     MonCounters.StepDeclinedNoSpaceTx = MonCounters.Coordinator->GetCounter("Step/DeclinedNoSpaceTx", true);
 
-    MonCounters.LegacyTxFromReceiveToPlan.Init(MonCounters.Coordinator.Get(), "TxFromReceiveToPlan", "ms", 1, 20);
     MonCounters.TxFromReceiveToPlan = MonCounters.Coordinator->GetHistogram(
         "TxFromReceiveToPlanMs", NMonitoring::ExponentialHistogram(20, 2, 1));
-    MonCounters.LegacyTxPlanLatency.Init(MonCounters.Coordinator.Get(), "TxPlanLatency", "ms", 1, 20);
     MonCounters.TxPlanLatency = MonCounters.Coordinator->GetHistogram(
         "TxPlanLatencyMs", NMonitoring::ExponentialHistogram(20, 2, 1));
 }

@@ -34,7 +34,7 @@ namespace NKikimr {
             Y_UNUSED(icb);
         }
 
-        virtual void Update() = 0;
+        virtual void Update(TDuration interval) = 0;
 
         virtual void Dump(IOutputStream& out, const TString& relPath) = 0;
 
@@ -46,5 +46,5 @@ namespace NKikimr {
 
     NActors::IActor* CreateMemProfMonitor(
         ui32 intervalSec,
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters);
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters);
 }

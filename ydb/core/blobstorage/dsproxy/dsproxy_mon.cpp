@@ -5,9 +5,9 @@ static const TVector<float> Percentiles4 = {0.5f, 0.9f, 0.95f, 1.0f};
 
 namespace NKikimr {
 
-TBlobStorageGroupProxyMon::TBlobStorageGroupProxyMon(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters,
-        const TIntrusivePtr<NMonitoring::TDynamicCounters>& percentileCounters,
-        const TIntrusivePtr<NMonitoring::TDynamicCounters>& overviewCounters,
+TBlobStorageGroupProxyMon::TBlobStorageGroupProxyMon(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters,
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& percentileCounters,
+        const TIntrusivePtr<::NMonitoring::TDynamicCounters>& overviewCounters,
         const TIntrusivePtr<TBlobStorageGroupInfo>& info,
         const TIntrusivePtr<TDsProxyNodeMon> &nodeMon,
         bool constructLimited)
@@ -47,6 +47,7 @@ TBlobStorageGroupProxyMon::TBlobStorageGroupProxyMon(const TIntrusivePtr<NMonito
     EventStopPutBatching = EventGroup->GetCounter("EvStopPutBatching", true);
     EventStopGetBatching = EventGroup->GetCounter("EvStopGetBatching", true);
     EventPatch = EventGroup->GetCounter("EvPatch", true);
+    EventAssimilate = EventGroup->GetCounter("EvAssimilate", true);
 
     PutsSentViaPutBatching = EventGroup->GetCounter("PutsSentViaPutBatching", true);
     PutBatchesSent = EventGroup->GetCounter("PutBatchesSent", true);
@@ -72,6 +73,7 @@ TBlobStorageGroupProxyMon::TBlobStorageGroupProxyMon(const TIntrusivePtr<NMonito
     ActiveCollectGarbage = ActiveRequestsGroup->GetCounter("ActiveCollectGarbage");
     ActiveStatus = ActiveRequestsGroup->GetCounter("ActiveStatus");
     ActivePatch = ActiveRequestsGroup->GetCounter("ActivePatch");
+    ActiveAssimilate = ActiveRequestsGroup->GetCounter("ActiveAssimilate");
 
     // special patch counters
     VPatchContinueFailed = ActiveRequestsGroup->GetCounter("VPatchContinueFailed");
@@ -101,6 +103,7 @@ TBlobStorageGroupProxyMon::TBlobStorageGroupProxyMon(const TIntrusivePtr<NMonito
     RespStatCollectGarbage.emplace(respStatGroup->GetSubgroup("request", "collectGarbage"));
     RespStatStatus.emplace(respStatGroup->GetSubgroup("request", "status"));
     RespStatPatch.emplace(respStatGroup->GetSubgroup("request", "patch"));
+    RespStatAssimilate.emplace(respStatGroup->GetSubgroup("request", "assimilate"));
 }
 
 void TBlobStorageGroupProxyMon::BecomeFull() {
@@ -113,7 +116,7 @@ void TBlobStorageGroupProxyMon::BecomeFull() {
 
         PutResponseTime.Initialize(ResponseGroup, "event", "put", "Response in millisec", Percentiles4);
 
-        TIntrusivePtr<NMonitoring::TDynamicCounters> putTabletLogGroup =
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> putTabletLogGroup =
             ResponseGroup->GetSubgroup("event", "putTabletLog");
 
         PutTabletLogResponseTime.Initialize(ResponseGroup, "event", "putTabletLogAll", "ms", Percentiles1);

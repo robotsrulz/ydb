@@ -48,7 +48,8 @@ public:
             TAutoPtr<TLogBackend> logBackend = {},
             bool enableYq = false,
             TAppPrepare::TFnReg udfFrFactory = nullptr,
-            std::function<void(TServerSettings& settings)> builder = nullptr)
+            std::function<void(TServerSettings& settings)> builder = nullptr,
+            ui16 dynamicNodeCount = 2, ui16 nodeCount = 0)
     {
         ui16 port = PortManager.GetPort(2134);
         ui16 grpc = PortManager.GetPort(2135);
@@ -56,7 +57,9 @@ public:
         ServerSettings->SetGrpcPort(grpc);
         ServerSettings->SetLogBackend(logBackend);
         ServerSettings->SetDomainName("Root");
-        ServerSettings->SetDynamicNodeCount(2);
+        ServerSettings->SetDynamicNodeCount(dynamicNodeCount);
+        if (nodeCount > 0)
+            ServerSettings->SetNodeCount(nodeCount);
         if (TestSettings::PrecreatePools) {
             ServerSettings->AddStoragePool("ssd");
             ServerSettings->AddStoragePool("hdd");
@@ -102,6 +105,8 @@ public:
         if (enableYq) {
             Server_->GetRuntime()->SetLogPriority(NKikimrServices::YQL_PROXY, NActors::NLog::PRI_DEBUG);
             Server_->GetRuntime()->SetLogPriority(NKikimrServices::KQP_COMPUTE, NActors::NLog::PRI_DEBUG);
+            Server_->GetRuntime()->SetLogPriority(NKikimrServices::YQ_CONTROL_PLANE_STORAGE, NActors::NLog::PRI_DEBUG);
+            Server_->GetRuntime()->SetLogPriority(NKikimrServices::YQ_CONTROL_PLANE_PROXY, NActors::NLog::PRI_DEBUG);
         }
 
         NGrpc::TServerOptions grpcOption;
@@ -186,7 +191,7 @@ struct TTestOlap {
             { "uid", NYdb::EPrimitiveType::Utf8 },
             { "level", NYdb::EPrimitiveType::Int32 },
             { "message", NYdb::EPrimitiveType::Utf8 },
-            { "json_payload", NYdb::EPrimitiveType::String },
+            { "json_payload", NYdb::EPrimitiveType::JsonDocument },
             { "ingested_at", NYdb::EPrimitiveType::Timestamp },
             { "saved_at", NYdb::EPrimitiveType::Timestamp },
             { "request_id", NYdb::EPrimitiveType::Utf8 }
@@ -206,7 +211,6 @@ struct TTestOlap {
                             const TString& storeName = StoreName, const TString& tableName = TableName) {
         TString tableDescr = Sprintf(R"(
             Name: "%s"
-            #MetaShardCount: 1
             ColumnShardCount: 4
             SchemaPresets {
                 Name: "default"
@@ -217,7 +221,7 @@ struct TTestOlap {
                     Columns { Name: "uid" Type: "Utf8" }
                     Columns { Name: "level" Type: "Int32" }
                     Columns { Name: "message" Type: "Utf8" }
-                    Columns { Name: "json_payload" Type: "Json" }
+                    Columns { Name: "json_payload" Type: "JsonDocument" }
                     Columns { Name: "ingested_at" Type: "Timestamp" }
                     Columns { Name: "saved_at" Type: "Timestamp" }
                     Columns { Name: "request_id" Type: "Utf8" }
@@ -231,7 +235,7 @@ struct TTestOlap {
         annoyingClient.SetSecurityToken("root@builtin");
         NMsgBusProxy::EResponseStatus status = annoyingClient.CreateOlapStore("/Root", tableDescr);
         UNIT_ASSERT_VALUES_EQUAL(status, NMsgBusProxy::EResponseStatus::MSTATUS_OK);
-        status = annoyingClient.CreateOlapTable("/Root", Sprintf(R"(
+        status = annoyingClient.CreateColumnTable("/Root", Sprintf(R"(
             Name: "%s/%s"
             ColumnShardCount : %d
             Sharding {
@@ -276,7 +280,7 @@ struct TTestOlap {
             Y_VERIFY(NArrow::Append<arrow::StringType>(*builders[3], s));
             Y_VERIFY(NArrow::Append<arrow::Int32Type>(*builders[4], i));
             Y_VERIFY(NArrow::Append<arrow::StringType>(*builders[5], s + "str"));
-            Y_VERIFY(NArrow::Append<arrow::BinaryType>(*builders[6], s + "bin"));
+            Y_VERIFY(NArrow::Append<arrow::BinaryType>(*builders[6], "{ \"value\": " + s + " }"));
             Y_VERIFY(NArrow::Append<arrow::StringType>(*builders[9], s + "str"));
         }
 

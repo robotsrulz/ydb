@@ -6,12 +6,14 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_executable(validation)
 target_link_libraries(validation PUBLIC
   contrib-libs-cxxsupp
   yutil
-  library-cpp-lfalloc
+  cpp-malloc-tcmalloc
+  libs-tcmalloc-no_percpu_cache
   library-cpp-cpuid_check
   contrib-libs-protoc
   api-protos-annotations

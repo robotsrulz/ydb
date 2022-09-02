@@ -70,10 +70,11 @@ void EnsureScriptSpecificTypes(
         const TTypeEnvironment& env)
 {
     switch (scriptType) {
+        case EScriptType::Lua:
+            return TLuaTypeChecker().Walk(funcType, env);
         case EScriptType::Python:
         case EScriptType::Python2:
         case EScriptType::Python3:
-        case EScriptType::Lua:
         case EScriptType::ArcPython:
         case EScriptType::ArcPython2:
         case EScriptType::ArcPython3:
@@ -243,8 +244,8 @@ std::string_view ScriptTypeAsStr(EScriptType type) {
 EScriptType ScriptTypeFromStr(std::string_view str) {
     TString lowerStr = TString(str);
     lowerStr.to_lower();
-#define MKQL_SCRIPT_TYPE_FROM_STR(name, value, lowerName) \
-    if (lowerStr == #lowerName) return EScriptType::name;
+#define MKQL_SCRIPT_TYPE_FROM_STR(name, value, lowerName, allowSuffix) \
+    if ((allowSuffix && lowerStr.StartsWith(#lowerName)) || lowerStr == #lowerName) return EScriptType::name;
 
     MKQL_SCRIPT_TYPES(MKQL_SCRIPT_TYPE_FROM_STR)
 #undef MKQL_SCRIPT_TYPE_FROM_STR
@@ -256,6 +257,13 @@ bool IsCustomPython(EScriptType type) {
     return type == EScriptType::CustomPython ||
         type == EScriptType::CustomPython2 ||
         type == EScriptType::CustomPython3;
+}
+
+bool IsSystemPython(EScriptType type) {
+    return type == EScriptType::SystemPython2
+        || type == EScriptType::SystemPython3
+        || type == EScriptType::Python
+        || type == EScriptType::Python2;
 }
 
 EScriptType CanonizeScriptType(EScriptType type) {
@@ -3810,19 +3818,21 @@ TRuntimeNode TProgramBuilder::TypedUdf(
 }
 
 TRuntimeNode TProgramBuilder::ScriptUdf(
-        EScriptType scriptType,
-        const std::string_view& funcName,
-        TType* funcType,
-        TRuntimeNode script,
-        const std::string_view& file,
-        ui32 row,
-        ui32 column)
+    const std::string_view& moduleName,
+    const std::string_view& funcName,
+    TType* funcType,
+    TRuntimeNode script,
+    const std::string_view& file,
+    ui32 row,
+    ui32 column)
 {
     MKQL_ENSURE(funcType, "UDF callable type must not be empty");
     MKQL_ENSURE(funcType->IsCallable(), "type must be callable");
+    auto scriptType = NKikimr::NMiniKQL::ScriptTypeFromStr(moduleName);
+    MKQL_ENSURE(scriptType != EScriptType::Unknown, "unknown script type '" << moduleName << "'");
     EnsureScriptSpecificTypes(scriptType, static_cast<TCallableType*>(funcType), Env);
 
-    auto scriptTypeStr = ScriptTypeAsStr(CanonizeScriptType(scriptType));
+    auto scriptTypeStr = IsCustomPython(scriptType) ? moduleName : ScriptTypeAsStr(CanonizeScriptType(scriptType));
 
     TStringBuilder name;
     name.reserve(scriptTypeStr.size() + funcName.size() + 1);
@@ -5034,7 +5044,7 @@ TRuntimeNode TProgramBuilder::Replicate(TRuntimeNode item, TRuntimeNode count, c
     return TRuntimeNode(callableBuilder.Build(), false);
 }
 
-TRuntimeNode TProgramBuilder::PgConst(TPgType* pgType, const std::string_view& value) {
+TRuntimeNode TProgramBuilder::PgConst(TPgType* pgType, const std::string_view& value, TRuntimeNode typeMod) {
     if constexpr (RuntimeVersion < 30U) {
         THROW yexception() << "Runtime version (" << RuntimeVersion << ") too old for " << __func__;
     }
@@ -5042,6 +5052,10 @@ TRuntimeNode TProgramBuilder::PgConst(TPgType* pgType, const std::string_view& v
     TCallableBuilder callableBuilder(Env, __func__, pgType);
     callableBuilder.Add(NewDataLiteral(pgType->GetTypeId()));
     callableBuilder.Add(NewDataLiteral<NUdf::EDataSlot::String>(value));
+    if (typeMod) {
+        callableBuilder.Add(typeMod);
+    }
+
     return TRuntimeNode(callableBuilder.Build(), false);
 }
 
@@ -5062,13 +5076,30 @@ TRuntimeNode TProgramBuilder::PgResolvedCall(bool useContext, const std::string_
     return TRuntimeNode(callableBuilder.Build(), false);
 }
 
-TRuntimeNode TProgramBuilder::PgCast(TRuntimeNode input, TType* returnType) {
+TRuntimeNode TProgramBuilder::PgArray(const TArrayRef<const TRuntimeNode>& args, TType* returnType) {
+    if constexpr (RuntimeVersion < 30U) {
+        THROW yexception() << "Runtime version (" << RuntimeVersion << ") too old for " << __func__;
+    }
+
+    TCallableBuilder callableBuilder(Env, __func__, returnType);
+    for (const auto& arg : args) {
+        callableBuilder.Add(arg);
+    }
+
+    return TRuntimeNode(callableBuilder.Build(), false);
+}
+
+TRuntimeNode TProgramBuilder::PgCast(TRuntimeNode input, TType* returnType, TRuntimeNode typeMod) {
     if constexpr (RuntimeVersion < 30U) {
         THROW yexception() << "Runtime version (" << RuntimeVersion << ") too old for " << __func__;
     }
 
     TCallableBuilder callableBuilder(Env, __func__, returnType);
     callableBuilder.Add(input);
+    if (typeMod) {
+        callableBuilder.Add(typeMod);
+    }
+
     return TRuntimeNode(callableBuilder.Build(), false);
 }
 
@@ -5123,6 +5154,10 @@ bool CanExportType(TType* type, const TTypeEnvironment& env) {
             break;
 
         case TType::EKind::Data:
+            node->SetCookie(1);
+            break;
+
+        case TType::EKind::Pg:
             node->SetCookie(1);
             break;
 

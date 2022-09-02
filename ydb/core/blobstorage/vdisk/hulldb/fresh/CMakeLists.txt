@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(vdisk-hulldb-fresh)
 target_link_libraries(vdisk-hulldb-fresh PUBLIC
@@ -13,6 +14,7 @@ target_link_libraries(vdisk-hulldb-fresh PUBLIC
   yutil
   ydb-core-base
   vdisk-hulldb-base
+  blobstorage-vdisk-protos
   ydb-core-protos
 )
 target_sources(vdisk-hulldb-fresh PRIVATE

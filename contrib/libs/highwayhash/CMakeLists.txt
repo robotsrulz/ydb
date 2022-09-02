@@ -6,12 +6,13 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(arch)
 
 add_library(contrib-libs-highwayhash)
-target_include_directories(contrib-libs-highwayhash PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/libs/highwayhash
+target_compile_options(contrib-libs-highwayhash PRIVATE
+  -Wno-everything
 )
-target_include_directories(contrib-libs-highwayhash PRIVATE
+target_include_directories(contrib-libs-highwayhash PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/libs/highwayhash
 )
 target_link_libraries(contrib-libs-highwayhash PUBLIC

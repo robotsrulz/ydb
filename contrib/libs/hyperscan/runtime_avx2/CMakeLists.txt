@@ -19,6 +19,8 @@ target_compile_options(libs-hyperscan-runtime_avx2 PRIVATE
   -DHAVE_AVX
   -mavx2
   -mfma
+  -mbmi
+  -mbmi2
   -DHAVE_AVX2
   -DCrc32c_ComputeBuf=avx2_Crc32c_ComputeBuf
   -DblockInitSufPQ=avx2_blockInitSufPQ
@@ -428,6 +430,7 @@ target_compile_options(libs-hyperscan-runtime_avx2 PRIVATE
   -DstreamInitSufPQ=avx2_streamInitSufPQ
   -DtruffleExec=avx2_truffleExec
   -Dvbs_mask_data=avx2_vbs_mask_data
+  -Wno-everything
 )
 target_include_directories(libs-hyperscan-runtime_avx2 PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/hyperscan

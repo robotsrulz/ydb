@@ -16,6 +16,7 @@ TCommandStock::TCommandStock()
     : TClientCommandTree("stock", {}, "YDB stock workload")
 {
     AddCommand(std::make_unique<TCommandStockInit>());
+    AddCommand(std::make_unique<TCommandStockClean>());
     AddCommand(std::make_unique<TCommandStockRun>());
 }
 
@@ -50,7 +51,7 @@ void TCommandStockInit::Parse(TConfig& config) {
 
 int TCommandStockInit::Run(TConfig& config) {
     if (ProductCount > 500'000) {
-        throw TMissUseException() << "Product count must be in range 1..500 000." << Endl;
+        throw TMisuseException() << "Product count must be in range 1..500 000." << Endl;
     }
 
     Driver = std::make_unique<NYdb::TDriver>(CreateDriver(config));
@@ -64,35 +65,33 @@ int TCommandStockInit::Run(TConfig& config) {
     params.PartitionsByLoad = PartitionsByLoad;
 
     NYdbWorkload::TWorkloadFactory factory;
-    auto workloadGen = factory.GetWorkloadQueryGenerator("stock", &params);
-    if (workloadGen.get() == nullptr) {
-        throw TMissUseException() << "Invalid path to database." << Endl;
-    }
+    auto workloadGen = factory.GetWorkloadQueryGenerator(NYdbWorkload::EWorkload::STOCK, &params);
 
-    auto session = GetSession();
-    auto result = session.ExecuteSchemeQuery(workloadGen->GetDDLQueries()).GetValueSync();
-    ThrowOnError(result);
+    return InitTables(workloadGen);
+}
 
-    auto queryInfoList = workloadGen->GetInitialData();
-    for (auto queryInfo : queryInfoList) {
-        auto prepareResult = session.PrepareDataQuery(queryInfo.Query.c_str()).GetValueSync();
-        if (!prepareResult.IsSuccess()) {
-            Cerr << "Prepare failed: " << prepareResult.GetIssues().ToString() << Endl
-                << "Query:\n" << queryInfo.Query << Endl;
-            return EXIT_FAILURE;
-        }
+TCommandStockClean::TCommandStockClean()
+    : TWorkloadCommand("clean", {}, "drop tables created in init phase") {}
 
-        auto dataQuery = prepareResult.GetQuery();
-        auto result = dataQuery.Execute(NYdb::NTable::TTxControl::BeginTx(NYdb::NTable::TTxSettings::SerializableRW()).CommitTx(),
-                                        std::move(queryInfo.Params)).GetValueSync();
-        if (!result.IsSuccess()) {
-            Cerr << "Query execution failed: " << result.GetIssues().ToString() << Endl
-                << "Query:\n" << queryInfo.Query << Endl;
-            return EXIT_FAILURE;
-        }
-    }
+void TCommandStockClean::Config(TConfig& config) {
+    TWorkloadCommand::Config(config);
+    config.SetFreeArgsNum(0);
+}
 
-    return EXIT_SUCCESS;
+void TCommandStockClean::Parse(TConfig& config) {
+    TClientCommand::Parse(config);
+}
+
+int TCommandStockClean::Run(TConfig& config) {
+    Driver = std::make_unique<NYdb::TDriver>(CreateDriver(config));
+    TableClient = std::make_unique<NTable::TTableClient>(*Driver);
+    NYdbWorkload::TStockWorkloadParams params;
+    params.DbPath = config.Database;
+
+    NYdbWorkload::TWorkloadFactory factory;
+    auto workloadGen = factory.GetWorkloadQueryGenerator(NYdbWorkload::EWorkload::STOCK, &params);
+
+    return CleanTables(workloadGen);
 }
 
 TCommandStockRun::TCommandStockRun()
@@ -106,7 +105,7 @@ TCommandStockRun::TCommandStockRun()
 }
 
 TCommandStockRunInsertRandomOrder::TCommandStockRunInsertRandomOrder()
-    : TWorkloadCommand("insertRandomOrder", {}, "Inserts orders with random ID")
+    : TWorkloadCommand("add-rand-order", {}, "Inserts orders with random ID without their processing")
     , ProductCount(0)
 {}
 
@@ -131,16 +130,13 @@ int TCommandStockRunInsertRandomOrder::Run(TConfig& config) {
     params.ProductCount = ProductCount;
 
     NYdbWorkload::TWorkloadFactory factory;
-    auto workloadGen = factory.GetWorkloadQueryGenerator("stock", &params);
-    if (workloadGen.get() == nullptr) {
-        throw TMissUseException() << "Invalid path to database." << Endl;
-    }
+    auto workloadGen = factory.GetWorkloadQueryGenerator(NYdbWorkload::EWorkload::STOCK, &params);
 
     return RunWorkload(workloadGen, static_cast<int>(NYdbWorkload::TStockWorkloadGenerator::EType::InsertRandomOrder));
 }
 
 TCommandStockRunSubmitRandomOrder::TCommandStockRunSubmitRandomOrder()
-    : TWorkloadCommand("submitRandomOrder", {}, "Submit random orders")
+    : TWorkloadCommand("put-rand-order", {}, "Submit random orders with processing")
     , ProductCount(0)
 {}
 
@@ -165,16 +161,13 @@ int TCommandStockRunSubmitRandomOrder::Run(TConfig& config) {
     params.ProductCount = ProductCount;
 
     NYdbWorkload::TWorkloadFactory factory;
-    auto workloadGen = factory.GetWorkloadQueryGenerator("stock", &params);
-    if (workloadGen.get() == nullptr) {
-        throw TMissUseException() << "Invalid path to database." << Endl;
-    }
+    auto workloadGen = factory.GetWorkloadQueryGenerator(NYdbWorkload::EWorkload::STOCK, &params);
 
     return RunWorkload(workloadGen, static_cast<int>(NYdbWorkload::TStockWorkloadGenerator::EType::SubmitRandomOrder));
 }
 
 TCommandStockRunSubmitSameOrder::TCommandStockRunSubmitSameOrder()
-    : TWorkloadCommand("submitSameOrder", {}, "Submit orders with same products")
+    : TWorkloadCommand("put-same-order", {}, "Submit orders with same products with processing")
     , ProductCount(0)
 {}
 
@@ -199,16 +192,13 @@ int TCommandStockRunSubmitSameOrder::Run(TConfig& config) {
     params.ProductCount = ProductCount;
 
     NYdbWorkload::TWorkloadFactory factory;
-    auto workloadGen = factory.GetWorkloadQueryGenerator("stock", &params);
-    if (workloadGen.get() == nullptr) {
-        throw TMissUseException() << "Invalid path to database." << Endl;
-    }
+    auto workloadGen = factory.GetWorkloadQueryGenerator(NYdbWorkload::EWorkload::STOCK, &params);
 
     return RunWorkload(workloadGen, static_cast<int>(NYdbWorkload::TStockWorkloadGenerator::EType::SubmitSameOrder));
 }
 
 TCommandStockRunGetRandomCustomerHistory::TCommandStockRunGetRandomCustomerHistory()
-    : TWorkloadCommand("getRandomCustomerHistory", {}, "Selects orders of random customer")
+    : TWorkloadCommand("rand-user-hist", {}, "Selects orders of random customer")
     , Limit(0)
 {}
 
@@ -233,16 +223,12 @@ int TCommandStockRunGetRandomCustomerHistory::Run(TConfig& config) {
     params.Limit = Limit;
 
     NYdbWorkload::TWorkloadFactory factory;
-    auto workloadGen = factory.GetWorkloadQueryGenerator("stock", &params);
-    if (workloadGen.get() == nullptr) {
-        throw TMissUseException() << "Invalid path to database." << Endl;
-    }
-
+    auto workloadGen = factory.GetWorkloadQueryGenerator(NYdbWorkload::EWorkload::STOCK, &params);
     return RunWorkload(workloadGen, static_cast<int>(NYdbWorkload::TStockWorkloadGenerator::EType::GetRandomCustomerHistory));
 }
 
 TCommandStockRunGetCustomerHistory::TCommandStockRunGetCustomerHistory()
-    : TWorkloadCommand("getCustomerHistory", {}, "Selects orders of 10000th customer")
+    : TWorkloadCommand("user-hist", {}, "Selects orders of 10000th customer")
     , Limit(0)
 {}
 
@@ -267,10 +253,7 @@ int TCommandStockRunGetCustomerHistory::Run(TConfig& config) {
     params.Limit = Limit;
 
     NYdbWorkload::TWorkloadFactory factory;
-    auto workloadGen = factory.GetWorkloadQueryGenerator("stock", &params);
-    if (workloadGen.get() == nullptr) {
-        throw TMissUseException() << "Invalid path to database." << Endl;
-    }
+    auto workloadGen = factory.GetWorkloadQueryGenerator(NYdbWorkload::EWorkload::STOCK, &params);
 
     return RunWorkload(workloadGen, static_cast<int>(NYdbWorkload::TStockWorkloadGenerator::EType::GetCustomerHistory));
 }

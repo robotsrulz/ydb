@@ -266,7 +266,9 @@ void TMirrorer::Handle(TEvPQ::TEvUpdateCounters::TPtr& /*ev*/, const TActorConte
             << ", messages in write request " << WriteInFlight.size()
             << ", queue to write: " << Queue.size());
         LOG_NOTICE_S(ctx, NKikimrServices::PQ_MIRRORER, MirrorerDescription()
-            << "[STATE] read futures inflight  " << ReadFuturesInFlight << ", last id=" << ReadFeatureId);
+            << "[STATE] wait new reader event=" << WaitNextReaderEventInFlight
+            << ", last received event time=" << LastReadEventTime
+            << ", read futures inflight  " << ReadFuturesInFlight << ", last id=" << ReadFeatureId);
         if (!ReadFeatures.empty()) { 
             const auto& oldest = *ReadFeatures.begin();
             const auto& info = oldest.second;
@@ -284,6 +286,13 @@ void TMirrorer::Handle(TEvPQ::TEvUpdateCounters::TPtr& /*ev*/, const TActorConte
             InitTimeoutCounter.Inc(1);
         }
         StartInit(ctx);
+        return;
+    }
+    if (ReadSession && LastReadEventTime != TInstant::Zero() && ctx.Now() - LastReadEventTime > RECEIVE_READ_EVENT_TIMEOUT) {
+        ProcessError(ctx, TStringBuilder() << "receive read event timeout, last event was at " << LastReadEventTime
+            << " (" << ctx.Now() - LastReadEventTime << "). Read session will be recreated.");
+        ScheduleConsumerCreation(ctx);
+        return;
     }
     if (WriteRequestInFlight && WriteRequestTimestamp + WRITE_TIMEOUT < ctx.Now()) {
         LOG_ERROR_S(ctx, NKikimrServices::PQ_MIRRORER, MirrorerDescription() << " write request was sent at "
@@ -292,12 +301,13 @@ void TMirrorer::Handle(TEvPQ::TEvUpdateCounters::TPtr& /*ev*/, const TActorConte
             WriteTimeoutCounter.Inc(1);
         }
         ctx.Send(TabletActor, new TEvents::TEvPoisonPill());
+        return;
     }
 
     DoProcessNextReaderEvent(ctx, true);  // LOGBROKER-7430
 }
 
-void TMirrorer::HandleChangeConfig(TEvPQ::TEvChangeConfig::TPtr& ev, const TActorContext& ctx) {
+void TMirrorer::HandleChangeConfig(TEvPQ::TEvChangePartitionConfig::TPtr& ev, const TActorContext& ctx) {
     bool equalConfigs = google::protobuf::util::MessageDifferencer::Equals(
         Config,
         ev->Get()->Config.GetPartitionConfig().GetMirrorFrom()
@@ -469,6 +479,7 @@ void TMirrorer::ScheduleConsumerCreation(const TActorContext& ctx) {
     ReadFuturesInFlight = 0;
     ReadFeatures.clear();
     WaitNextReaderEventInFlight = false;
+    LastReadEventTime = TInstant::Zero();
     
     Become(&TThis::StateInitConsumer);
 
@@ -535,6 +546,7 @@ void TMirrorer::DoProcessNextReaderEvent(const TActorContext& ctx, bool wakeup) 
         return;
     }
     TMaybe<NYdb::NPersQueue::TReadSessionEvent::TEvent> event = ReadSession->GetEvent(false);
+    LOG_DEBUG_S(ctx, NKikimrServices::PQ_MIRRORER, MirrorerDescription() << " got next reader event: " << bool(event)); 
 
     if (wakeup && !event) {
         return;
@@ -545,6 +557,7 @@ void TMirrorer::DoProcessNextReaderEvent(const TActorContext& ctx, bool wakeup) 
         StartWaitNextReaderEvent(ctx);
         return;
     }
+    LastReadEventTime = ctx.Now();
 
     if (auto* dataEvent = std::get_if<TPersQueueReadEvent::TDataReceivedEvent>(&event.GetRef())) {
         AddMessagesToQueue(std::move(dataEvent->GetCompressedMessages()));
@@ -572,7 +585,7 @@ void TMirrorer::DoProcessNextReaderEvent(const TActorContext& ctx, bool wakeup) 
            );
         }
 
-        createStream->Confirm(OffsetToRead, OffsetToRead);
+        createStream->Confirm(OffsetToRead);
         RequestSourcePartitionStatus();
     } else if (auto* destroyStream = std::get_if<TPersQueueReadEvent::TDestroyPartitionStreamEvent>(&event.GetRef())) {
         destroyStream->Confirm();

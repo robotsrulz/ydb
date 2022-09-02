@@ -150,42 +150,6 @@ bool PrepareSchemaPreset(NKikimrSchemeOp::TColumnTableSchemaPreset& proto, TOlap
     return true;
 }
 
-#if 0
-bool PrepareTtlSettingsPreset(
-        NKikimrSchemeOp::TColumnTableTtlSettingsPreset& proto, TOlapStoreInfo& store, size_t protoIndex,
-        TEvSchemeShard::EStatus& status, TString& errStr)
-{
-    if (proto.GetName().empty()) {
-        status = NKikimrScheme::StatusSchemeError;
-        errStr = Sprintf("Ttl settings preset name cannot be empty");
-        return false;
-    }
-    if (!proto.HasId()) {
-        proto.SetId(store.Description.GetNextTtlSettingsPresetId());
-        store.Description.SetNextTtlSettingsPresetId(proto.GetId() + 1);
-    } else if (proto.GetId() <= 0 || proto.GetId() >= store.Description.GetNextTtlSettingsPresetId()) {
-        status = NKikimrScheme::StatusSchemeError;
-        errStr = Sprintf("Ttl settings preset id is incorrect");
-        return false;
-    }
-    if (store.TtlSettingsPresets.contains(proto.GetId()) ||
-        store.TtlSettingsPresetByName.contains(proto.GetName()))
-    {
-        status = NKikimrScheme::StatusSchemeError;
-        errStr = Sprintf("Duplicate ttl settings preset %" PRIu32 " with name '%s'", proto.GetId(), proto.GetName().c_str());
-        return false;
-    }
-    auto& preset = store.TtlSettingsPresets[proto.GetId()];
-    preset.Id = proto.GetId();
-    preset.Name = proto.GetName();
-    preset.ProtoIndex = protoIndex;
-    store.TtlSettingsPresetByName[preset.Name] = preset.Id;
-
-    proto.MutableTtlSettings()->SetVersion(1);
-
-    return true;
-}
-#endif
 TOlapStoreInfo::TPtr CreateOlapStore(const NKikimrSchemeOp::TColumnStoreDescription& opSrc,
                                     TEvSchemeShard::EStatus& status, TString& errStr)
 {
@@ -224,21 +188,10 @@ TOlapStoreInfo::TPtr CreateOlapStore(const NKikimrSchemeOp::TColumnStoreDescript
 
     protoIndex = 0;
     for (auto& presetProto : *op.MutableRESERVED_TtlSettingsPresets()) {
-#if 1
         Y_UNUSED(presetProto);
         status = NKikimrScheme::StatusSchemeError;
         errStr = "TTL presets are not supported";
         return nullptr;
-#else
-        if (presetProto.HasId()) {
-            status = NKikimrScheme::StatusSchemeError;
-            errStr = "Ttl settings preset id cannot be specified explicitly";
-            return nullptr;
-        }
-        if (!PrepareTtlSettingsPreset(presetProto, *storeInfo, protoIndex++, status, errStr)) {
-            return nullptr;
-        }
-#endif
     }
 
     if (!storeInfo->SchemaPresetByName.contains("default") || storeInfo->SchemaPresets.size() > 1) {
@@ -252,7 +205,6 @@ TOlapStoreInfo::TPtr CreateOlapStore(const NKikimrSchemeOp::TColumnStoreDescript
 }
 
 void ApplySharding(TTxId txId, TPathId pathId, TOlapStoreInfo::TPtr storeInfo,
-                   const TChannelsBindings& metaChannelsBindings,
                    const TChannelsBindings& channelsBindings,
                    TTxState& txState, TSchemeShard* ss)
 {
@@ -261,16 +213,13 @@ void ApplySharding(TTxId txId, TPathId pathId, TOlapStoreInfo::TPtr storeInfo,
 
     txState.Shards.reserve(numShards);
 
-    TShardInfo metaShardInfo = TShardInfo::OlapShardInfo(txId, pathId);
-    metaShardInfo.BindedChannels = metaChannelsBindings;
-
     TShardInfo columnShardInfo = TShardInfo::ColumnShardInfo(txId, pathId);
     columnShardInfo.BindedChannels = channelsBindings;
 
     storeInfo->Sharding.ClearColumnShards();
     for (ui64 i = 0; i < numColumnShards; ++i) {
         TShardIdx idx = ss->RegisterShardInfo(columnShardInfo);
-        ss->TabletCounters->Simple()[COUNTER_OLAP_COLUMN_SHARDS].Add(1);
+        ss->TabletCounters->Simple()[COUNTER_COLUMN_SHARDS].Add(1);
         txState.Shards.emplace_back(idx, ETabletType::ColumnShard, TTxState::CreateParts);
 
         storeInfo->ColumnShards[i] = idx;
@@ -278,6 +227,8 @@ void ApplySharding(TTxId txId, TPathId pathId, TOlapStoreInfo::TPtr storeInfo,
         shardInfoProto->SetOwnerId(idx.GetOwnerId());
         shardInfoProto->SetLocalId(idx.GetLocalId().GetValue());
     }
+
+    ss->SetPartitioning(pathId, storeInfo);
 }
 
 class TConfigureParts: public TSubOperationState {
@@ -327,6 +278,7 @@ public:
             // TODO: we may need to specify a more complex data channel mapping
             auto* init = tx.MutableInitShard();
             init->SetDataChannelCount(storeInfo->Description.GetStorageConfig().GetDataChannelCount());
+            init->SetStorePathId(txState->TargetPathId.LocalPathId);
 
             Y_PROTOBUF_SUPPRESS_NODISCARD tx.SerializeToString(&columnShardTxBody);
         }
@@ -689,14 +641,14 @@ public:
 
         // Construct channels bindings for columnshards
         TChannelsBindings channelsBindings;
-        if (!context.SS->GetOlapChannelsBindings(dstPath.DomainId(), storeInfo->Description.GetStorageConfig(), channelsBindings, errStr)) {
+        if (!context.SS->GetOlapChannelsBindings(dstPath.GetPathIdForDomain(), storeInfo->Description.GetStorageConfig(), channelsBindings, errStr)) {
             result->SetError(NKikimrScheme::StatusInvalidParameter, errStr);
             return result;
         }
-
-        // Only the first two channels are used for metashards
-        TChannelsBindings metaChannelsBindings = channelsBindings;
-        metaChannelsBindings.resize(2);
+        if (!context.SS->CheckInFlightLimit(TTxState::TxCreateOlapStore, errStr)) {
+            result->SetError(NKikimrScheme::StatusResourceExhausted, errStr);
+            return result;
+        }
 
         const ui64 shardsToCreate = storeInfo->ColumnShards.size();
         {
@@ -726,9 +678,7 @@ public:
         TPathId pathId = dstPath.Base()->PathId;
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxCreateOlapStore, pathId);
 
-        ApplySharding(
-            OperationId.GetTxId(), pathId, storeInfo,
-            metaChannelsBindings, channelsBindings, txState, context.SS);
+        ApplySharding(OperationId.GetTxId(), pathId, storeInfo, channelsBindings, txState, context.SS);
 
         NIceDb::TNiceDb db(context.GetDB());
 
@@ -743,10 +693,6 @@ public:
             Y_VERIFY(shard.Operation == TTxState::CreateParts);
             context.SS->PersistShardMapping(db, shard.Idx, InvalidTabletId, pathId, OperationId.GetTxId(), shard.TabletType);
             switch (shard.TabletType) {
-                case ETabletType::OlapShard: {
-                    context.SS->PersistChannelsBinding(db, shard.Idx, metaChannelsBindings);
-                    break;
-                }
                 case ETabletType::ColumnShard: {
                     context.SS->PersistChannelsBinding(db, shard.Idx, channelsBindings);
                     break;

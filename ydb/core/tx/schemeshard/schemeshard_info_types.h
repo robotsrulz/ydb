@@ -1,5 +1,6 @@
 #pragma once
 
+#include "schemeshard.h"
 #include "schemeshard_types.h"
 #include "schemeshard_tx_infly.h"
 #include "schemeshard_path_element.h"
@@ -32,6 +33,11 @@
 namespace NKikimr {
 namespace NSchemeShard {
 
+struct TForceShardSplitSettings {
+    ui64 ForceShardSplitDataSize;
+    bool DisableForceShardSplit;
+};
+
 struct TSplitSettings {
     TControlWrapper SplitMergePartCountLimit;
     TControlWrapper FastSplitSizeThreshold;
@@ -41,6 +47,8 @@ struct TSplitSettings {
     TControlWrapper SplitByLoadMaxShardsDefault;
     TControlWrapper MergeByLoadMinUptimeSec;
     TControlWrapper MergeByLoadMinLowLoadDurationSec;
+    TControlWrapper ForceShardSplitDataSize;
+    TControlWrapper DisableForceShardSplit;
 
     TSplitSettings()
         : SplitMergePartCountLimit(2000, -1, 1000000)
@@ -51,6 +59,8 @@ struct TSplitSettings {
         , SplitByLoadMaxShardsDefault(50, 0, 10000)
         , MergeByLoadMinUptimeSec(10*60, 0, 4ll*1000*1000*1000)
         , MergeByLoadMinLowLoadDurationSec(1*60*60, 0, 4ll*1000*1000*1000)
+        , ForceShardSplitDataSize(2ULL * 1024 * 1024 * 1024, 10 * 1024 * 1024, 16ULL * 1024 * 1024 * 1024)
+        , DisableForceShardSplit(0, 0, 1)
     {}
 
     void Register(TIntrusivePtr<NKikimr::TControlBoard>& icb) {
@@ -63,6 +73,16 @@ struct TSplitSettings {
         icb->RegisterSharedControl(SplitByLoadMaxShardsDefault,     "SchemeShard_SplitByLoadMaxShardsDefault");
         icb->RegisterSharedControl(MergeByLoadMinUptimeSec,         "SchemeShard_MergeByLoadMinUptimeSec");
         icb->RegisterSharedControl(MergeByLoadMinLowLoadDurationSec,"SchemeShard_MergeByLoadMinLowLoadDurationSec");
+
+        icb->RegisterSharedControl(ForceShardSplitDataSize,         "SchemeShardControls.ForceShardSplitDataSize");
+        icb->RegisterSharedControl(DisableForceShardSplit,          "SchemeShardControls.DisableForceShardSplit");
+    }
+
+    TForceShardSplitSettings GetForceShardSplitSettings() const {
+        return TForceShardSplitSettings{
+            .ForceShardSplitDataSize = ui64(ForceShardSplitDataSize),
+            .DisableForceShardSplit = ui64(DisableForceShardSplit) != 0,
+        };
     }
 };
 
@@ -165,6 +185,121 @@ struct TPartitionConfigMerger {
 
 };
 
+struct TPartitionStats {
+    // Latest timestamps when CPU usage exceeded 2%, 5%, 10%, 20%, 30%
+    struct TTopUsage {
+        TInstant Last2PercentLoad;
+        TInstant Last5PercentLoad;
+        TInstant Last10PercentLoad;
+        TInstant Last20PercentLoad;
+        TInstant Last30PercentLoad;
+
+        const TTopUsage& Update(const TTopUsage& usage) {
+            Last2PercentLoad  = std::max(Last2PercentLoad,  usage.Last2PercentLoad);
+            Last5PercentLoad  = std::max(Last5PercentLoad,  usage.Last5PercentLoad);
+            Last10PercentLoad = std::max(Last10PercentLoad, usage.Last10PercentLoad);
+            Last20PercentLoad = std::max(Last20PercentLoad, usage.Last20PercentLoad);
+            Last30PercentLoad = std::max(Last30PercentLoad, usage.Last30PercentLoad);
+            return *this;
+        }
+    };
+
+    TMessageSeqNo SeqNo;
+
+    ui64 RowCount = 0;
+    ui64 DataSize = 0;
+    ui64 IndexSize = 0;
+
+    TInstant LastAccessTime;
+    TInstant LastUpdateTime;
+    TDuration TxCompleteLag;
+
+    ui64 ImmediateTxCompleted = 0;
+    ui64 PlannedTxCompleted = 0;
+    ui64 TxRejectedByOverload = 0;
+    ui64 TxRejectedBySpace = 0;
+    ui64 InFlightTxCount = 0;
+
+    ui64 RowUpdates = 0;
+    ui64 RowDeletes = 0;
+    ui64 RowReads = 0;
+    ui64 RangeReads = 0;
+    ui64 RangeReadRows = 0;
+
+    ui64 Memory = 0;
+    ui64 Network = 0;
+    ui64 Storage = 0;
+    ui64 ReadThroughput = 0;
+    ui64 WriteThroughput = 0;
+    ui64 ReadIops = 0;
+    ui64 WriteIops = 0;
+
+    THashSet<TTabletId> PartOwners;
+    ui64 PartCount = 0;
+    ui64 SearchHeight = 0;
+    ui64 FullCompactionTs = 0;
+    ui64 MemDataSize = 0;
+    ui32 ShardState = NKikimrTxDataShard::Unknown;
+
+    // True when PartOwners has parts from other tablets
+    bool HasBorrowedData = false;
+
+    // True when lent parts to other tablets
+    bool HasLoanedData = false;
+
+    // Tablet actor started at
+    TInstant StartTime;
+
+    TTopUsage TopUsage;
+
+    void SetCurrentRawCpuUsage(ui64 rawCpuUsage, TInstant now) {
+        CPU = rawCpuUsage;
+        float percent = rawCpuUsage * 0.000001 * 100;
+        if (percent >= 2)
+            TopUsage.Last2PercentLoad = now;
+        if (percent >= 5)
+            TopUsage.Last5PercentLoad = now;
+        if (percent >= 10)
+            TopUsage.Last10PercentLoad = now;
+        if (percent >= 20)
+            TopUsage.Last20PercentLoad = now;
+        if (percent >= 30)
+            TopUsage.Last30PercentLoad = now;
+    }
+
+    ui64 GetCurrentRawCpuUsage() const {
+        return CPU;
+    }
+
+    float GetLatestMaxCpuUsagePercent(TInstant since) const {
+        // TODO: fix the case when stats were not collected yet
+
+        if (TopUsage.Last30PercentLoad > since)
+            return 40;
+        if (TopUsage.Last20PercentLoad > since)
+            return 30;
+        if (TopUsage.Last10PercentLoad > since)
+            return 20;
+        if (TopUsage.Last5PercentLoad > since)
+            return 10;
+        if (TopUsage.Last2PercentLoad > since)
+            return 5;
+
+        return 2;
+    }
+
+private:
+    ui64 CPU = 0;
+};
+
+struct TAggregatedStats {
+    TPartitionStats Aggregated;
+    THashMap<TShardIdx, TPartitionStats> PartitionStats;
+    size_t PartitionStatsUpdated = 0;
+
+    void UpdateShardStats(TShardIdx datashardIdx, const TPartitionStats& newStats);
+};
+
 struct TSubDomainInfo;
 
 struct TTableInfo : public TSimpleRefCount<TTableInfo> {
@@ -206,114 +341,6 @@ struct TTableInfo : public TSimpleRefCount<TTableInfo> {
         ui32 SuccessShardCount;
         THashMap<TShardIdx, TTxState::TShardStatus> ShardStatuses;
         ui64 DataTotalSize;
-    };
-
-    struct TPartitionStats {
-        TMessageSeqNo SeqNo;
-
-        ui64 RowCount = 0;
-        ui64 DataSize = 0;
-        ui64 IndexSize = 0;
-
-        TInstant LastAccessTime;
-        TInstant LastUpdateTime;
-        TDuration TxCompleteLag;
-
-        ui64 ImmediateTxCompleted = 0;
-        ui64 PlannedTxCompleted = 0;
-        ui64 TxRejectedByOverload = 0;
-        ui64 TxRejectedBySpace = 0;
-        ui64 InFlightTxCount = 0;
-
-        ui64 RowUpdates = 0;
-        ui64 RowDeletes = 0;
-        ui64 RowReads = 0;
-        ui64 RangeReads = 0;
-        ui64 RangeReadRows = 0;
-
-        ui64 Memory = 0;
-        ui64 Network = 0;
-        ui64 Storage = 0;
-        ui64 ReadThroughput = 0;
-        ui64 WriteThroughput = 0;
-        ui64 ReadIops = 0;
-        ui64 WriteIops = 0;
-
-        THashSet<TTabletId> PartOwners;
-        ui64 PartCount = 0;
-        ui64 SearchHeight = 0;
-        ui64 FullCompactionTs = 0;
-        ui64 MemDataSize = 0;
-        ui32 ShardState = NKikimrTxDataShard::Unknown;
-
-        // True when PartOwners has parts from other tablets
-        bool HasBorrowedData = false;
-
-        // True when lent parts to other tablets
-        bool HasLoanedData = false;
-
-        // Tablet actor started at
-        TInstant StartTime;
-
-        void SetCurrentRawCpuUsage(ui64 rawCpuUsage, TInstant now) {
-            CPU = rawCpuUsage;
-            float percent = rawCpuUsage * 0.000001 * 100;
-            if (percent >= 2)
-                Last2PercentLoad = now;
-            if (percent >= 5)
-                Last5PercentLoad = now;
-            if (percent >= 10)
-                Last10PercentLoad = now;
-            if (percent >= 20)
-                Last20PercentLoad = now;
-            if (percent >= 30)
-                Last30PercentLoad = now;
-        }
-
-        void SaveCpuUsageHistory(const TPartitionStats& oldStats) {
-            Last2PercentLoad  = std::max(Last2PercentLoad,  oldStats.Last2PercentLoad);
-            Last5PercentLoad  = std::max(Last5PercentLoad,  oldStats.Last5PercentLoad);
-            Last10PercentLoad = std::max(Last10PercentLoad, oldStats.Last10PercentLoad);
-            Last20PercentLoad = std::max(Last20PercentLoad, oldStats.Last20PercentLoad);
-            Last30PercentLoad = std::max(Last30PercentLoad, oldStats.Last30PercentLoad);
-        }
-
-        ui64 GetCurrentRawCpuUsage() const {
-            return CPU;
-        }
-
-        float GetLatestMaxCpuUsagePercent(TInstant since) const {
-            // TODO: fix the case when stats were not collected yet
-
-            if (Last30PercentLoad > since)
-                return 40;
-            if (Last20PercentLoad > since)
-                return 30;
-            if (Last10PercentLoad > since)
-                return 20;
-            if (Last5PercentLoad > since)
-                return 10;
-            if (Last2PercentLoad > since)
-                return 5;
-
-            return 2;
-        }
-
-    private:
-        ui64 CPU = 0;
-
-        // Latest timestamps when CPU usage exceeded 2%, 5%, 10%, 20%, 30%
-        TInstant Last2PercentLoad;
-        TInstant Last5PercentLoad;
-        TInstant Last10PercentLoad;
-        TInstant Last20PercentLoad;
-        TInstant Last30PercentLoad;
-    };
-
-    struct TStats {
-        TPartitionStats Aggregated;
-        THashMap<TShardIdx, TPartitionStats> PartitionStats;
-        size_t PartitionStatsUpdated = 0;
     };
 
     struct TAlterTableInfo : TSimpleRefCount<TAlterTableInfo> {
@@ -428,13 +455,13 @@ private:
     TPartitionsVec Partitions;
     THashMap<TShardIdx, ui64> Shard2PartitionIdx; // shardIdx -> index in Partitions
     TPriorityQueue<TPartitionsVec::iterator, TVector<TPartitionsVec::iterator>, TSortByNextCondErase> CondEraseSchedule;
-    THashSet<TShardIdx> InFlightCondErase;
+    THashMap<TShardIdx, TActorId> InFlightCondErase; // shard to pipe client
     mutable TMaybe<ui32> TTLColumnId;
     THashSet<TOperationId> SplitOpsInFlight;
     THashMap<TOperationId, TVector<TShardIdx>> ShardsInSplitMergeByOpId;
     THashMap<TShardIdx, TOperationId> ShardsInSplitMergeByShards;
     ui64 ExpectedPartitionCount = 0; // number of partitions after all in-flight splits/merges are finished
-    TStats Stats;
+    TAggregatedStats Stats;
     bool ShardsStatsDetached = false;
 
     TPartitionsVec::iterator FindPartition(const TShardIdx& shardIdx) {
@@ -525,7 +552,7 @@ public:
         return Partitions;
     }
 
-    const TStats& GetStats() const {
+    const TAggregatedStats& GetStats() const {
         return Stats;
     }
 
@@ -536,7 +563,7 @@ public:
         ShardsStatsDetached = true;
     }
 
-    void UpdateShardStats(TShardIdx datashardIdx, TPartitionStats& newStats);
+    void UpdateShardStats(TShardIdx datashardIdx, const TPartitionStats& newStats);
 
     void RegisterSplitMegreOp(TOperationId txId, const TTxState& txState);
 
@@ -556,20 +583,42 @@ public:
         return ExpectedPartitionCount;
     }
 
-    bool TryAddShardToMerge(const TSplitSettings& splitSettings, TShardIdx shardIdx, TVector<TShardIdx>& shardsToMerge,
+    bool TryAddShardToMerge(const TSplitSettings& splitSettings,
+                            const TForceShardSplitSettings& forceShardSplitSettings,
+                            TShardIdx shardIdx, TVector<TShardIdx>& shardsToMerge,
                             THashSet<TTabletId>& partOwners, ui64& totalSize, float& totalLoad) const;
 
-    bool CheckCanMergePartitions(const TSplitSettings& splitSettings, TShardIdx shardIdx, TVector<TShardIdx>& shardsToMerge) const;
+    bool CheckCanMergePartitions(const TSplitSettings& splitSettings,
+                                 const TForceShardSplitSettings& forceShardSplitSettings,
+                                 TShardIdx shardIdx, TVector<TShardIdx>& shardsToMerge) const;
 
-    bool CheckFastSplitForPartition(const TSplitSettings& splitSettings, TShardIdx shardIdx, ui64 dataSize, ui64 rowCount) const;
     bool CheckSplitByLoad(const TSplitSettings& splitSettings, TShardIdx shardIdx, ui64 dataSize, ui64 rowCount) const;
 
-    bool IsSplitBySizeEnabled() const {
-        return PartitionConfig().GetPartitioningPolicy().GetSizeToSplit() != 0;
+    bool IsSplitBySizeEnabled(const TForceShardSplitSettings& params) const {
+        // Respect unspecified SizeToSplit when force shard splits are disabled
+        if (params.DisableForceShardSplit && PartitionConfig().GetPartitioningPolicy().GetSizeToSplit() == 0) {
+            return false;
+        }
+        // Auto split is always enabled, unless table is using external blobs
+        return !PartitionConfigHasExternalBlobsEnabled(PartitionConfig());
     }
 
-    bool IsMergeBySizeEnabled() const {
-        return IsSplitBySizeEnabled() && PartitionConfig().GetPartitioningPolicy().GetMinPartitionsCount() != 0;
+    bool IsMergeBySizeEnabled(const TForceShardSplitSettings& params) const {
+        // Auto merge is only enabled when auto split is also enabled
+        if (!IsSplitBySizeEnabled(params)) {
+            return false;
+        }
+        // We want auto merge enabled when user has explicitly specified the
+        // size to split and the minimum partitions count.
+        if (PartitionConfig().GetPartitioningPolicy().GetSizeToSplit() > 0 &&
+            PartitionConfig().GetPartitioningPolicy().GetMinPartitionsCount() != 0)
+        {
+            return true;
+        }
+        // We also want auto merge enabled when table has more shards than the
+        // specified maximum number of partitions. This way when something
+        // splits by size over the limit we merge some smaller partitions.
+        return Partitions.size() > GetMaxPartitionsCount() && !params.DisableForceShardSplit;
     }
 
     bool IsSplitByLoadEnabled() const {
@@ -580,19 +629,29 @@ public:
         return IsSplitByLoadEnabled();
     }
 
-    ui64 GetShardSizeToSplit() const {
+    ui64 GetShardSizeToSplit(const TForceShardSplitSettings& params) const {
+        if (!IsSplitBySizeEnabled(params)) {
+            return Max<ui64>();
+        }
         ui64 threshold = PartitionConfig().GetPartitioningPolicy().GetSizeToSplit();
-        return threshold == 0 ?
-            Max<ui64>() :   // Autosplit is OFF if theshold is not specified
-            threshold;
+        if (params.DisableForceShardSplit) {
+            if (threshold == 0) {
+                return Max<ui64>();
+            }
+        } else {
+            if (threshold == 0 || threshold >= params.ForceShardSplitDataSize) {
+                return params.ForceShardSplitDataSize;
+            }
+        }
+        return threshold;
     }
 
-    ui64 GetSizeToMerge() const {
-        if (!IsMergeBySizeEnabled()) {
+    ui64 GetSizeToMerge(const TForceShardSplitSettings& params) const {
+        if (!IsMergeBySizeEnabled(params)) {
             // Disable auto-merge by default
             return 0;
         } else {
-            return GetShardSizeToSplit() / 2;
+            return GetShardSizeToSplit(params) / 2;
         }
     }
 
@@ -604,6 +663,26 @@ public:
     ui64 GetMaxPartitionsCount() const {
         ui64 val = PartitionConfig().GetPartitioningPolicy().GetMaxPartitionsCount();
         return val == 0 ? 32*1024 : val;
+    }
+
+    bool IsForceSplitBySizeShardIdx(TShardIdx shardIdx, const TForceShardSplitSettings& params) const {
+        if (!Stats.PartitionStats.contains(shardIdx) || params.DisableForceShardSplit) {
+            return false;
+        }
+        const auto& stats = Stats.PartitionStats.at(shardIdx);
+        return stats.DataSize >= params.ForceShardSplitDataSize;
+    }
+
+    bool ShouldSplitBySize(ui64 dataSize, const TForceShardSplitSettings& params) const {
+        if (!IsSplitBySizeEnabled(params)) {
+            return false;
+        }
+        // When shard is over the maximum size we split even when over max partitions
+        if (dataSize >= params.ForceShardSplitDataSize && !params.DisableForceShardSplit) {
+            return true;
+        }
+        // Otherwise we split when we may add one more partition
+        return Partitions.size() < GetMaxPartitionsCount() && dataSize >= GetShardSizeToSplit(params);
     }
 
     bool NeedRecreateParts() const {
@@ -654,7 +733,11 @@ public:
         return CondEraseSchedule.top();
     }
 
-    const THashSet<TShardIdx>& GetInFlightCondErase() const {
+    const auto& GetInFlightCondErase() const {
+        return InFlightCondErase;
+    }
+
+    auto& GetInFlightCondErase() {
         return InFlightCondErase;
     }
 
@@ -662,7 +745,7 @@ public:
         const auto* shardInfo = GetScheduledCondEraseShard();
         Y_VERIFY(shardInfo && shardIdx == shardInfo->ShardIdx);
 
-        InFlightCondErase.insert(shardIdx);
+        InFlightCondErase[shardIdx] = TActorId();
         CondEraseSchedule.pop();
     }
 
@@ -753,15 +836,7 @@ struct TOlapTtlSettings {
     // TODO: add parsed settings
     ui64 Version = 1;
 };
-#if 0
-struct TOlapStoreTtlSettingsPreset : public TOlapTtlSettings {
-    ui32 Id;
-    TString Name;
 
-    // Preset index in the olap store description
-    size_t ProtoIndex = -1;
-};
-#endif
 struct TOlapStoreInfo : TSimpleRefCount<TOlapStoreInfo> {
     using TPtr = TIntrusivePtr<TOlapStoreInfo>;
 
@@ -775,21 +850,29 @@ struct TOlapStoreInfo : TSimpleRefCount<TOlapStoreInfo> {
     TVector<TShardIdx> ColumnShards;
 
     THashMap<ui32, TOlapStoreSchemaPreset> SchemaPresets;
-    //THashMap<ui32, TOlapStoreTtlSettingsPreset> TtlSettingsPresets;
     THashMap<TString, ui32> SchemaPresetByName;
-    THashMap<TString, ui32> TtlSettingsPresetByName;
 
-    THashSet<TPathId> OlapTables;
-    THashSet<TPathId> OlapTablesUnderOperation;
+    THashSet<TPathId> ColumnTables;
+    THashSet<TPathId> ColumnTablesUnderOperation;
+    TAggregatedStats Stats;
 
     TOlapStoreInfo() = default;
     TOlapStoreInfo(ui64 alterVersion, NKikimrSchemeOp::TColumnStoreDescription&& description,
             NKikimrSchemeOp::TColumnStoreSharding&& sharding,
             TMaybe<NKikimrSchemeOp::TAlterColumnStore>&& alterBody = Nothing());
+
+    const TAggregatedStats& GetStats() const {
+        return Stats;
+    }
+
+    void UpdateShardStats(TShardIdx shardIdx, const TPartitionStats& newStats) {
+        Stats.PartitionStats[shardIdx]; // insert if none
+        Stats.UpdateShardStats(shardIdx, newStats);
+    }
 };
 
-struct TOlapTableInfo : TSimpleRefCount<TOlapTableInfo> {
-    using TPtr = TIntrusivePtr<TOlapTableInfo>;
+struct TColumnTableInfo : TSimpleRefCount<TColumnTableInfo> {
+    using TPtr = TIntrusivePtr<TColumnTableInfo>;
 
     ui64 AlterVersion = 0;
     TPtr AlterData;
@@ -804,8 +887,8 @@ struct TOlapTableInfo : TSimpleRefCount<TOlapTableInfo> {
     // Current list of column shards
     TVector<ui64> ColumnShards;
 
-    TOlapTableInfo() = default;
-    TOlapTableInfo(ui64 alterVersion, NKikimrSchemeOp::TColumnTableDescription&& description,
+    TColumnTableInfo() = default;
+    TColumnTableInfo(ui64 alterVersion, NKikimrSchemeOp::TColumnTableDescription&& description,
             NKikimrSchemeOp::TColumnTableSharding&& sharding,
             TMaybe<NKikimrSchemeOp::TAlterColumnTable>&& alterBody = Nothing());
 
@@ -861,6 +944,7 @@ struct TShardInfo {
 
     TShardInfo() = default;
     TShardInfo(const TShardInfo& other) = default;
+    TShardInfo &operator=(const TShardInfo& other) = default;
 
     TShardInfo&& WithTabletID(TTabletId tabletId) && {
         TabletID = tabletId;
@@ -935,10 +1019,6 @@ struct TShardInfo {
         return TShardInfo(txId, pathId, ETabletType::Kesus);
     }
 
-    static TShardInfo OlapShardInfo(TTxId txId, TPathId pathId) {
-         return TShardInfo(txId, pathId, ETabletType::OlapShard);
-    }
-
     static TShardInfo ColumnShardInfo(TTxId txId, TPathId pathId) {
          return TShardInfo(txId, pathId, ETabletType::ColumnShard);
     }
@@ -949,6 +1029,10 @@ struct TShardInfo {
 
     static TShardInfo ReplicationControllerInfo(TTxId txId, TPathId pathId) {
         return TShardInfo(txId, pathId, ETabletType::ReplicationController);
+    }
+
+    static TShardInfo BlobDepotInfo(TTxId txId, TPathId pathId) {
+        return TShardInfo(txId, pathId, ETabletType::BlobDepot);
     }
 };
 
@@ -1285,14 +1369,28 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         PathsInsideCount = val;
     }
 
-    void IncPathsInside(ui64 delta = 1) {
-        Y_VERIFY(Max<ui64>() - PathsInsideCount >= delta);
-        PathsInsideCount += delta;
+    ui64 GetBackupPaths() const {
+        return BackupPathsCount;
     }
 
-    void DecPathsInside(ui64 delta = 1) {
+    void IncPathsInside(ui64 delta = 1, bool isBackup = false) {
+        Y_VERIFY(Max<ui64>() - PathsInsideCount >= delta);
+        PathsInsideCount += delta;
+
+        if (isBackup) {
+            Y_VERIFY(Max<ui64>() - BackupPathsCount >= delta);
+            BackupPathsCount += delta;
+        }
+    }
+
+    void DecPathsInside(ui64 delta = 1, bool isBackup = false) {
         Y_VERIFY_S(PathsInsideCount >= delta, "PathsInsideCount: " << PathsInsideCount << " delta: " << delta);
         PathsInsideCount -= delta;
+
+        if (isBackup) {
+            Y_VERIFY_S(BackupPathsCount >= delta, "BackupPathsCount: " << BackupPathsCount << " delta: " << delta);
+            BackupPathsCount -= delta;
+        }
     }
 
     ui64 GetPQPartitionsInside() const {
@@ -1340,6 +1438,10 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
 
     ui64 GetShardsInside() const {
         return InternalShards.size();
+    }
+
+    ui64 GetBackupShards() const {
+        return BackupShards.size();
     }
 
     void ActualizeAlterData(const THashMap<TShardIdx, TShardInfo>& allShards, TInstant now, bool isExternal, IQuotaCounters* counters) {
@@ -1516,20 +1618,23 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         return PrivateShards;
     }
 
-    void AddInternalShard(TShardIdx shardId) {
+    void AddInternalShard(TShardIdx shardId, bool isBackup = false) {
         InternalShards.insert(shardId);
+        if (isBackup) {
+            BackupShards.insert(shardId);
+        }
     }
 
     const THashSet<TShardIdx>& GetInternalShards() const {
         return InternalShards;
     }
 
-    void AddInternalShards(const TTxState& txState) {
+    void AddInternalShards(const TTxState& txState, bool isBackup = false) {
         for (auto txShard: txState.Shards) {
             if (txShard.Operation != TTxState::CreateParts) {
                 continue;
             }
-            AddInternalShard(txShard.Idx);
+            AddInternalShard(txShard.Idx, isBackup);
         }
     }
 
@@ -1537,6 +1642,7 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         auto it = InternalShards.find(shardIdx);
         Y_VERIFY_S(it != InternalShards.end(), "shardIdx: " << shardIdx);
         InternalShards.erase(it);
+        BackupShards.erase(shardIdx);
     }
 
     const THashSet<TShardIdx>& GetSequenceShards() const {
@@ -1634,7 +1740,7 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         CoordinatorSelector = new TCoordinators(ProcessingParams);
     }
 
-    void AggrDiskSpaceUsage(IQuotaCounters* counters, const TTableInfo::TPartitionStats& newAggr, const TTableInfo::TPartitionStats& oldAggr = TTableInfo::TPartitionStats()) {
+    void AggrDiskSpaceUsage(IQuotaCounters* counters, const TPartitionStats& newAggr, const TPartitionStats& oldAggr = {}) {
         DiskSpaceUsage.Tables.DataSize += (newAggr.DataSize - oldAggr.DataSize);
         counters->ChangeDiskSpaceTablesDataBytes(newAggr.DataSize - oldAggr.DataSize);
 
@@ -1799,9 +1905,11 @@ private:
     TSchemeQuotas SchemeQuotas;
 
     ui64 PathsInsideCount = 0;
+    ui64 BackupPathsCount = 0;
     TDiskSpaceUsage DiskSpaceUsage;
 
     THashSet<TShardIdx> InternalShards;
+    THashSet<TShardIdx> BackupShards;
     THashSet<TShardIdx> SequenceShards;
     THashSet<TShardIdx> ReplicationControllers;
 
@@ -2217,6 +2325,33 @@ struct TReplicationInfo : public TSimpleRefCount<TReplicationInfo> {
     ui64 AlterVersion = 0;
     TReplicationInfo::TPtr AlterData = nullptr;
     NKikimrSchemeOp::TReplicationDescription Description;
+};
+
+struct TBlobDepotInfo : TSimpleRefCount<TBlobDepotInfo> {
+    using TPtr = TIntrusivePtr<TBlobDepotInfo>;
+
+    TBlobDepotInfo(ui64 alterVersion)
+        : AlterVersion(alterVersion)
+    {}
+
+    TBlobDepotInfo(ui64 alterVersion, const NKikimrSchemeOp::TBlobDepotDescription& desc)
+        : AlterVersion(alterVersion)
+    {
+        Description.CopyFrom(desc);
+    }
+
+    TPtr CreateNextVersion() {
+        Y_VERIFY(!AlterData);
+        AlterData = MakeIntrusive<TBlobDepotInfo>(*this);
+        ++AlterData->AlterVersion;
+        return AlterData;
+    }
+
+    ui64 AlterVersion = 0;
+    TPtr AlterData = nullptr;
+    TShardIdx BlobDepotShardIdx = InvalidShardIdx;
+    TTabletId BlobDepotTabletId = InvalidTabletId;
+    NKikimrSchemeOp::TBlobDepotDescription Description;
 };
 
 struct TPublicationInfo {

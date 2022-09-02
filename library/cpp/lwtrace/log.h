@@ -8,7 +8,7 @@
 #include <util/generic/noncopyable.h>
 #include <util/generic/vector.h>
 #include <util/string/printf.h>
-#include <util/system/atomic.h>
+#include <library/cpp/deprecated/atomic/atomic.h>
 #include <util/system/hp_timer.h>
 #include <util/system/mutex.h>
 #include <util/system/spinlock.h>
@@ -444,6 +444,18 @@ namespace NLWTrace {
                     }
                 }
             }
+
+            template <class TReader>
+            void ExtractItems(TReader& r) {
+                ReadItems(r);
+                for (TItem *i = OldBuffer->GetFront(), *e = OldBuffer->GetBack();; OldBuffer->Inc(i)) {
+                    i->Clear();
+                    if (i == e) {
+                        break;
+                    }
+                }
+                OldBuffer->Clear();
+            }
         };
 
         size_t Capacity;
@@ -544,6 +556,17 @@ namespace NLWTrace {
             }
             for (const auto& orphanStorage : OrphanStorages) {
                 orphanStorage->ReadItems(r);
+            }
+        }
+
+        template <class TReader>
+        void ExtractItems(TReader& r) const {
+            TGuard<TSpinLock> g(Lock);
+            for (auto i: StoragesVec) {
+                i->ExtractItems(r);
+            }
+            for (const auto& orphanStorage: OrphanStorages) {
+                orphanStorage->ExtractItems(r);
             }
         }
 

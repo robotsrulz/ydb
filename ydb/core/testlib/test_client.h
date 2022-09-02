@@ -24,6 +24,7 @@
 #include <ydb/core/kesus/tablet/events.h>
 #include <ydb/core/security/ticket_parser.h>
 #include <ydb/core/base/grpc_service_factory.h>
+#include <ydb/core/persqueue/actor_persqueue_client_iface.h>
 #include <ydb/core/yq/libs/shared_resources/interface/shared_resources.h>
 #include <ydb/core/http_proxy/auth_factory.h>
 
@@ -125,7 +126,7 @@ namespace Tests {
         ui64 DomainPlanResolution = 0;
         std::shared_ptr<NKikimr::NMsgBusProxy::IPersQueueGetReadSessionsInfoWorkerFactory> PersQueueGetReadSessionsInfoWorkerFactory;
         std::shared_ptr<NKikimr::NHttpProxy::IAuthFactory> DataStreamsAuthFactory;
-
+        std::shared_ptr<NKikimr::NPQ::TPersQueueMirrorReaderFactory> PersQueueMirrorReaderFactory = std::make_shared<NKikimr::NPQ::TPersQueueMirrorReaderFactory>();
         bool EnableMetering = false;
         TString MeteringFilePath;
 
@@ -234,7 +235,7 @@ namespace Tests {
 
         void SetupDefaultProfiles();
 
-        TIntrusivePtr<NMonitoring::TDynamicCounters> GetGRpcServerRootCounters() const {
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> GetGRpcServerRootCounters() const {
             return GRpcServerRootCounters;
         }
 
@@ -270,7 +271,7 @@ namespace Tests {
         const NBus::TBusServerSessionConfig BusServerSessionConfig; //BusServer hold const & on config
         TAutoPtr<NMsgBusProxy::IMessageBusServer> BusServer;
         std::unique_ptr<NGrpc::TGRpcServer> GRpcServer;
-        TIntrusivePtr<NMonitoring::TDynamicCounters> GRpcServerRootCounters;
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> GRpcServerRootCounters;
         NYq::IYqSharedResources::TPtr YqSharedResources;
     };
 
@@ -377,7 +378,8 @@ namespace Tests {
         NMsgBusProxy::EResponseStatus CreateTable(const TString& parent, const NKikimrSchemeOp::TTableDescription &table, TDuration timeout = TDuration::Seconds(5000));
         NMsgBusProxy::EResponseStatus CreateTableWithUniformShardedIndex(const TString& parent,
             const NKikimrSchemeOp::TTableDescription &table, const TString& indexName,
-            const TVector<TString> indexColumns, const TVector<TString> dataColumns = {}, TDuration timeout = TDuration::Seconds(5000));
+            const TVector<TString> indexColumns, NKikimrSchemeOp::EIndexType type,
+            const TVector<TString> dataColumns = {}, TDuration timeout = TDuration::Seconds(5000));
         NMsgBusProxy::EResponseStatus SplitTable(const TString& table, ui64 datashardId, ui64 border, TDuration timeout = TDuration::Seconds(5000));
         NMsgBusProxy::EResponseStatus CopyTable(const TString& parent, const TString& name, const TString& src);
         NMsgBusProxy::EResponseStatus CreateKesus(const TString& parent, const TString& name);
@@ -389,10 +391,20 @@ namespace Tests {
         TAutoPtr<NMsgBusProxy::TBusResponse> AlterTable(const TString& parent, const NKikimrSchemeOp::TTableDescription& update, const TString& userToken);
         TAutoPtr<NMsgBusProxy::TBusResponse> AlterTable(const TString& parent, const TString& alter, const TString& userToken);
 
+        TAutoPtr<NMsgBusProxy::TBusResponse> MoveIndex(const TString& table, const TString& src, const TString& dst, bool allowOverwrite, const TString& userToken);
+
         NMsgBusProxy::EResponseStatus CreateOlapStore(const TString& parent, const TString& scheme);
         NMsgBusProxy::EResponseStatus CreateOlapStore(const TString& parent, const NKikimrSchemeOp::TColumnStoreDescription& store);
-        NMsgBusProxy::EResponseStatus CreateOlapTable(const TString& parent, const TString& scheme);
-        NMsgBusProxy::EResponseStatus CreateOlapTable(const TString& parent, const NKikimrSchemeOp::TColumnTableDescription& table);
+        NMsgBusProxy::EResponseStatus CreateColumnTable(const TString& parent, const TString& scheme);
+        NMsgBusProxy::EResponseStatus CreateColumnTable(const TString& parent, const NKikimrSchemeOp::TColumnTableDescription& table);
+#if 1 // legacy names
+        NMsgBusProxy::EResponseStatus CreateOlapTable(const TString& parent, const TString& scheme) {
+            return CreateColumnTable(parent, scheme);
+        }
+        NMsgBusProxy::EResponseStatus CreateOlapTable(const TString& parent, const NKikimrSchemeOp::TColumnTableDescription& table) {
+            return CreateColumnTable(parent, table);
+        }
+#endif
         NMsgBusProxy::EResponseStatus CreateSolomon(const TString& parent, const TString& name, ui32 parts = 4, ui32 channelProfile = 0);
         NMsgBusProxy::EResponseStatus StoreTableBackup(const TString& parent, const NKikimrSchemeOp::TBackupTask& task);
         NMsgBusProxy::EResponseStatus DeleteTopic(const TString& parent, const TString& name);

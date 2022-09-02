@@ -38,7 +38,7 @@ void TestPutMaxPartCountOnHandoff(TErasureType::EErasureSpecies erasureSpecies) 
     TGroupMock group(groupId, erasureSpecies, domainCount, 1);
     TIntrusivePtr<TGroupQueues> groupQueues = group.MakeGroupQueues();
 
-    TIntrusivePtr<NMonitoring::TDynamicCounters> counters(new NMonitoring::TDynamicCounters());
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> counters(new ::NMonitoring::TDynamicCounters());
     TIntrusivePtr<TDsProxyNodeMon> nodeMon(new TDsProxyNodeMon(counters, true));
     TIntrusivePtr<TBlobStorageGroupProxyMon> mon(new TBlobStorageGroupProxyMon(counters, counters, counters,
                 group.GetInfo(), nodeMon, false));
@@ -66,7 +66,7 @@ void TestPutMaxPartCountOnHandoff(TErasureType::EErasureSpecies erasureSpecies) 
     TEvBlobStorage::TEvPut ev(blobId, data, TInstant::Max(), NKikimrBlobStorage::TabletLog,
             TEvBlobStorage::TEvPut::TacticDefault);
 
-    TPutImpl putImpl(group.GetInfo(), groupQueues, &ev, mon, false);
+    TPutImpl putImpl(group.GetInfo(), groupQueues, &ev, mon, false, TActorId(), 0, NWilson::TTraceId());
 
     for (ui32 idx = 0; idx < domainCount; ++idx) {
         group.SetPredictedDelayNs(idx, 1);
@@ -159,7 +159,7 @@ struct TTestPutAllOk {
     TBatchedVec<TLogoBlobID> BlobIds;
     TString Data;
 
-    TIntrusivePtr<NMonitoring::TDynamicCounters> Counters;
+    TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters;
     TIntrusivePtr<TDsProxyNodeMon> NodeMon;
     TIntrusivePtr<TBlobStorageGroupProxyMon> Mon;
 
@@ -175,7 +175,7 @@ struct TTestPutAllOk {
         , GroupQueues(Group.MakeGroupQueues())
         , BlobIds({TLogoBlobID(743284823, 10, 12345, 0, DataSize, 0), TLogoBlobID(743284823, 9, 12346, 0, DataSize, 0)})
         , Data(AlphaData(DataSize))
-        , Counters(new NMonitoring::TDynamicCounters())
+        , Counters(new ::NMonitoring::TDynamicCounters())
         , NodeMon(new TDsProxyNodeMon(Counters, true))
         , Mon(new TBlobStorageGroupProxyMon(Counters, Counters, Counters, Group.GetInfo(), NodeMon, false))
         , LogCtx(NKikimrServices::BS_PROXY_PUT, false)
@@ -362,7 +362,7 @@ struct TTestPutAllOk {
             TMaybe<TPutImpl> putImpl;
             TPutImpl::TPutResultVec putResults;
             if constexpr (IsVPut) {
-                putImpl.ConstructInPlace(Group.GetInfo(), GroupQueues, events[0]->Get(), Mon, false);
+                putImpl.ConstructInPlace(Group.GetInfo(), GroupQueues, events[0]->Get(), Mon, false, TActorId(), 0, NWilson::TTraceId());
             } else {
                 putImpl.ConstructInPlace(Group.GetInfo(), GroupQueues, events, Mon,
                         NKikimrBlobStorage::TabletLog, TEvBlobStorage::TEvPut::TacticDefault, false);
@@ -411,7 +411,7 @@ Y_UNIT_TEST(TestMirror3dcWith3x3MinLatencyMod) {
     TString data = AlphaData(size);
     TEvBlobStorage::TEvPut ev(blobId, data, TInstant::Max(), NKikimrBlobStorage::TabletLog,
             TEvBlobStorage::TEvPut::TacticMinLatency);
-    TPutImpl putImpl(env.Info, env.GroupQueues, &ev, env.Mon, true);
+    TPutImpl putImpl(env.Info, env.GroupQueues, &ev, env.Mon, true, TActorId(), 0, NWilson::TTraceId());
     TDeque<std::unique_ptr<TEvBlobStorage::TEvVPut>> vPuts;
 
     TLogContext logCtx(NKikimrServices::BS_PROXY_PUT, false);

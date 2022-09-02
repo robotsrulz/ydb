@@ -8,7 +8,7 @@
 #include <DataTypes/DataTypeNothing.h>
 
 
-namespace DB
+namespace NDB
 {
 
 namespace ErrorCodes
@@ -121,6 +121,29 @@ static void skipDelimiter(ReadBuffer & in, const char delimiter, bool is_last_co
         assertChar(delimiter, in);
 }
 
+static bool checkTypeValidness(ReadBuffer& in, const char delimiter, bool is_last_column)
+{
+    if (is_last_column)
+    {
+        if (in.eof())
+            return true;
+
+        char symb = *in.position();
+
+        // we support the extra delimiter at the end of the line
+        // if symb is one of those, data COULD be correct
+        // otherwise it's definitely incorrect
+        if (symb == delimiter || symb == '\n' || symb == '\r') {
+            return true;
+        }
+    }
+    else {
+        if (*in.position() == delimiter) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /// Skip `whitespace` symbols allowed in CSV.
 static inline void skipWhitespacesAndTabs(ReadBuffer & in)
@@ -210,7 +233,6 @@ void CSVRowInputFormat::readPrefix()
         setupAllColumnsByTableSchema();
 }
 
-
 bool CSVRowInputFormat::readRow(MutableColumns & columns, RowReadExtension & ext)
 {
     if (in.eof())
@@ -247,6 +269,9 @@ bool CSVRowInputFormat::readRow(MutableColumns & columns, RowReadExtension & ext
             readCSVString(tmp, in, format_settings.csv);
         }
 
+        if (!checkTypeValidness(in, delimiter, is_last_file_column)) {
+            throwTypeParseFailed(file_column);
+        }
         skipDelimiter(in, delimiter, is_last_file_column);
     }
 
@@ -335,7 +360,7 @@ bool CSVRowInputFormat::parseRowAndPrintDiagnosticInfo(MutableColumns & columns,
             {
                 assertChar(delimiter, in);
             }
-            catch (const DB::Exception &)
+            catch (const Exception &)
             {
                 if (*in.position() == '\n' || *in.position() == '\r')
                 {
@@ -435,7 +460,7 @@ void registerInputFormatProcessorCSV(FormatFactory & factory)
     }
 }
 
-static std::pair<bool, size_t> fileSegmentationEngineCSVImpl(ReadBuffer & in, DB::Memory<> & memory, size_t min_chunk_size)
+static std::pair<bool, size_t> fileSegmentationEngineCSVImpl(ReadBuffer & in, Memory<> & memory, size_t min_chunk_size)
 {
     char * pos = in.position();
     bool quotes = false;

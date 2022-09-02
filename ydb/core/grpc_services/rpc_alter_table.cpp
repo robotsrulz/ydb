@@ -9,6 +9,7 @@
 
 #include <ydb/core/base/tablet_pipe.h>
 #include <ydb/core/cms/console/configs_dispatcher.h>
+#include <ydb/core/protos/console_config.pb.h>
 #include <ydb/core/tx/schemeshard/schemeshard_build_index.h>
 #include <ydb/core/engine/mkql_proto.h>
 #include <ydb/core/ydb_convert/column_families.h>
@@ -102,6 +103,12 @@ class TAlterTableRPC : public TRpcSchemeRequestActor<TAlterTableRPC, TEvAlterTab
         DropIndex,
         // add/alter/drop attributes
         Attribute,
+        // add changefeeds
+        AddChangefeed,
+        // drop changefeeds
+        DropChangefeed,
+        // rename index
+        RenameIndex,
     };
 
     THashSet<EOp> GetOps() const {
@@ -126,8 +133,20 @@ class TAlterTableRPC : public TRpcSchemeRequestActor<TAlterTableRPC, TEvAlterTab
             ops.emplace(EOp::DropIndex);
         }
 
+        if (req->add_changefeeds_size()) {
+            ops.emplace(EOp::AddChangefeed);
+        }
+
+        if (req->drop_changefeeds_size()) {
+            ops.emplace(EOp::DropChangefeed);
+        }
+
         if (req->alter_attributes_size()) {
             ops.emplace(EOp::Attribute);
+        }
+
+        if (req->rename_indexes_size()) {
+            ops.emplace(EOp::RenameIndex);
         }
 
         return ops;
@@ -187,8 +206,39 @@ public:
             }
             break;
 
+        case EOp::AddChangefeed:
+            if (!AppData()->FeatureFlags.GetEnableChangefeeds()) {
+                return Reply(StatusIds::UNSUPPORTED, "Changefeeds are not supported yet",
+                    NKikimrIssues::TIssuesIds::DEFAULT_ERROR, ctx);
+            }
+            if (req->add_changefeeds_size() == 1) {
+                AddChangefeed(ctx);
+            } else {
+                return Reply(StatusIds::UNSUPPORTED, "Only one changefeed can be added by one operation",
+                    NKikimrIssues::TIssuesIds::DEFAULT_ERROR, ctx);
+            }
+            break;
+
+        case EOp::DropChangefeed:
+            if (req->drop_changefeeds_size() == 1) {
+                DropChangefeed(ctx);
+            } else {
+                return Reply(StatusIds::UNSUPPORTED, "Only one changefeed can be removed by one operation",
+                    NKikimrIssues::TIssuesIds::DEFAULT_ERROR, ctx);
+            }
+            break;
+
         case EOp::Attribute:
             AlterUserAttributes(ctx);
+            break;
+
+        case EOp::RenameIndex:
+            if (req->rename_indexes_size() == 1) {
+                RenameIndex(ctx);
+            } else {
+                return Reply(StatusIds::UNSUPPORTED, "Only one index can be renamed by one operation",
+                    NKikimrIssues::TIssuesIds::DEFAULT_ERROR, ctx);
+            }
             break;
         }
 
@@ -363,6 +413,7 @@ private:
         if (status == Ydb::StatusIds::SUCCESS) {
             if (GetOperationMode() == Ydb::Operations::OperationParams::SYNC) {
                 CreateSSOpSubscriber(SchemeshardId, TxId, DatabaseName, TOpType::BuildIndex, std::move(Request_), ctx);
+                Die(ctx);
             } else {
                 auto op = response.GetIndexBuild();
                 Ydb::Operations::Operation operation;
@@ -397,6 +448,68 @@ private:
             auto desc = modifyScheme->MutableDropIndex();
             desc->SetIndexName(drop);
             desc->SetTableName(name);
+        }
+
+        ctx.Send(MakeTxProxyID(), proposeRequest.release());
+    }
+
+    void AddChangefeed(const TActorContext &ctx) {
+        const auto req = GetProtoRequest();
+        std::pair<TString, TString> pathPair;
+        try {
+            pathPair = SplitPath(req->path());
+        } catch (const std::exception&) {
+            return ReplyWithStatus(StatusIds::BAD_REQUEST, ctx);
+        }
+
+        const auto& workingDir = pathPair.first;
+        const auto& name = pathPair.second;
+
+        std::unique_ptr<TEvTxUserProxy::TEvProposeTransaction> proposeRequest = CreateProposeTransaction();
+        NKikimrTxUserProxy::TEvProposeTransaction& record = proposeRequest->Record;
+        NKikimrSchemeOp::TModifyScheme* modifyScheme = record.MutableTransaction()->MutableModifyScheme();
+        modifyScheme->SetWorkingDir(workingDir);
+        modifyScheme->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpCreateCdcStream);
+
+        for (const auto& add : req->add_changefeeds()) {
+            auto op = modifyScheme->MutableCreateCdcStream();
+            op->SetTableName(name);
+
+            StatusIds::StatusCode code;
+            TString error;
+
+            if (!FillChangefeedDescription(*op->MutableStreamDescription(), add, code, error)) {
+                NYql::TIssues issues;
+                issues.AddIssue(NYql::TIssue(error));
+                return Reply(code, issues, ctx);
+            }
+        }
+
+        ctx.Send(MakeTxProxyID(), proposeRequest.release());
+    }
+
+    void DropChangefeed(const TActorContext &ctx) {
+        const auto req = GetProtoRequest();
+        std::pair<TString, TString> pathPair;
+        try {
+            pathPair = SplitPath(req->path());
+        } catch (const std::exception&) {
+            return ReplyWithStatus(StatusIds::BAD_REQUEST, ctx);
+        }
+
+        const auto& workingDir = pathPair.first;
+        const auto& name = pathPair.second;
+
+        std::unique_ptr<TEvTxUserProxy::TEvProposeTransaction> proposeRequest = CreateProposeTransaction();
+        NKikimrTxUserProxy::TEvProposeTransaction& record = proposeRequest->Record;
+        NKikimrSchemeOp::TModifyScheme* modifyScheme = record.MutableTransaction()->MutableModifyScheme();
+        modifyScheme->SetWorkingDir(workingDir);
+        modifyScheme->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpDropCdcStream);
+
+        for (const auto& drop : req->drop_changefeeds()) {
+            auto op = modifyScheme->MutableDropCdcStream();
+            op->SetStreamName(drop);
+            op->SetTableName(name);
         }
 
         ctx.Send(MakeTxProxyID(), proposeRequest.release());
@@ -522,6 +635,34 @@ private:
                 attr.SetValue(value);
             }
         }
+
+        ctx.Send(MakeTxProxyID(), proposeRequest.release());
+    }
+
+    void RenameIndex(const TActorContext &ctx) {
+        const auto req = GetProtoRequest();
+
+        std::pair<TString, TString> pathPair;
+        try {
+            pathPair = SplitPath(req->path());
+        } catch (const std::exception&) {
+            return ReplyWithStatus(StatusIds::BAD_REQUEST, ctx);
+        }
+
+        const auto& workingDir = pathPair.first;
+
+        std::unique_ptr<TEvTxUserProxy::TEvProposeTransaction> proposeRequest = CreateProposeTransaction();
+        auto& record = proposeRequest->Record;
+        auto& modifyScheme = *record.MutableTransaction()->MutableModifyScheme();
+
+        modifyScheme.SetWorkingDir(workingDir);
+        modifyScheme.SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpMoveIndex);
+
+        auto& alter = *modifyScheme.MutableMoveIndex();
+        alter.SetTablePath(req->path());
+        alter.SetSrcPath(req->rename_indexes(0).source_name());
+        alter.SetDstPath(req->rename_indexes(0).destination_name());
+        alter.SetAllowOverwrite(req->rename_indexes(0).replace_destination());
 
         ctx.Send(MakeTxProxyID(), proposeRequest.release());
     }

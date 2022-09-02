@@ -6,6 +6,34 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(testload)
+add_subdirectory(ut_background_compaction)
+add_subdirectory(ut_build_index)
+add_subdirectory(ut_change_collector)
+add_subdirectory(ut_change_exchange)
+add_subdirectory(ut_compaction)
+add_subdirectory(ut_erase_rows)
+add_subdirectory(ut_followers)
+add_subdirectory(ut_init)
+add_subdirectory(ut_keys)
+add_subdirectory(ut_kqp)
+add_subdirectory(ut_kqp_errors)
+add_subdirectory(ut_kqp_scan)
+add_subdirectory(ut_locks)
+add_subdirectory(ut_minikql)
+add_subdirectory(ut_minstep)
+add_subdirectory(ut_order)
+add_subdirectory(ut_range_avl_tree)
+add_subdirectory(ut_range_ops)
+add_subdirectory(ut_range_treap)
+add_subdirectory(ut_read_iterator)
+add_subdirectory(ut_read_table)
+add_subdirectory(ut_reassign)
+add_subdirectory(ut_replication)
+add_subdirectory(ut_rs)
+add_subdirectory(ut_snapshot)
+add_subdirectory(ut_stats)
+add_subdirectory(ut_upload_rows)
 
 add_library(core-tx-datashard)
 target_compile_options(core-tx-datashard PRIVATE
@@ -16,6 +44,7 @@ target_link_libraries(core-tx-datashard PUBLIC
   yutil
   tools-enum_parser-enum_serialization_runtime
   library-cpp-resource
+  contrib-libs-zstd
   cpp-actors-core
   cpp-containers-flat_hash
   cpp-digest-md5
@@ -36,6 +65,8 @@ target_link_libraries(core-tx-datashard PUBLIC
   ydb-core-protos
   ydb-core-tablet
   ydb-core-tablet_flat
+  tx-datashard-testload
+  tx-long_tx_service-public
   ydb-core-util
   ydb-core-wrappers
   ydb-core-ydb_convert
@@ -50,6 +81,7 @@ target_link_libraries(core-tx-datashard PUBLIC
 target_sources(core-tx-datashard PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/alter_cdc_stream_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/alter_table_unit.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/backup_restore_traits.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/backup_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/build_and_wait_dependencies_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/build_data_tx_out_rs_unit.cpp
@@ -71,6 +103,7 @@ target_sources(core-tx-datashard PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/check_commit_writes_tx_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/check_data_tx_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/check_distributed_erase_tx_unit.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/check_read_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/check_scheme_tx_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/check_snapshot_tx_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/complete_data_tx_unit.cpp
@@ -173,6 +206,7 @@ target_sources(core-tx-datashard PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/load_tx_details_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/make_scan_snapshot_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/make_snapshot_unit.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/move_index_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/move_table_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/operation.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/plan_queue_unit.cpp
@@ -181,9 +215,11 @@ target_sources(core-tx-datashard PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/prepare_kqp_data_tx_in_rs_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/prepare_scheme_tx_in_rs_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/protect_scheme_echoes_unit.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/read_op_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/read_table_scan.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/read_table_scan_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/receive_snapshot_unit.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/remove_locks.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/range_avl_tree.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/range_ops.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/range_treap.cpp
@@ -197,9 +233,15 @@ target_sources(core-tx-datashard PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/wait_for_plan_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/wait_for_stream_clearance_unit.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/upload_stats.cpp
-  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/export_s3_buffer.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/export_s3_buffer_raw.cpp
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/export_s3_buffer_zstd.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/export_s3_uploader.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/import_s3.cpp
+)
+generate_enum_serilization(core-tx-datashard
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/backup_restore_traits.h
+  INCLUDE_HEADERS
+  ydb/core/tx/datashard/backup_restore_traits.h
 )
 generate_enum_serilization(core-tx-datashard
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/datashard/change_exchange.h
@@ -251,6 +293,7 @@ target_link_libraries(core-tx-datashard.global PUBLIC
   yutil
   tools-enum_parser-enum_serialization_runtime
   library-cpp-resource
+  contrib-libs-zstd
   cpp-actors-core
   cpp-containers-flat_hash
   cpp-digest-md5
@@ -271,6 +314,8 @@ target_link_libraries(core-tx-datashard.global PUBLIC
   ydb-core-protos
   ydb-core-tablet
   ydb-core-tablet_flat
+  tx-datashard-testload
+  tx-long_tx_service-public
   ydb-core-util
   ydb-core-wrappers
   ydb-core-ydb_convert

@@ -3,6 +3,7 @@
 
 #include <library/cpp/threading/local_executor/local_executor.h>
 
+#include <util/generic/serialized_enum.h>
 #include <util/string/printf.h>
 
 namespace NKikimr {
@@ -21,14 +22,14 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         bool useSchemeCacheMeta = tableSettings.GetUseSchemeCacheMetadata();
 
         auto result = session.ExecuteDataQuery(R"(
-            SELECT * FROM [/Root/KeyValue];
+            SELECT * FROM `/Root/KeyValue`;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(),
             useSchemeCacheMeta ? EStatus::SCHEME_ERROR : EStatus::UNAUTHORIZED, result.GetIssues().ToString());
 
         result = session.ExecuteDataQuery(R"(
-            SELECT * FROM [/Root/NonExistent];
+            SELECT * FROM `/Root/NonExistent`;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(),
@@ -41,12 +42,12 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         auto result = session.ExecuteDataQuery(R"(
-            SELECT * FROM [/Root/KeyValue];
+            SELECT * FROM `/Root/KeyValue`;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"(
-            SELECT * FROM [/Root/NonExistent];
+            SELECT * FROM `/Root/NonExistent`;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
         UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SCHEME_ERROR);
@@ -58,17 +59,17 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         auto result = session.ExecuteDataQuery(R"(
-            SELECT * FROM [/Root/KeyValue];
+            SELECT * FROM `/Root/KeyValue`;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SUCCESS);
 
         auto schemeResult = session.ExecuteSchemeQuery(R"(
-            DROP TABLE [/Root/KeyValue];
+            DROP TABLE `/Root/KeyValue`;
         )").ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL(schemeResult.GetStatus(), EStatus::SUCCESS);
 
         result = session.ExecuteDataQuery(R"(
-            SELECT * FROM [/Root/KeyValue];
+            SELECT * FROM `/Root/KeyValue`;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         result.GetIssues().PrintTo(Cerr);
         UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::SCHEME_ERROR);
@@ -80,12 +81,12 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         auto session = db.CreateSession().GetValueSync().GetSession();
 
         auto schemeResult = session.ExecuteSchemeQuery(R"(
-            DROP TABLE [/Root/KeyValue];
+            DROP TABLE `/Root/KeyValue`;
         )").ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL(schemeResult.GetStatus(), EStatus::SUCCESS);
 
         schemeResult = session.ExecuteSchemeQuery(R"(
-            CREATE TABLE [/Root/KeyValue] (
+            CREATE TABLE `/Root/KeyValue` (
                 Key Uint32,
                 Value String,
                 PRIMARY KEY(Key)
@@ -94,9 +95,84 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         UNIT_ASSERT_VALUES_EQUAL(schemeResult.GetStatus(), EStatus::SUCCESS);
 
         auto result = session.ExecuteDataQuery(R"(
-            SELECT * FROM [/Root/KeyValue];
+            SELECT * FROM `/Root/KeyValue`;
         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+    }
+
+    Y_UNIT_TEST(CreateAndDropTableCheckAuditLog) {
+        TStringStream logStream;
+        {
+            TKikimrRunner kikimr(TKikimrSettings().SetLogStream(&logStream));
+
+            auto driverConfig = TDriverConfig()
+                .SetEndpoint(kikimr.GetEndpoint())
+                .SetAuthToken("user0@builtin");
+            auto driver = TDriver(driverConfig);
+            auto db = NYdb::NTable::TTableClient(driver);
+            auto session = db.CreateSession().GetValueSync().GetSession();
+            kikimr.GetTestServer().GetRuntime()->SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_INFO);
+            
+            {
+                auto schemeClient = kikimr.GetSchemeClient();
+
+                NYdb::NScheme::TPermissions permissions("user0@builtin", {"ydb.deprecated.create_table"});
+                AssertSuccessResult(schemeClient.ModifyPermissions("/Root",
+                        NYdb::NScheme::TModifyPermissionsSettings().AddGrantPermissions(permissions)
+                    ).ExtractValueSync()
+                );
+            }
+
+            {
+                const static TString createTableQuery = R"(
+                    CREATE TABLE `/Root/Test1234/KeyValue` (
+                        Key Uint32,
+                        Value String,
+                        PRIMARY KEY(Key)
+                    );
+                )";
+                auto result = session.ExecuteSchemeQuery(createTableQuery).ExtractValueSync();
+                UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            }
+
+            {
+                const static TString dropTableQuery = R"(
+                    DROP TABLE `/Root/Test1234/KeyValue`;
+                )";
+                auto result = session.ExecuteSchemeQuery(dropTableQuery).ExtractValueSync();
+                UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+            }
+            
+            driver.Stop(true);
+        }
+
+        TString line;
+        int mtc = 0;
+        int ctc = 0;
+        int dtc = 0;
+        while (logStream.ReadLine(line)) {
+            if (line.find("AUDIT:") == line.npos)
+                continue;
+
+            const TString modifyAclTablePattern("operation: MODIFY ACL");
+            if (line.find(modifyAclTablePattern) != line.npos) {
+                mtc += 1;
+            }
+
+            const TString createTablePattern("operation: CREATE TABLE");
+            if (line.find(createTablePattern) != line.npos) {
+                ctc += 1;
+            }
+
+            const TString dropTablePattern("operation: DROP TABLE");
+            if (line.find(dropTablePattern) != line.npos) {
+                dtc += 1;
+            }
+        }
+
+        UNIT_ASSERT_VALUES_EQUAL_C(mtc, 1, mtc);
+        UNIT_ASSERT_VALUES_EQUAL_C(ctc, 1, ctc);
+        UNIT_ASSERT_VALUES_EQUAL_C(dtc, 1, dtc);
     }
 
     Y_UNIT_TEST(CreateDropTableMultipleTime) {
@@ -107,7 +183,7 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         const size_t limit = 1000;
 
         const static TString createTableQuery = R"(
-            CREATE TABLE [/Root/Test1234/KeyValue] (
+            CREATE TABLE `/Root/Test1234/KeyValue` (
                 Key Uint32,
                 Value String,
                 PRIMARY KEY(Key)
@@ -115,7 +191,7 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         )";
 
         const static TString dropTableQuery = R"(
-            DROP TABLE [/Root/Test1234/KeyValue];
+            DROP TABLE `/Root/Test1234/KeyValue`;
         )";
 
         NPar::LocalExecutor().RunAdditionalThreads(inflight);
@@ -206,7 +282,7 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
 
                 auto status = db.RetryOperationSync([](TSession session) {
                     return session.ExecuteSchemeQuery(R"(
-                        ALTER TABLE [/Root/EightShard] DROP COLUMN Data;
+                        ALTER TABLE `/Root/EightShard` DROP COLUMN Data;
                     )").ExtractValueSync();
                 });
                 UNIT_ASSERT_VALUES_EQUAL_C(status.GetStatus(), EStatus::SUCCESS, status.GetIssues().ToString());
@@ -224,7 +300,7 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
                     // Immediate
                     auto status = db.RetryOperationSync([](TSession session) {
                         return session.ExecuteDataQuery(R"(
-                            SELECT * FROM [/Root/EightShard] WHERE Key = 501u;
+                            SELECT * FROM `/Root/EightShard` WHERE Key = 501u;
                         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
                     }, retrySettings);
                     UNIT_ASSERT_VALUES_EQUAL_C(status.GetStatus(), EStatus::SUCCESS, status.GetIssues().ToString());
@@ -232,7 +308,7 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
                     // Planned
                     auto status = db.RetryOperationSync([](TSession session) {
                         return session.ExecuteDataQuery(R"(
-                            SELECT * FROM [/Root/EightShard];
+                            SELECT * FROM `/Root/EightShard`;
                         )", TTxControl::BeginTx().CommitTx()).ExtractValueSync();
                     }, retrySettings);
                     UNIT_ASSERT_VALUES_EQUAL_C(status.GetStatus(), EStatus::SUCCESS, status.GetIssues().ToString());
@@ -251,11 +327,11 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         TString query;
         if (write) {
             query = Q_(R"(
-                UPSERT INTO [/Root/KeyValue] (Key, Value) VALUES (10u, "New");
+                UPSERT INTO `/Root/KeyValue` (Key, Value) VALUES (10u, "New");
             )");
         } else {
             query = Q_(R"(
-                SELECT * FROM [/Root/KeyValue] WHERE Value = "New";
+                SELECT * FROM `/Root/KeyValue` WHERE Value = "New";
             )");
         }
 
@@ -304,6 +380,96 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         }
     }
 
+    template <bool UseNewEngine>
+    void SchemaVersionMissmatchWithIndexTest(bool write) {
+        //KIKIMR-14282
+        //YDBREQUESTS-1324
+        //some cases fail
+
+        TKikimrRunner kikimr;
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        TString query;
+        if (write) {
+            query = Q_(R"(
+                UPSERT INTO `/Root/KeyValue` (Key, Value) VALUES (10u, "New");
+            )");
+        } else {
+            query = Q1_(R"(
+                SELECT * FROM `/Root/KeyValue` VIEW `value_index` WHERE Value = "New";
+            )");
+        }
+
+        NYdb::NTable::TExecDataQuerySettings execSettings;
+        execSettings.KeepInQueryCache(true);
+        execSettings.CollectQueryStats(ECollectQueryStatsMode::Basic);
+
+        {
+            TString create_index_query = Q1_(R"(
+                ALTER TABLE `/Root/KeyValue` ADD INDEX value_index GLOBAL SYNC ON (`Value`);
+            )");
+            auto result = session.ExecuteSchemeQuery(create_index_query).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query, TTxControl::BeginTx(),
+                execSettings).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto stats = NYdb::TProtoAccessor::GetProto(*result.GetStats());
+            UNIT_ASSERT_VALUES_EQUAL(stats.compilation().from_cache(), false);
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query,
+                TTxControl::BeginTx(), execSettings).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto stats = NYdb::TProtoAccessor::GetProto(*result.GetStats());
+            UNIT_ASSERT_VALUES_EQUAL(stats.compilation().from_cache(), true);
+        }
+
+        {
+            kikimr.GetTestServer().GetRuntime()->GetAppData().AdministrationAllowedSIDs.push_back("root@builtin");
+            TString alter_scheme = R"(
+                    Name: "indexImplTable"
+                    PartitionConfig {
+                        PartitioningPolicy {
+                            SizeToSplit: 1000
+                            MinPartitionsCount: 1
+                            MaxPartitionsCount: 100
+                        }
+                    }
+            )";
+            auto reply = kikimr.GetTestClient().AlterTable("/Root/KeyValue/value_index", alter_scheme, "root@builtin");
+            const NKikimrClient::TResponse &response = reply->Record;
+            UNIT_ASSERT_VALUES_EQUAL((NMsgBusProxy::EResponseStatus)response.GetStatus(), NMsgBusProxy::MSTATUS_OK);
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query,
+                TTxControl::BeginTx(), execSettings).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), (write || UseNewEngine) ? EStatus::SUCCESS : EStatus::ABORTED, result.GetIssues().ToString());
+
+            auto commit = result.GetTransaction()->Commit().GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(commit.GetStatus(), (write || UseNewEngine) ? EStatus::SUCCESS : EStatus::BAD_REQUEST, commit.GetIssues().ToString());
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query,
+                TTxControl::BeginTx(), execSettings).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto commit = result.GetTransaction()->Commit().GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(commit.GetStatus(), EStatus::SUCCESS, commit.GetIssues().ToString());
+        }
+    }
+
     Y_UNIT_TEST_NEW_ENGINE(SchemaVersionMissmatchWithRead) {
         SchemaVersionMissmatchWithTest<UseNewEngine>(false);
     }
@@ -312,12 +478,198 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         SchemaVersionMissmatchWithTest<UseNewEngine>(true);
     }
 
+    Y_UNIT_TEST_NEW_ENGINE(SchemaVersionMissmatchWithIndexRead) {
+        SchemaVersionMissmatchWithIndexTest<UseNewEngine>(false);
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(SchemaVersionMissmatchWithIndexWrite) {
+        SchemaVersionMissmatchWithIndexTest<UseNewEngine>(true);
+    }
+
+    template <bool UseNewEngine>
+    void TouchIndexAfterMoveIndex(bool write, bool replace) {
+        TKikimrRunner kikimr;
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        TString query1;
+        TString query2;
+        if (write) {
+            query1 = Q_(R"(
+                UPSERT INTO `/Root/KeyValue` (Key, Value) VALUES (10u, "New");
+            )");
+            query2 = query1;
+        } else {
+            query1 = Q1_(R"(
+                SELECT * FROM `/Root/KeyValue` VIEW `value_index` WHERE Value = "New";
+            )");
+            query2 = Q1_(R"(
+                SELECT * FROM `/Root/KeyValue` VIEW `moved_value_index` WHERE Value = "New";
+            )");
+
+        }
+
+        NYdb::NTable::TExecDataQuerySettings execSettings;
+        execSettings.KeepInQueryCache(true);
+        execSettings.CollectQueryStats(ECollectQueryStatsMode::Basic);
+
+        {
+            TString create_index_query = Q1_(R"(
+                ALTER TABLE `/Root/KeyValue` ADD INDEX value_index GLOBAL SYNC ON (`Value`);
+            )");
+            auto result = session.ExecuteSchemeQuery(create_index_query).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        }
+
+        if (replace) {
+            TString create_index_query = Q1_(R"(
+                ALTER TABLE `/Root/KeyValue` ADD INDEX moved_value_index GLOBAL SYNC ON (`Value`);
+            )");
+            auto result = session.ExecuteSchemeQuery(create_index_query).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query1, TTxControl::BeginTx(),
+                execSettings).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto stats = NYdb::TProtoAccessor::GetProto(*result.GetStats());
+            UNIT_ASSERT_VALUES_EQUAL(stats.compilation().from_cache(), false);
+        }
+
+        {
+            kikimr.GetTestServer().GetRuntime()->GetAppData().AdministrationAllowedSIDs.push_back("root@builtin");
+            auto reply = kikimr.GetTestClient().MoveIndex("/Root/KeyValue", "value_index", "moved_value_index", true, "root@builtin");
+            const NKikimrClient::TResponse &response = reply->Record;
+            UNIT_ASSERT_VALUES_EQUAL((NMsgBusProxy::EResponseStatus)response.GetStatus(), NMsgBusProxy::MSTATUS_OK);
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query2,
+                TTxControl::BeginTx(), execSettings).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            if (write) {
+                auto commit = result.GetTransaction()->Commit().GetValueSync();
+                UNIT_ASSERT_VALUES_EQUAL_C(commit.GetStatus(), EStatus::SUCCESS, commit.GetIssues().ToString());
+            }
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query2,
+                TTxControl::BeginTx(), execSettings).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto commit = result.GetTransaction()->Commit().GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(commit.GetStatus(), EStatus::SUCCESS, commit.GetIssues().ToString());
+        }
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(TouchIndexAfterMoveIndexRead) {
+        TouchIndexAfterMoveIndex<UseNewEngine>(false, false);
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(TouchIndexAfterMoveIndexWrite) {
+        TouchIndexAfterMoveIndex<UseNewEngine>(true, false);
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(TouchIndexAfterMoveIndexReadReplace) {
+        TouchIndexAfterMoveIndex<UseNewEngine>(false, true);
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(TouchIndexAfterMoveIndexWriteReplace) {
+        TouchIndexAfterMoveIndex<UseNewEngine>(true, true);
+    }
+
+    template <bool UseNewEngine>
+    void TouchIndexAfterMoveTable(bool write) {
+        TKikimrRunner kikimr;
+
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        TString query1;
+        TString query2;
+        if (write) {
+            query1 = Q_(R"(
+                UPSERT INTO `/Root/KeyValue` (Key, Value) VALUES (10u, "New");
+            )");
+            query2 = Q_(R"(
+                UPSERT INTO `/Root/KeyValueMoved` (Key, Value) VALUES (10u, "New");
+            )");
+        } else {
+            query1 = Q1_(R"(
+                SELECT * FROM `/Root/KeyValue` VIEW `value_index` WHERE Value = "New";
+            )");
+            query2 = Q1_(R"(
+                SELECT * FROM `/Root/KeyValueMoved` VIEW `value_index` WHERE Value = "New";
+            )");
+
+        }
+
+        NYdb::NTable::TExecDataQuerySettings execSettings;
+        execSettings.KeepInQueryCache(true);
+        execSettings.CollectQueryStats(ECollectQueryStatsMode::Basic);
+
+        {
+            TString create_index_query = Q1_(R"(
+                ALTER TABLE `/Root/KeyValue` ADD INDEX value_index GLOBAL SYNC ON (`Value`);
+            )");
+            auto result = session.ExecuteSchemeQuery(create_index_query).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query1, TTxControl::BeginTx(),
+                execSettings).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto stats = NYdb::TProtoAccessor::GetProto(*result.GetStats());
+            UNIT_ASSERT_VALUES_EQUAL(stats.compilation().from_cache(), false);
+        }
+
+        {
+            auto query = TStringBuilder() << R"(
+            --!syntax_v1
+            ALTER TABLE `/Root/KeyValue` RENAME TO `/Root/KeyValueMoved`;
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query << ";").GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto result = session.ExecuteDataQuery(query2,
+                TTxControl::BeginTx(), execSettings).ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto commit = result.GetTransaction()->Commit().GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(commit.GetStatus(), EStatus::SUCCESS, commit.GetIssues().ToString());
+        }
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(TouchIndexAfterMoveTableRead) {
+        TouchIndexAfterMoveTable<UseNewEngine>(false);
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(TouchIndexAfterMoveTableWrite) {
+        TouchIndexAfterMoveTable<UseNewEngine>(true);
+    }
+
     void CheckInvalidationAfterDropCreateTable(bool withCompatSchema) {
         TKikimrRunner kikimr;
 
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
-        const TString sql = "UPSERT INTO [/Root/KeyValue] (Key, Value) VALUES(1, \"One\")";
+        const TString sql = "UPSERT INTO `/Root/KeyValue` (Key, Value) VALUES(1, \"One\")";
 
         NYdb::NTable::TExecDataQuerySettings execSettings;
         execSettings.KeepInQueryCache(true);
@@ -398,8 +750,8 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
 
         auto db = kikimr.GetTableClient();
         const TString sql = select
-            ? "SELECT * FROM [/Root/KeyValue];"
-            : "UPSERT INTO [/Root/KeyValue] (Key, Value) VALUES(1, \"One\")";
+            ? "SELECT * FROM `/Root/KeyValue`;"
+            : "UPSERT INTO `/Root/KeyValue` (Key, Value) VALUES(1, \"One\")";
 
         auto action = [db, sql, multistageTx]() mutable {
             return db.RetryOperationSync(
@@ -860,6 +1212,16 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
 
             const auto result = session.ExecuteSchemeQuery(query << ";").GetValueSync();
             UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = TStringBuilder() << R"(
+            --!syntax_v1
+            ALTER TABLE `/Root/table` RENAME TO `/Root/second`;
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query << ";").GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::GENERIC_ERROR, result.GetIssues().ToString());
         }
 
         {
@@ -1846,6 +2208,56 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
         AlterTableAddIndex(EIndexTypeSql::GlobalAsync, true);
     }
 
+    Y_UNIT_TEST(AlterTableRenameIndex) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+        CreateSampleTablesWithIndex(session);
+        {
+            auto status = session.ExecuteSchemeQuery(R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/SecondaryKeys` RENAME INDEX Index TO RenamedIndex;
+            )").ExtractValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(status.GetStatus(), EStatus::SUCCESS, status.GetIssues().ToString());
+        }
+
+        {
+            TDescribeTableResult describe = session.DescribeTable("/Root/SecondaryKeys").GetValueSync();
+            UNIT_ASSERT_EQUAL(describe.GetStatus(), EStatus::SUCCESS);
+            auto indexDesc = describe.GetTableDescription().GetIndexDescriptions();
+            UNIT_ASSERT_VALUES_EQUAL(indexDesc.size(), 1);
+            UNIT_ASSERT_VALUES_EQUAL(indexDesc.back().GetIndexName(), "RenamedIndex");
+            UNIT_ASSERT_VALUES_EQUAL(indexDesc.back().GetIndexColumns().size(), 1);
+            UNIT_ASSERT_VALUES_EQUAL(indexDesc.back().GetDataColumns().size(), 0);
+        }
+    }
+
+    Y_UNIT_TEST(AlterTableReplaceIndex) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+        CreateSampleTablesWithIndex(session);
+
+        {
+            TString create_index_query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/SecondaryKeys` ADD INDEX ValueIndex GLOBAL SYNC ON (`Value`);
+            )";
+            auto result = session.ExecuteSchemeQuery(create_index_query).ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto status = session.ExecuteSchemeQuery(R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/SecondaryKeys` RENAME INDEX Index TO ValueIndex;
+            )").ExtractValueSync();
+
+            UNIT_ASSERT_VALUES_EQUAL_C(status.GetStatus(), EStatus::SCHEME_ERROR, status.GetIssues().ToString());
+        }
+    }
+
     Y_UNIT_TEST(AlterTableWithDecimalColumn) {
         TKikimrRunner kikimr;
         auto db = kikimr.GetTableClient();
@@ -2240,6 +2652,246 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
             );)";
         auto result = session.ExecuteSchemeQuery(query).GetValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::GENERIC_ERROR, result.GetIssues().ToString());
+    }
+
+    static NKikimrPQ::TPQConfig DefaultPQConfig() {
+        NKikimrPQ::TPQConfig pqConfig;
+        pqConfig.SetEnabled(true);
+        pqConfig.SetEnableProtoSourceIdInfo(true);
+        pqConfig.SetTopicsAreFirstClassCitizen(true);
+        pqConfig.AddClientServiceType()->SetName("data-streams");
+        return pqConfig;
+    }
+
+    static const char* ModeToString(EChangefeedMode mode) {
+        switch (mode) {
+        case EChangefeedMode::KeysOnly:
+            return "KEYS_ONLY";
+        case EChangefeedMode::Updates:
+            return "UPDATES";
+        case EChangefeedMode::NewImage:
+            return "NEW_IMAGE";
+        case EChangefeedMode::OldImage:
+            return "OLD_IMAGE";
+        case EChangefeedMode::NewAndOldImages:
+            return "NEW_AND_OLD_IMAGES";
+        case EChangefeedMode::Unknown:
+            UNIT_ASSERT(false);
+            return "";
+        }
+    }
+
+    static const char* FormatToString(EChangefeedFormat format) {
+        switch (format) {
+        case EChangefeedFormat::Json:
+            return "JSON";
+        case EChangefeedFormat::Unknown:
+            UNIT_ASSERT(false);
+            return "";
+        }
+    }
+
+    void AddChangefeed(EChangefeedMode mode, EChangefeedFormat format) {
+        TKikimrRunner kikimr(TKikimrSettings().SetPQConfig(DefaultPQConfig()));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE TABLE `/Root/table` (
+                    Key Uint64,
+                    Value String,
+                    PRIMARY KEY (Key)
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = Sprintf(R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` ADD CHANGEFEED `feed` WITH (
+                    MODE = '%s', FORMAT = '%s'
+                );
+            )", ModeToString(mode), FormatToString(format));
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+            auto describeResult = session.DescribeTable("/Root/table").GetValueSync();
+            UNIT_ASSERT_C(describeResult.IsSuccess(), describeResult.GetIssues().ToString());
+
+            const auto& changefeeds = describeResult.GetTableDescription().GetChangefeedDescriptions();
+            UNIT_ASSERT_VALUES_EQUAL(changefeeds.size(), 1);
+            UNIT_ASSERT_VALUES_EQUAL(changefeeds.at(0), TChangefeedDescription("feed", mode, format));
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` DROP CHANGEFEED `feed`;
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+    }
+
+    Y_UNIT_TEST(AddChangefeed) {
+        for (auto mode : GetEnumAllValues<EChangefeedMode>()) {
+            if (mode == EChangefeedMode::Unknown) {
+                continue;
+            }
+
+            for (auto format : GetEnumAllValues<EChangefeedFormat>()) {
+                if (format == EChangefeedFormat::Unknown) {
+                    continue;
+                }
+
+                AddChangefeed(mode, format);
+            }
+        }
+    }
+
+    Y_UNIT_TEST(AddChangefeedWhenDisabled) {
+        TKikimrRunner kikimr(TKikimrSettings()
+            .SetPQConfig(DefaultPQConfig())
+            .SetEnableChangefeeds(false));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE TABLE `/Root/table` (
+                    Key Uint64,
+                    Value String,
+                    PRIMARY KEY (Key)
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` ADD CHANGEFEED `feed` WITH (
+                    MODE = 'KEYS_ONLY', FORMAT = 'JSON'
+                );
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::UNSUPPORTED, result.GetIssues().ToString());
+        }
+    }
+
+    Y_UNIT_TEST(AddChangefeedNegative) {
+        TKikimrRunner kikimr(TKikimrSettings().SetPQConfig(DefaultPQConfig()));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` ADD CHANGEFEED `feed` WITH (
+                    MODE = 'KEYS_ONLY', FORMAT = 'JSON'
+                );
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SCHEME_ERROR, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE TABLE `/Root/table` (
+                    Key Uint64,
+                    Value String,
+                    PRIMARY KEY (Key)
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` ADD CHANGEFEED `feed` WITH (
+                    MODE = 'FOO', FORMAT = 'JSON'
+                );
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::GENERIC_ERROR, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` ADD CHANGEFEED `feed` WITH (
+                    MODE = 'KEYS_ONLY', FORMAT = 'BAR'
+                );
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::GENERIC_ERROR, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` ADD CHANGEFEED `feed` WITH (
+                    MODE = 'KEYS_ONLY', FORMAT = 'JSON', BAZ = 'BAR'
+                );
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::GENERIC_ERROR, result.GetIssues().ToString());
+        }
+    }
+
+    Y_UNIT_TEST(DropChangefeedNegative) {
+        TKikimrRunner kikimr(TKikimrSettings().SetPQConfig(DefaultPQConfig()));
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` DROP CHANGEFEED `feed`;
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SCHEME_ERROR, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                CREATE TABLE `/Root/table` (
+                    Key Uint64,
+                    Value String,
+                    PRIMARY KEY (Key)
+                );
+            )";
+            auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        }
+
+        {
+            auto query = R"(
+                --!syntax_v1
+                ALTER TABLE `/Root/table` DROP CHANGEFEED `feed`;
+            )";
+
+            const auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+            UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SCHEME_ERROR, result.GetIssues().ToString());
+        }
     }
 }
 

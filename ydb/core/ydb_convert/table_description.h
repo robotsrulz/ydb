@@ -1,5 +1,7 @@
 #pragma once
 
+#include "table_profiles.h"
+
 #include <ydb/library/mkql_proto/protos/minikql.pb.h>
 #include <ydb/core/protos/flat_tx_scheme.pb.h>
 #include <ydb/public/api/protos/ydb_table.pb.h>
@@ -30,6 +32,13 @@ void FillIndexDescription(Ydb::Table::CreateTableRequest& out,
 // in
 bool FillIndexDescription(NKikimrSchemeOp::TIndexedTableCreationConfig& out,
     const Ydb::Table::CreateTableRequest& in, Ydb::StatusIds::StatusCode& status, TString& error);
+
+// out
+void FillChangefeedDescription(Ydb::Table::DescribeTableResult& out,
+    const NKikimrSchemeOp::TTableDescription& in);
+// in
+bool FillChangefeedDescription(NKikimrSchemeOp::TCdcStreamDescription& out,
+    const Ydb::Table::Changefeed& in, Ydb::StatusIds::StatusCode& status, TString& error);
 
 // out
 void FillTableStats(Ydb::Table::DescribeTableResult& out,
@@ -77,6 +86,7 @@ void FillReadReplicasSettings(Ydb::Table::CreateTableRequest& out,
 
 // in
 bool FillTableDescription(NKikimrSchemeOp::TModifyScheme& out,
-    const Ydb::Table::CreateTableRequest& in, Ydb::StatusIds::StatusCode& status, TString& error);
+    const Ydb::Table::CreateTableRequest& in, const TTableProfiles& profiles,
+    Ydb::StatusIds::StatusCode& status, TString& error);
 
 } // namespace NKikimr

@@ -6,6 +6,8 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(events)
+add_subdirectory(ut)
 
 add_library(yq-libs-test_connection)
 target_compile_options(yq-libs-test_connection PRIVATE
@@ -16,10 +18,12 @@ target_link_libraries(yq-libs-test_connection PUBLIC
   yutil
   library-cpp-lwtrace
   cpp-xml-document
+  yq-libs-actors
   libs-actors-logging
   libs-config-protos
   yq-libs-control_plane_storage
   libs-test_connection-events
+  providers-pq-cm_client
   providers-solomon-async_io
 )
 target_sources(yq-libs-test_connection PRIVATE

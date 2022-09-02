@@ -6,6 +6,13 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(actor)
+add_subdirectory(config)
+add_subdirectory(monitoring)
+add_subdirectory(oldmodule)
+add_subdirectory(protobuf)
+add_subdirectory(scheduler)
+add_subdirectory(www)
 
 add_library(library-cpp-messagebus)
 target_link_libraries(library-cpp-messagebus PUBLIC
@@ -22,6 +29,7 @@ target_link_libraries(library-cpp-messagebus PUBLIC
   cpp-messagebus-scheduler
   cpp-string_utils-indent_text
   cpp-threading-future
+  cpp-deprecated-atomic
 )
 target_sources(library-cpp-messagebus PRIVATE
   ${CMAKE_SOURCE_DIR}/library/cpp/messagebus/acceptor.cpp

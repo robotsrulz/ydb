@@ -9,6 +9,7 @@ import "ydb/core/protos/blockstore_config.proto";
 import "ydb/core/protos/filestore_config.proto";
 import "ydb/core/protos/channel_purpose.proto";
 import "ydb/core/protos/follower_group.proto";
+import "ydb/core/protos/blob_depot_config.proto";
 import "ydb/public/api/protos/ydb_coordination.proto";
 import "ydb/public/api/protos/ydb_export.proto";
 import "ydb/library/mkql_proto/protos/minikql.proto";
@@ -866,11 +867,12 @@ message TS3Settings {
     optional string ProxyHost = 9;
     optional uint32 ProxyPort = 10;
     optional EScheme ProxyScheme = 11;
+    optional string Region = 12;
 
     message TLimits {
         optional uint32 ReadBatchSize = 1 [default = 8388608]; // 8 MB
-        optional uint32 WriteBatchSize = 2 [default = 67108864]; // 64 MB
-        optional uint32 ReadBufferSizeLimit = 3 [default = 67108864]; // 64 MB
+        optional uint32 MinWriteBatchSize = 2 [default = 5242880]; // 5 MB
+        reserved 3; // ReadBufferSizeLimit
     };
 
     optional TLimits Limits = 100;
@@ -895,11 +897,18 @@ message TBackupTask {
 
     message TScanSettings {
         optional uint64 RowsBatchSize = 1 [default = 0]; // no limit
-        optional uint64 BytesBatchSize = 2 [default = 67108864]; // 64 MB
+        optional uint64 BytesBatchSize = 2 [default = 33554432]; // 32 MB
     }
 
     optional TScanSettings ScanSettings = 11;
     optional bool NeedToBill = 12;
+
+    message TCompressionOptions {
+        optional string Codec = 1;
+        optional int32 Level = 2;
+    }
+
+    optional TCompressionOptions Compression = 13; // currently available for s3
 }
 
 message TRestoreTask {
@@ -1066,6 +1075,13 @@ message TMove { // private description of the operation
     optional string DstPath = 2;
 }
 
+message TMoveIndex {
+    optional string TablePath = 1;
+    optional string SrcPath = 2;
+    optional string DstPath = 3;
+    optional bool AllowOverwrite = 4;
+}
+
 message TSequenceDescription {
     optional string Name = 1; // mandatory
     optional NKikimrProto.TPathID PathId = 2; // sequence path id, assigned by schemeshard
@@ -1091,6 +1107,14 @@ message TReplicationDescription {
     optional NKikimrProto.TPathID PathId = 3; // path id assigned by schemeshard
     optional uint64 Version = 4;
     optional uint64 ControllerId = 5; // replication controller's tablet id
+}
+
+message TBlobDepotDescription {
+    optional string Name = 1;
+    optional NKikimrProto.TPathID PathId = 2;
+    optional uint64 Version = 3;
+    optional NKikimrBlobDepot.TBlobDepotConfig Config = 4;
+    optional fixed64 TabletId = 5; // for unsharded mode
 }
 
 enum EOperationType {
@@ -1199,6 +1223,15 @@ enum EOperationType {
     ESchemeOpCreateReplication = 76;
     ESchemeOpAlterReplication = 77;
     ESchemeOpDropReplication = 78;
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    // BlobDepot
+    ESchemeOpCreateBlobDepot = 79;
+    ESchemeOpAlterBlobDepot = 80;
+    ESchemeOpDropBlobDepot = 81;
+
+    // Move index
+    ESchemeOpMoveIndex = 82;
 }
 
 message TApplyIf {
@@ -1301,6 +1334,8 @@ message TModifyScheme {
     optional TMove MoveTableIndex = 49;
     optional TSequenceDescription Sequence = 51;
     optional TReplicationDescription Replication = 52;
+    optional TBlobDepotDescription BlobDepot = 54;
+    optional TMoveIndex MoveIndex = 55;
 }
 
 // "Script", used by client to parse text files with multiple DDL commands
@@ -1354,6 +1389,7 @@ enum EPathType {
     EPathTypeCdcStream = 14;
     EPathTypeSequence = 15;
     EPathTypeReplication = 16;
+    EPathTypeBlobDepot = 17;
 }
 
 enum EPathSubType {
@@ -1404,6 +1440,7 @@ message TPathVersion {
     optional uint64 SecurityStateVersion = 23;
     optional uint64 SequenceVersion = 24;
     optional uint64 ReplicationVersion = 25;
+    optional uint64 BlobDepotVersion = 26;
 }
 
 // Describes single path
@@ -1488,6 +1525,7 @@ message TPathDescription {
     optional TCdcStreamDescription CdcStreamDescription = 23;
     optional TSequenceDescription SequenceDescription = 24;
     optional TReplicationDescription ReplicationDescription = 25;
+    optional TBlobDepotDescription BlobDepotDescription = 26;
 }
 
 // For persisting AlterTable Tx description in Schemeshard internal DB

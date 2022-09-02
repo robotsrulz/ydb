@@ -17,7 +17,6 @@ struct TDqSettings {
     struct TDefault {
         static constexpr ui32 MaxTasksPerStage = 20U;
         static constexpr ui32 MaxTasksPerOperation = 70U;
-        static constexpr ui64 PortoMemoryLimit = 3_GB;
         static constexpr bool EnablePorto = false;
         static constexpr ui64 DataSizePerJob = 128_MB;
         static constexpr ui64 MaxDataSizePerJob = 600_MB;
@@ -25,6 +24,10 @@ struct TDqSettings {
         static constexpr ui64 LiteralTimeout = 60000; // 1 minutes
         static constexpr ui64 TableTimeout = 600000; // 10 minutes
         static constexpr ui32 CloudFunctionConcurrency = 10;
+        static constexpr ui64 ChannelBufferSize = 2000_MB;
+        static constexpr ui64 OutputChunkMaxSize = 4_MB;
+        static constexpr ui64 ChunkSizeLimit = 128_MB;
+        static constexpr bool EnableDqReplicate = false;
     };
 
     using TPtr = std::shared_ptr<TDqSettings>;
@@ -49,6 +52,7 @@ struct TDqSettings {
     NCommon::TConfSetting<TString, false> OptLLVM;
     NCommon::TConfSetting<ui64, false> ChannelBufferSize;
     NCommon::TConfSetting<ui64, false> OutputChunkMaxSize;
+    NCommon::TConfSetting<ui64, false> ChunkSizeLimit;
     NCommon::TConfSetting<NSize::TSize, false> MemoryLimit;
     NCommon::TConfSetting<ui64, false> _LiteralTimeout;
     NCommon::TConfSetting<ui64, false> _TableTimeout;
@@ -60,11 +64,13 @@ struct TDqSettings {
     NCommon::TConfSetting<bool, false> EnableStrip;
     NCommon::TConfSetting<bool, false> EnableComputeActor;
     NCommon::TConfSetting<TString, false> ComputeActorType;
-    NCommon::TConfSetting<bool, false> EnablePorto; // Will be renamed to _EnablePorto
+    NCommon::TConfSetting<bool, false> _EnablePorto;
     NCommon::TConfSetting<ui64, false> _PortoMemoryLimit;
     NCommon::TConfSetting<bool, false> EnableFullResultWrite;
     NCommon::TConfSetting<bool, false> _OneGraphPerQuery;
     NCommon::TConfSetting<TString, false> _FallbackOnRuntimeErrors;
+    NCommon::TConfSetting<bool, false> _EnablePrecompute;
+    NCommon::TConfSetting<bool, false> EnableDqReplicate;
 
     NCommon::TConfSetting<TString, false> WorkerFilter;
 
@@ -98,7 +104,7 @@ struct TDqSettings {
         SAVE_SETTING(_AllResultsBytesLimit);
         SAVE_SETTING(_RowsLimitPerWrite);
         SAVE_SETTING(EnableComputeActor);
-        SAVE_SETTING(EnablePorto);
+        SAVE_SETTING(_EnablePorto);
         SAVE_SETTING(_PortoMemoryLimit);
         SAVE_SETTING(EnableFullResultWrite);
         SAVE_SETTING(_FallbackOnRuntimeErrors);

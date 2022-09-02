@@ -9,6 +9,8 @@
 #include <library/cpp/actors/core/hfunc.h>
 #include <library/cpp/actors/core/actor_bootstrapped.h>
 #include <library/cpp/protobuf/interop/cast.h>
+
+#include <ydb/core/mon/mon.h>
 #include <ydb/core/protos/services.pb.h>
 
 #include <ydb/library/yql/ast/yql_expr.h>
@@ -42,6 +44,7 @@
 #include <ydb/public/sdk/cpp/client/ydb_value/value.h>
 #include <ydb/public/sdk/cpp/client/ydb_result/result.h>
 
+#include <ydb/core/yq/libs/common/compression.h>
 #include <ydb/core/yq/libs/common/entity_id.h>
 #include <ydb/core/yq/libs/events/events.h>
 
@@ -65,11 +68,14 @@
     LOG_INFO_S(*TlsActivationContext, NKikimrServices::YQL_PROXY, "Fetcher: " << stream)
 #define LOG_D(stream) \
     LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::YQL_PROXY, "Fetcher: " << stream)
+#define LOG_T(stream) \
+    LOG_TRACE_S(*TlsActivationContext, NKikimrServices::YQL_PROXY, "Fetcher: " << stream)
 
 namespace NYq {
 
 using namespace NActors;
 using namespace NYql;
+using namespace NFq;
 
 namespace {
 
@@ -117,6 +123,7 @@ public:
         const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
         const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
         const ::NYq::NConfig::TPingerConfig& pingerConfig,
+        const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
         const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
         TIntrusivePtr<ITimeProvider> timeProvider,
         TIntrusivePtr<IRandomProvider> randomProvider,
@@ -125,8 +132,9 @@ public:
         ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
         IHTTPGateway::TPtr s3Gateway,
         ::NPq::NConfigurationManager::IConnections::TPtr pqCmConnections,
-        const NMonitoring::TDynamicCounterPtr& clientCounters,
-        const TString& tenantName
+        const ::NMonitoring::TDynamicCounterPtr& clientCounters,
+        const TString& tenantName,
+        NActors::TMon* monitoring
         )
         : YqSharedResources(yqSharedResources)
         , CredentialsProviderFactory(credentialsProviderFactory)
@@ -135,6 +143,7 @@ public:
         , PrivateApiConfig(privateApiConfig)
         , GatewaysConfig(gatewaysConfig)
         , PingerConfig(pingerConfig)
+        , RateLimiterConfig(rateLimiterConfig)
         , FunctionRegistry(functionRegistry)
         , TimeProvider(timeProvider)
         , RandomProvider(randomProvider)
@@ -143,10 +152,11 @@ public:
         , CredentialsFactory(credentialsFactory)
         , S3Gateway(s3Gateway)
         , PqCmConnections(std::move(pqCmConnections))
-        , Guid(CreateGuidAsString())
+        , FetcherGuid(CreateGuidAsString())
         , ClientCounters(clientCounters)
         , TenantName(tenantName)
         , InternalServiceId(MakeInternalServiceActorId())
+        , Monitoring(monitoring)
     {
         Y_ENSURE(GetYqlDefaultModuleResolverWithContext(ModuleResolver));
     }
@@ -159,16 +169,18 @@ public:
         NActors::IActor::PassAway();
     }
 
-    void Bootstrap(const TActorContext& ctx) {
+    void Bootstrap() {
+
+        if (Monitoring) {
+            Monitoring->RegisterActorPage(Monitoring->RegisterIndexPage("fq_diag", "Federated Query diagnostics"), 
+                "fetcher", "Pending Fetcher", false, TActivationContext::ActorSystem(), SelfId());
+        }
+        
         Become(&TPendingFetcher::StateFunc);
-
-        Y_UNUSED(ctx);
-
         DatabaseResolver = Register(CreateDatabaseResolver(MakeYqlAnalyticsHttpProxyId(), CredentialsFactory));
         Send(SelfId(), new NActors::TEvents::TEvWakeup());
 
-        LOG_I("STARTED");
-        LogScope.ConstructInPlace(NActors::TActivationContext::ActorSystem(), NKikimrServices::YQL_PROXY, Guid);
+        LogScope.ConstructInPlace(NActors::TActivationContext::ActorSystem(), NKikimrServices::YQL_PROXY, FetcherGuid);
     }
 
 private:
@@ -205,7 +217,7 @@ private:
 
     void Handle(TEvInternalService::TEvGetTaskResponse::TPtr& ev) {
         HasRunningRequest = false;
-        LOG_D("Got GetTask response from PrivateApi");
+        LOG_T("Got GetTask response from PrivateApi");
         if (!ev->Get()->Status.IsSuccess()) {
             LOG_E("Error with GetTask: "<< ev->Get()->Status.GetIssues().ToString());
             return;
@@ -213,12 +225,45 @@ private:
 
         const auto& res = ev->Get()->Result;
 
-        LOG_D("Tasks count: " << res.tasks().size());
+        LOG_T("Tasks count: " << res.tasks().size());
         if (!res.tasks().empty()) {
             ProcessTask(res);
             HasRunningRequest = true;
             GetPendingTask();
         }
+    }
+
+    void Handle(NMon::TEvHttpInfo::TPtr& ev) {
+        const auto& params = ev->Get()->Request.GetParams();
+        if (params.Has("query")) {
+            TString queryId = params.Get("query");
+
+            auto it = CountersMap.find(queryId);
+            if (it != CountersMap.end()) {
+                auto runActorId = it->second.RunActorId;
+                if (RunActorMap.find(runActorId) != RunActorMap.end()) {
+                    TActivationContext::Send(ev->Forward(runActorId));
+                    return;
+                }
+            }
+        }
+
+        TStringStream html;
+        html << "<table class='table simple-table1 table-hover table-condensed'>";
+        html << "<thead><tr>";
+        html << "<th>Query ID</th>";
+        html << "<th>Query Name</th>";
+        html << "</tr></thead><tbody>";
+        for (const auto& pr : RunActorMap) {
+            const auto& runActorInfo = pr.second;
+            html << "<tr>";
+            html << "<td><a href='fetcher?query=" << runActorInfo.QueryId << "'>" << runActorInfo.QueryId << "</a></td>";
+            html << "<td>" << runActorInfo.QueryName << "</td>";
+            html << "</tr>";
+        }
+        html << "</tbody></table>";
+
+        Send(ev->Sender, new NMon::TEvHttpInfoRes(html.Str()));
     }
 
     void HandlePoisonTaken(NActors::TEvents::TEvPoisonTaken::TPtr& ev) {
@@ -229,7 +274,7 @@ private:
             LOG_W("Unknown RunActor " << runActorId << " destroyed");
             return;
         }
-        auto queryId = itA->second;
+        auto queryId = itA->second.QueryId;
         RunActorMap.erase(itA);
 
         auto itC = CountersMap.find(queryId);
@@ -242,22 +287,27 @@ private:
     }
 
     void GetPendingTask() {
-        LOG_D("Request Private::GetTask" << ", Owner: " << Guid << ", Host: " << HostName() << ", Tenant: " << TenantName);
-        Yq::Private::GetTaskRequest request;
-        request.set_owner_id(Guid);
+        FetcherGeneration++;
+        LOG_T("Request Private::GetTask" << ", Owner: " << GetOwnerId() << ", Host: " << HostName() << ", Tenant: " << TenantName);
+        Fq::Private::GetTaskRequest request;
+        request.set_owner_id(GetOwnerId());
         request.set_host(HostName());
         request.set_tenant(TenantName);
         Send(InternalServiceId, new TEvInternalService::TEvGetTaskRequest(request));
     }
 
-    void ProcessTask(const Yq::Private::GetTaskResult& result) {
+    void ProcessTask(const Fq::Private::GetTaskResult& result) {
         for (const auto& task : result.tasks()) {
             RunTask(task);
         }
 
     }
 
-    void RunTask(const Yq::Private::GetTaskResult::Task& task) {
+    TString GetOwnerId() const {
+        return FetcherGuid + ToString(FetcherGeneration);
+    }
+
+    void RunTask(const Fq::Private::GetTaskResult::Task& task) {
         LOG_D("NewTask:"
               << " Scope: " << task.scope()
               << " Id: " << task.query_id().value()
@@ -298,7 +348,17 @@ private:
 
         queryCounters.InitUptimeCounter();
         const auto createdAt = TInstant::Now();
-
+        TVector<TString> dqGraphs;
+        if (!task.dq_graph_compressed().empty()) {
+            dqGraphs.reserve(task.dq_graph_compressed().size());
+            for (auto& g : task.dq_graph_compressed()) {
+                TCompressor compressor(g.method());
+                dqGraphs.emplace_back(compressor.Decompress(g.data()));
+            }
+        } else {
+            // todo: remove after migration
+            dqGraphs = VectorFromProto(task.dq_graph());
+        }
         TRunActorParams params(
             YqSharedResources, CredentialsProviderFactory, S3Gateway,
             FunctionRegistry, RandomProvider,
@@ -306,9 +366,10 @@ private:
             DqCompFactory, PqCmConnections,
             CommonConfig, CheckpointCoordinatorConfig,
             PrivateApiConfig, GatewaysConfig, PingerConfig,
+            RateLimiterConfig,
             task.text(), task.scope(), task.user_token(),
             DatabaseResolver, queryId,
-            task.user_id(), Guid, task.generation(),
+            task.user_id(), GetOwnerId(), task.generation(),
             VectorFromProto(task.connection()),
             VectorFromProto(task.binding()),
             CredentialsFactory,
@@ -321,7 +382,7 @@ private:
             task.status(),
             cloudId,
             VectorFromProto(task.result_set_meta()),
-            VectorFromProto(task.dq_graph()),
+            std::move(dqGraphs),
             task.dq_graph_index(),
             VectorFromProto(task.created_topic_consumers()),
             task.automatic(),
@@ -329,11 +390,15 @@ private:
             NProtoInterop::CastFromProto(task.deadline()),
             ClientCounters,
             createdAt,
-            TenantName);
+            TenantName,
+            task.result_limit(),
+            NProtoInterop::CastFromProto(task.execution_limit()),
+            NProtoInterop::CastFromProto(task.request_started_at())
+            );
 
         auto runActorId = Register(CreateRunActor(SelfId(), queryCounters, std::move(params)));
 
-        RunActorMap[runActorId] = queryId;
+        RunActorMap[runActorId] = TRunActorInfo { .QueryId = queryId, .QueryName = task.query_name() };
         if (!task.automatic()) {
             CountersMap[queryId] = { rootCountersParent, publicCountersParent, runActorId };
         }
@@ -345,6 +410,7 @@ private:
         hFunc(TEvInternalService::TEvGetTaskResponse, Handle)
         hFunc(NActors::TEvents::TEvPoisonTaken, HandlePoisonTaken)
         hFunc(TEvPrivate::TEvCleanupCounters, HandleCleanupCounters)
+        hFunc(NMon::TEvHttpInfo, Handle);
     );
 
     NYq::TYqSharedResources::TPtr YqSharedResources;
@@ -354,6 +420,7 @@ private:
     NYq::NConfig::TPrivateApiConfig PrivateApiConfig;
     NYq::NConfig::TGatewaysConfig GatewaysConfig;
     NYq::NConfig::TPingerConfig PingerConfig;
+    NYq::NConfig::TRateLimiterConfig RateLimiterConfig;
 
     const NKikimr::NMiniKQL::IFunctionRegistry* FunctionRegistry;
     TIntrusivePtr<ITimeProvider> TimeProvider;
@@ -373,21 +440,28 @@ private:
     const IHTTPGateway::TPtr S3Gateway;
     const ::NPq::NConfigurationManager::IConnections::TPtr PqCmConnections;
 
-    const TString Guid; //OwnerId
-    const NMonitoring::TDynamicCounterPtr ClientCounters;
+    const TString FetcherGuid;
+    uint64_t FetcherGeneration = 0;
+    const ::NMonitoring::TDynamicCounterPtr ClientCounters;
 
     TMaybe<NYql::NLog::TScopedBackend<NYql::NDq::TYqlLogScope>> LogScope;
 
     struct TQueryCountersInfo {
-        NMonitoring::TDynamicCounterPtr RootCountersParent;
-        NMonitoring::TDynamicCounterPtr PublicCountersParent;
+        ::NMonitoring::TDynamicCounterPtr RootCountersParent;
+        ::NMonitoring::TDynamicCounterPtr PublicCountersParent;
         TActorId RunActorId;
     };
 
+    struct TRunActorInfo {
+        TString QueryId;
+        TString QueryName;
+    };
+
     TMap<TString, TQueryCountersInfo> CountersMap;
-    TMap<TActorId, TString> RunActorMap;
+    TMap<TActorId, TRunActorInfo> RunActorMap;
     TString TenantName;
     TActorId InternalServiceId;
+    NActors::TMon* Monitoring;
 };
 
 
@@ -399,6 +473,7 @@ NActors::IActor* CreatePendingFetcher(
     const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
     const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
     const ::NYq::NConfig::TPingerConfig& pingerConfig,
+    const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
     const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
     TIntrusivePtr<ITimeProvider> timeProvider,
     TIntrusivePtr<IRandomProvider> randomProvider,
@@ -407,8 +482,9 @@ NActors::IActor* CreatePendingFetcher(
     ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
     IHTTPGateway::TPtr s3Gateway,
     ::NPq::NConfigurationManager::IConnections::TPtr pqCmConnections,
-    const NMonitoring::TDynamicCounterPtr& clientCounters,
-    const TString& tenantName)
+    const ::NMonitoring::TDynamicCounterPtr& clientCounters,
+    const TString& tenantName,
+    NActors::TMon* monitoring)
 {
     return new TPendingFetcher(
         yqSharedResources,
@@ -418,6 +494,7 @@ NActors::IActor* CreatePendingFetcher(
         privateApiConfig,
         gatewaysConfig,
         pingerConfig,
+        rateLimiterConfig,
         functionRegistry,
         timeProvider,
         randomProvider,
@@ -427,7 +504,8 @@ NActors::IActor* CreatePendingFetcher(
         s3Gateway,
         std::move(pqCmConnections),
         clientCounters,
-        tenantName);
+        tenantName,
+        monitoring);
 }
 
 TActorId MakePendingFetcherId(ui32 nodeId) {

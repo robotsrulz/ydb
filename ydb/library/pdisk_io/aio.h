@@ -7,7 +7,7 @@
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_request_id.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_util_devicemode.h>
 
-#include <ydb/library/wilson/wilson_event.h>
+#include <library/cpp/actors/wilson/wilson_event.h>
 
 #include <util/system/file.h>
 #include <util/generic/string.h>
@@ -130,6 +130,7 @@ public:
     virtual int GetLastErrno() = 0;
     virtual TString GetPDiskInfo() = 0;
     virtual TFileHandle *GetFileHandle() = 0;
+    virtual void OnAsyncIoOperationCompletion(IAsyncIoOperation *op) = 0;
 };
 
 std::unique_ptr<IAsyncIoContext> CreateAsyncIoContextReal(const TString &path, ui32 pDiskId, TDeviceMode::TFlags flags);

@@ -646,6 +646,66 @@ Y_UNIT_TEST_SUITE(TFlatTableExecutorTxLimit) {
 }
 
 
+Y_UNIT_TEST_SUITE(TFlatTableReschedule) {
+
+    class TTxRollbackOnReschedule : public ITransaction {
+    public:
+        bool Execute(TTransactionContext& txc, const TActorContext&) override {
+            Y_VERIFY(!Done);
+
+            i64 keyId = 42;
+
+            int attempt = ++Attempt;
+            if (attempt >= 2) {
+                TVector<NTable::TTag> tags;
+                tags.push_back(TRowsModel::ColumnValueId);
+                TVector<TRawTypeValue> key;
+                key.emplace_back(&keyId, sizeof(keyId), NScheme::TInt64::TypeId);
+                NTable::TRowState row;
+                auto ready = txc.DB.Select(TRowsModel::TableId, key, tags, row);
+                if (ready == NTable::EReady::Page) {
+                    return false;
+                }
+                Y_VERIFY(ready == NTable::EReady::Gone);
+            }
+
+            TString valueText = "value";
+            const auto key = NScheme::TInt64::TInstance(keyId);
+            const auto val = NScheme::TString::TInstance(valueText);
+            NTable::TUpdateOp updateOp{ TRowsModel::ColumnValueId, NTable::ECellOp::Set, val };
+            txc.DB.Update(TRowsModel::TableId, NTable::ERowOp::Upsert, { key }, { updateOp });
+
+            if (attempt == 1) {
+                txc.Reschedule();
+                return false;
+            }
+
+            Done = true;
+            return true;
+        }
+
+        void Complete(const TActorContext& ctx) override {
+            Y_VERIFY(Done);
+            ctx.Send(ctx.SelfID, new NFake::TEvReturn);
+        }
+
+    private:
+        int Attempt = 0;
+        bool Done = false;
+    };
+
+    Y_UNIT_TEST(TestExecuteReschedule) {
+        TMyEnvBase env;
+        TRowsModel rows;
+
+        env.FireDummyTablet();
+        env.SendSync(rows.MakeScheme(new TCompactionPolicy()));
+        env.SendSync(new NFake::TEvExecute{ new TTxRollbackOnReschedule });
+    }
+
+} // namespace Y_UNIT_TEST_SUITE(TFlatTableExecuteReschedule)
+
+
 Y_UNIT_TEST_SUITE(TFlatTableBackgroundCompactions) {
 
     using namespace NKikimrResourceBroker;
@@ -4091,6 +4151,58 @@ Y_UNIT_TEST_SUITE(TFlatTableLongTx) {
         }
     };
 
+    struct TTxCheckRowsReadTx : public ITransaction {
+        TString& Data;
+        const ui64 TxId;
+
+        TTxCheckRowsReadTx(TString& data, ui64 txId)
+            : Data(data)
+            , TxId(txId)
+        { }
+
+        bool Execute(TTransactionContext& txc, const TActorContext&) override {
+            TStringBuilder builder;
+
+            TVector<NTable::TTag> tags;
+            tags.push_back(KeyColumnId);
+            tags.push_back(ValueColumnId);
+            tags.push_back(Value2ColumnId);
+
+            NTable::EReady ready;
+            auto it = txc.DB.IterateRange(TableId, { }, tags,
+                TRowVersion::Max(),
+                MakeIntrusive<NTable::TSingleTransactionMap>(TxId, TRowVersion::Min()));
+
+            while ((ready = it->Next(NTable::ENext::All)) != NTable::EReady::Gone) {
+                if (ready == NTable::EReady::Page) {
+                    return false;
+                }
+
+                const auto& row = it->Row();
+
+                TString key;
+                DbgPrintValue(key, row.Get(0), NScheme::TUint64::TypeId);
+
+                TString value;
+                DbgPrintValue(value, row.Get(1), NScheme::TString::TypeId);
+
+                TString value2;
+                DbgPrintValue(value2, row.Get(2), NScheme::TString::TypeId);
+
+                builder << "Key " << key << " = " << row.GetRowState()
+                    << " value = " << NTable::ECellOp(row.GetCellOp(1)) << " " << value
+                    << " value2 = " << NTable::ECellOp(row.GetCellOp(2)) << " " << value2 << Endl;
+            }
+
+            Data = builder;
+            return true;
+        }
+
+        void Complete(const TActorContext& ctx) override {
+            ctx.Send(ctx.SelfID, new NFake::TEvReturn);
+        }
+    };
+
     struct TTxCheckRowsUncommitted : public ITransaction {
         TString& Data;
 
@@ -4620,6 +4732,53 @@ Y_UNIT_TEST_SUITE(TFlatTableLongTx) {
         }
     }
 
+    Y_UNIT_TEST(MemTableLongTxRead) {
+        TMyEnvBase env;
+
+        //env->SetLogPriority(NKikimrServices::RESOURCE_BROKER, NActors::NLog::PRI_DEBUG);
+        //env->SetLogPriority(NKikimrServices::TABLET_EXECUTOR, NActors::NLog::PRI_DEBUG);
+
+        env.FireDummyTablet(ui32(NFake::TDummy::EFlg::Comp));
+
+        env.SendSync(new NFake::TEvExecute{ new TTxInitSchema });
+        env.SendSync(new NFake::TEvExecute{ new TTxWriteRow<ValueColumnId>(1, "foo") });
+        env.SendSync(new NFake::TEvExecute{ new TTxWriteRow<Value2ColumnId>(2, "bar") });
+        env.SendSync(new NFake::TEvExecute{ new TTxWriteRow<ValueColumnId>(3, "abc", 123) });
+        env.SendSync(new NFake::TEvExecute{ new TTxWriteRow<Value2ColumnId>(1, "def", 123) });
+        env.SendSync(new NFake::TEvExecute{ new TTxWriteRow<Value2ColumnId>(2, "ghi", 123) });
+
+        // We should see our own uncommitted changes
+        {
+            TString data;
+            env.SendSync(new NFake::TEvExecute{ new TTxCheckRowsReadTx(data, 123) });
+            UNIT_ASSERT_VALUES_EQUAL(data,
+                "Key 1 = Upsert value = Set foo value2 = Set def\n"
+                "Key 2 = Upsert value = Empty NULL value2 = Set ghi\n"
+                "Key 3 = Upsert value = Set abc value2 = Empty NULL\n");
+        }
+
+        // Others shouldn't see these changes yet
+        {
+            TString data;
+            env.SendSync(new NFake::TEvExecute{ new TTxCheckRows(data) });
+            UNIT_ASSERT_VALUES_EQUAL(data,
+                "Key 1 = Upsert value = Set foo value2 = Empty NULL\n"
+                "Key 2 = Upsert value = Empty NULL value2 = Set bar\n");
+        }
+
+        env.SendSync(new NFake::TEvExecute{ new TTxCommitLongTx(123) });
+
+        // Once committed everyone will see these changes
+        {
+            TString data;
+            env.SendSync(new NFake::TEvExecute{ new TTxCheckRows(data) });
+            UNIT_ASSERT_VALUES_EQUAL(data,
+                "Key 1 = Upsert value = Set foo value2 = Set def\n"
+                "Key 2 = Upsert value = Empty NULL value2 = Set ghi\n"
+                "Key 3 = Upsert value = Set abc value2 = Empty NULL\n");
+        }
+    }
+
 } // Y_UNIT_TEST_SUITE(TFlatTableLongTx)
 
 Y_UNIT_TEST_SUITE(TFlatTableLongTxAndBlobs) {
@@ -4791,6 +4950,136 @@ Y_UNIT_TEST_SUITE(TFlatTableLongTxAndBlobs) {
     }
 
 } // Y_UNIT_TEST_SUITE(TFlatTableLongTxAndBlobs)
+
+Y_UNIT_TEST_SUITE(TFlatTableSnapshotWithCommits) {
+
+    struct TTxMakeSnapshotAndWrite : public ITransaction {
+        bool Execute(TTransactionContext& txc, const TActorContext&) override {
+            TIntrusivePtr<TTableSnapshotContext> snapContext =
+                new TTestTableSnapshotContext({TRowsModel::TableId});
+            txc.Env.MakeSnapshot(snapContext);
+
+            for (i64 keyValue = 101; keyValue <= 104; ++keyValue) {
+                const auto key = NScheme::TInt64::TInstance(keyValue);
+
+                TString str = "value";
+                const auto val = NScheme::TString::TInstance(str);
+                NTable::TUpdateOp ops{ TRowsModel::ColumnValueId, NTable::ECellOp::Set, val };
+
+                txc.DB.Update(TRowsModel::TableId, NTable::ERowOp::Upsert, { key }, { ops });
+            }
+
+            return true;
+        }
+
+        void Complete(const TActorContext& ctx) override {
+            ctx.Send(ctx.SelfID, new NFake::TEvReturn);
+        }
+    };
+
+    struct TTxBorrowSnapshot : public ITransactionWithExecutor {
+        TTxBorrowSnapshot(TString& snapBody, TIntrusivePtr<TTableSnapshotContext> snapContext, ui64 targetTabletId)
+            : SnapBody(snapBody)
+            , SnapContext(std::move(snapContext))
+            , TargetTabletId(targetTabletId)
+        { }
+
+        bool Execute(TTransactionContext& txc, const TActorContext&) override {
+            SnapBody = Executor->BorrowSnapshot(TRowsModel::TableId, *SnapContext, { }, { }, TargetTabletId);
+            txc.Env.DropSnapshot(SnapContext);
+            return true;
+        }
+
+        void Complete(const TActorContext& ctx) override {
+            ctx.Send(ctx.SelfID, new NFake::TEvReturn);
+        }
+
+    private:
+        TString& SnapBody;
+        TIntrusivePtr<TTableSnapshotContext> SnapContext;
+        const ui64 TargetTabletId;
+    };
+
+    struct TTxCheckRows : public ITransaction {
+        bool Execute(TTransactionContext &txc, const TActorContext &) override
+        {
+            i64 keyId;
+            TVector<NTable::TTag> tags;
+            tags.push_back(TRowsModel::ColumnValueId);
+            TVector<TRawTypeValue> key;
+            key.emplace_back(&keyId, sizeof(keyId), NScheme::TInt64::TypeId);
+
+            for (keyId = 1; keyId <= 104; ++keyId) {
+                NTable::TRowState row;
+                auto ready = txc.DB.Select(TRowsModel::TableId, key, tags, row);
+                if (ready == NTable::EReady::Page)
+                    return false;
+                Y_VERIFY_S(ready == NTable::EReady::Data, "Failed to find key " << keyId);
+                Y_VERIFY(row.GetRowState() == NTable::ERowOp::Upsert);
+                TStringBuf selected = row.Get(0).AsBuf();
+                TString expected = "value";
+                Y_VERIFY(selected == expected);
+            }
+
+            return true;
+        }
+
+        void Complete(const TActorContext &ctx) override
+        {
+            ctx.Send(ctx.SelfID, new NFake::TEvReturn);
+        }
+    };
+
+    Y_UNIT_TEST(SnapshotWithCommits) {
+        TMyEnvBase env;
+        TRowsModel rows;
+
+        env->SetLogPriority(NKikimrServices::TABLET_EXECUTOR, NActors::NLog::PRI_DEBUG);
+
+        // Start the first tablet
+        env.FireTablet(env.Edge, env.Tablet, [&env](const TActorId &tablet, TTabletStorageInfo *info) {
+            return new TTestFlatTablet(env.Edge, tablet, info);
+        });
+        env.WaitForWakeUp();
+
+        // Init schema
+        {
+            TIntrusivePtr<TCompactionPolicy> policy = new TCompactionPolicy();
+            env.SendSync(rows.MakeScheme(std::move(policy)));
+        }
+
+        // Insert 100 rows
+        Cerr << "...inserting rows" << Endl;
+        env.SendSync(rows.MakeRows(100, 0, 100));
+
+        Cerr << "...making snapshot and writing to table" << Endl;
+        env.SendSync(new NFake::TEvExecute{ new TTxMakeSnapshotAndWrite });
+        Cerr << "...waiting for snapshot to complete" << Endl;
+        auto evSnapshot = env.GrabEdgeEvent<TEvTestFlatTablet::TEvSnapshotComplete>();
+        Cerr << "...borrowing snapshot" << Endl;
+        TString snapBody;
+        env.SendSync(new NFake::TEvExecute{ new TTxBorrowSnapshot(snapBody, evSnapshot->Get()->SnapContext, env.Tablet + 1) });
+
+        // Check all added rows one-by-one
+        Cerr << "...checking rows" << Endl;
+        env.SendSync(new NFake::TEvExecute{ new TTxCheckRows });
+
+        for (int i = 0; i < 2; ++i) {
+            Cerr << "...restarting tablet" << Endl;
+            env.SendSync(new TEvents::TEvPoison, false, true);
+            env.WaitForGone();
+            env.FireTablet(env.Edge, env.Tablet, [&env](const TActorId &tablet, TTabletStorageInfo *info) {
+                return new TTestFlatTablet(env.Edge, tablet, info);
+            });
+            env.WaitForWakeUp();
+
+            // Check all added rows one-by-one
+            Cerr << "...checking rows" << Endl;
+            env.SendSync(new NFake::TEvExecute{ new TTxCheckRows }, /* retry */ true);
+        }
+    }
+
+} // Y_UNIT_TEST_SUITE(TFlatTableSnapshotWithCommits)
 
 } // namespace NTabletFlatExecutor
 } // namespace NKikimr

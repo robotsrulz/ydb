@@ -133,9 +133,9 @@ namespace NKikimr {
 
         // create delayed huge blob deleter actor only for LogoBlobs level index as huge blobs are only possible
         // for that data
-        auto& deleterInfo = HullDs->LogoBlobs->DelayedHugeBlobDeleterInfo;
-        auto hugeBlobDeleterAid = ctx.RegisterWithSameMailbox(CreateDelayedHugeBlobDeleterActor(hullLogCtx->HugeKeeperId,
-            deleterInfo));
+        auto& deleterInfo = HullDs->LogoBlobs->DelayedCompactionDeleterInfo;
+        auto hugeBlobDeleterAid = ctx.RegisterWithSameMailbox(CreateDelayedCompactionDeleterActor(hullLogCtx->HugeKeeperId,
+            hullLogCtx->SkeletonId, hullLogCtx->PDiskCtx, deleterInfo));
         deleterInfo->SetActorId(hugeBlobDeleterAid);
         activeActors.Insert(hugeBlobDeleterAid);
 
@@ -150,9 +150,10 @@ namespace NKikimr {
             IEventBase *msg,
             const TActorId &recipient,
             ui64 recipientCookie,
+            NWilson::TTraceId traceId,
             ui64 lsn)
     {
-        Fields->DelayedResponses.Put(msg, recipient, recipientCookie, lsn);
+        Fields->DelayedResponses.Put(msg, recipient, recipientCookie, std::move(traceId), lsn);
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -161,7 +162,8 @@ namespace NKikimr {
     THullCheckStatus THull::CheckLogoBlob(
             const TActorContext &ctx,
             const TLogoBlobID &id,
-            bool ignoreBlock)
+            bool ignoreBlock,
+            const NProtoBuf::RepeatedPtrField<NKikimrBlobStorage::TEvVPut::TExtraBlockCheck>& extraBlockChecks)
     {
         // check blocked
         if (!ignoreBlock) {
@@ -173,6 +175,18 @@ namespace NKikimr {
                     return {NKikimrProto::BLOCKED, "blocked", 0, false};
                 case TBlocksCache::EStatus::BLOCKED_INFLIGH:
                     return {NKikimrProto::BLOCKED, "blocked", res.Lsn, true};
+            }
+
+            for (const auto& item : extraBlockChecks) {
+                auto res = BlocksCache.IsBlocked(item.GetTabletId(), {item.GetGeneration(), 0});
+                switch (res.Status) {
+                    case TBlocksCache::EStatus::OK:
+                        break;
+                    case TBlocksCache::EStatus::BLOCKED_PERS:
+                        return {NKikimrProto::BLOCKED, "blocked", 0, false};
+                    case TBlocksCache::EStatus::BLOCKED_INFLIGH:
+                        return {NKikimrProto::BLOCKED, "blocked", res.Lsn, true};
+                }
             }
         }
 
@@ -394,7 +408,7 @@ namespace NKikimr {
         if (!CheckGC(ctx, record))
             return {NKikimrProto::ERROR, 0, false}; // record has duplicates
 
-        auto blockStatus = IsBlocked(record);
+        auto blockStatus = THullDbRecovery::IsBlocked(record);
         switch (blockStatus.Status) {
             case TBlocksCache::EStatus::OK:
                 break;

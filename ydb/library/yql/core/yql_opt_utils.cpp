@@ -579,6 +579,25 @@ TExprNode::TPtr ExpandRemoveMember(const TExprNode::TPtr& node, TExprContext& ct
     return ctx.NewCallable(node->Pos(), "AsStruct", std::move(members));
 }
 
+TExprNode::TPtr ExpandRemoveMembers(const TExprNode::TPtr& node, TExprContext& ctx) {
+    const auto& membersToRemove = node->Child(1);
+    MemberUpdaterFunc removeFunc = [&membersToRemove](TString& memberName, const TTypeAnnotationNode*) {
+        for (const auto& x : membersToRemove->Children()) {
+            if (memberName == x->Content()) {
+                return false;
+            }
+        }
+
+        return true;
+    };
+
+    TExprNode::TListType members;
+    if (!UpdateStructMembers(ctx, node->ChildPtr(0), node->Content(), members, removeFunc)) {
+        return node->ChildPtr(0);
+    }
+    return ctx.NewCallable(node->Pos(), "AsStruct", std::move(members));
+}
+
 TExprNode::TPtr ExpandRemovePrefixMembers(const TExprNode::TPtr& node, TExprContext& ctx) {
     YQL_CLOG(DEBUG, Core) << "Expand " << node->Content();
 
@@ -1375,6 +1394,92 @@ IGraphTransformer::TStatus LocalUnorderedOptimize(TExprNode::TPtr input, TExprNo
 
     return status;
 
+}
+
+std::pair<TExprNode::TPtr, TExprNode::TPtr> ReplaceDependsOn(TExprNode::TPtr lambda, TExprContext& ctx, TTypeAnnotationContext* typeCtx) {
+    auto placeHolder = ctx.NewArgument(lambda->Pos(), "placeholder");
+
+    auto status = OptimizeExpr(lambda, lambda, [&placeHolder, arg = &lambda->Head().Head()](const TExprNode::TPtr& node, TExprContext& ctx) -> TExprNode::TPtr {
+        if (TCoDependsOn::Match(node.Get()) && &node->Head() == arg) {
+            return ctx.ChangeChild(*node, 0, TExprNode::TPtr(placeHolder));
+        }
+        return node;
+    }, ctx, TOptimizeExprSettings{typeCtx});
+
+    if (status.Level == IGraphTransformer::TStatus::Error) {
+        return std::pair<TExprNode::TPtr, TExprNode::TPtr>{};
+    }
+
+    return {placeHolder, lambda};
+}
+
+TStringBuf GetEmptyCollectionName(ETypeAnnotationKind kind) {
+    switch (kind) {
+        case ETypeAnnotationKind::Flow:
+        case ETypeAnnotationKind::Stream:   return "EmptyIterator";
+        case ETypeAnnotationKind::List:     return "List";
+        case ETypeAnnotationKind::Optional: return "Nothing";
+        case ETypeAnnotationKind::Dict:     return "Dict";
+        case ETypeAnnotationKind::Pg:       return "Nothing";
+        default: break;
+    }
+    return {};
+}
+
+namespace {
+
+ui8 GetTypeWeight(const TTypeAnnotationNode& type) {
+    switch (type.GetKind()) {
+        case ETypeAnnotationKind::Data:
+            switch (type.Cast<TDataExprType>()->GetSlot()) {
+                case NUdf::EDataSlot::Bool:
+                case NUdf::EDataSlot::Int8:
+                case NUdf::EDataSlot::Uint8: return 1;
+
+                case NUdf::EDataSlot::Int16:
+                case NUdf::EDataSlot::Uint16:
+                case NUdf::EDataSlot::Date: return 2;
+
+                case NUdf::EDataSlot::TzDate: return 3;
+
+                case NUdf::EDataSlot::Int32:
+                case NUdf::EDataSlot::Uint32:
+                case NUdf::EDataSlot::Float:
+                case NUdf::EDataSlot::Datetime: return 4;
+
+                case NUdf::EDataSlot::TzDatetime: return 5;
+
+                case NUdf::EDataSlot::Int64:
+                case NUdf::EDataSlot::Uint64:
+                case NUdf::EDataSlot::Double:
+                case NUdf::EDataSlot::Timestamp:
+                case NUdf::EDataSlot::Interval:  return 8;
+
+                case NUdf::EDataSlot::TzTimestamp: return 9;
+
+                case NUdf::EDataSlot::Decimal: return 15;
+                case NUdf::EDataSlot::Uuid: return 16;
+
+                default: return 32;
+            }
+            case ETypeAnnotationKind::Optional: return 1 + GetTypeWeight(*type.Cast<TOptionalExprType>()->GetItemType());
+            default: return 255;
+    }
+}
+
+} // namespace
+
+const TItemExprType* GetLightColumn(const TStructExprType& type) {
+    ui8 weight = 255;
+    const TItemExprType* field = nullptr;
+    for (const auto& item : type.GetItems()) {
+
+        if (const auto w = GetTypeWeight(*item->GetItemType()); w < weight) {
+            weight = w;
+            field = item;
+        }
+    }
+    return field;
 }
 
 }

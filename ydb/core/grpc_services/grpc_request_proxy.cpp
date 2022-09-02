@@ -210,6 +210,11 @@ private:
                     skipCheckConnectRigths = true;
                 }
             }
+            if (databaseName.empty()) {
+                Counters->IncDatabaseUnavailableCounter();
+                requestBaseCtx->ReplyUnauthenticated("Empty database name");
+                return;
+            }
             auto it = Databases.find(databaseName);
             if (it != Databases.end() && it->second.IsDatabaseReady()) {
                 database = &it->second;
@@ -242,6 +247,9 @@ private:
                         requestBaseCtx->ReplyWithYdbStatus(Ydb::StatusIds::UNAUTHORIZED);
                         return;
                     }
+                }
+                if (domain.GetDomainState().GetDiskQuotaExceeded()) {
+                    requestBaseCtx->SetDiskQuotaExceeded(true);
                 }
             } else {
                 Counters->IncDatabaseUnavailableCounter();
@@ -320,6 +328,8 @@ void TGRpcRequestProxyImpl::Bootstrap(const TActorContext& ctx) {
     InitializeGRpcProxyDbCountersRegistry(ctx.ActorSystem());
 
     RootDatabase = DatabaseFromDomain();
+    Y_VERIFY(!RootDatabase.empty());
+
     TDatabaseInfo& database = Databases[RootDatabase];
     database.DatabaseType = TDatabaseInfo::TDatabaseType::Root;
     database.State = NKikimrTenantPool::EState::TENANT_OK;
@@ -572,8 +582,9 @@ void TGRpcRequestProxyImpl::StateFunc(TAutoPtr<IEventHandle>& ev, const TActorCo
         HFunc(TEvBiStreamPingRequest, PreHandle);
         HFunc(TEvExperimentalStreamQueryRequest, PreHandle);
         HFunc(TEvStreamPQWriteRequest, PreHandle);
-        HFunc(TEvStreamPQReadRequest, PreHandle);
         HFunc(TEvStreamPQMigrationReadRequest, PreHandle);
+        HFunc(TEvStreamTopicWriteRequest, PreHandle);
+        HFunc(TEvStreamTopicReadRequest, PreHandle);
         HFunc(TEvPQReadInfoRequest, PreHandle);
         HFunc(TEvPQDropTopicRequest, PreHandle);
         HFunc(TEvPQCreateTopicRequest, PreHandle);
@@ -583,6 +594,11 @@ void TGRpcRequestProxyImpl::StateFunc(TAutoPtr<IEventHandle>& ev, const TActorCo
         HFunc(TEvPQDescribeTopicRequest, PreHandle);
         HFunc(TEvDiscoverPQClustersRequest, PreHandle);
         HFunc(TEvCoordinationSessionRequest, PreHandle);
+        HFunc(TEvDropTopicRequest, PreHandle);
+        HFunc(TEvCreateTopicRequest, PreHandle);
+        HFunc(TEvAlterTopicRequest, PreHandle);
+        HFunc(TEvDescribeTopicRequest, PreHandle);
+        HFunc(TEvNodeCheckRequest, PreHandle);
 
         HFunc(TEvProxyRuntimeEvent, PreHandle);
 

@@ -162,11 +162,11 @@ class TSyncLogTestWriteActor : public TActorBootstrapped<TSyncLogTestWriteActor>
 
     void Bootstrap(const TActorContext &ctx) {
         STR << "RUN TEST\n";
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters(new NMonitoring::TDynamicCounters);
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters(new ::NMonitoring::TDynamicCounters);
         auto &vDiskInstance = Conf->VDisks->Get(0);
         auto &groupInfo = Conf->GroupInfo;
         VCtx = MakeIntrusive<TVDiskContext>(ctx.SelfID, groupInfo->PickTopology(), counters, vDiskInstance.VDiskID,
-            ctx.ExecutorThread.ActorSystem, TPDiskCategory::DEVICE_TYPE_UNKNOWN);
+            ctx.ExecutorThread.ActorSystem, NPDisk::DEVICE_TYPE_UNKNOWN);
         VDiskConfig = vDiskInstance.Cfg;
         TestCtx->SelfVDiskId = groupInfo->GetVDiskId(VCtx->ShortSelfVDisk);
 

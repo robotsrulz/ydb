@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(ydb-core-health_check)
 target_link_libraries(ydb-core-health_check PUBLIC
@@ -16,6 +17,7 @@ target_link_libraries(ydb-core-health_check PUBLIC
   core-blobstorage-base
   ydb-library-aclib
   api-protos
+  api-grpc
   public-issue-protos
 )
 target_sources(ydb-core-health_check PRIVATE

@@ -47,10 +47,12 @@ class Ya(object):
             context_runtime = test_context["runtime"]
             context_internal = test_context.get("internal", {})
             context_build = test_context.get("build", {})
+            context_resources = test_context.get("resources", {})
         else:
             context_runtime = {}
             context_internal = {}
             context_build = {}
+            context_resources = {}
         self._mode = mode
         self._build_root = to_str(context_runtime.get("build_root", "")) or build_root
         self._source_root = to_str(context_runtime.get("source_root", "")) or source_root or self._detect_source_root()
@@ -89,7 +91,10 @@ class Ya(object):
         self._context["project_path"] = context_runtime.get("project_path")
         self._context["modulo"] = context_runtime.get("split_count", 1)
         self._context["modulo_index"] = context_runtime.get("split_index", 0)
-        self._context["work_path"] = context_runtime.get("work_path")
+        self._context["work_path"] = to_str(context_runtime.get("work_path"))
+        self._context["test_tool_path"] = context_runtime.get("test_tool_path")
+        self._context["test_output_ram_drive_path"] = to_str(context_runtime.get("test_output_ram_drive_path"))
+        self._context["ya_global_resources"] = context_resources.get("global")
 
         self._context["sanitize"] = context_build.get("sanitizer")
         self._context["ya_trace_path"] = context_internal.get("trace_file")
@@ -97,7 +102,9 @@ class Ya(object):
         self._env_file = context_internal.get("env_file")
 
         if context:
-            self._context.update(context)
+            for k, v in context.items():
+                if k not in self._context or v is not None:
+                    self._context[k] = v
 
     @property
     def source_root(self):

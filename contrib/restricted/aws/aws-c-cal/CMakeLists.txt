@@ -9,10 +9,10 @@
 find_package(OpenSSL REQUIRED)
 
 add_library(restricted-aws-aws-c-cal)
-target_include_directories(restricted-aws-aws-c-cal PUBLIC
-  ${CMAKE_SOURCE_DIR}/contrib/restricted/aws/aws-c-cal/include
+target_compile_options(restricted-aws-aws-c-cal PRIVATE
+  -Wno-everything
 )
-target_include_directories(restricted-aws-aws-c-cal PRIVATE
+target_include_directories(restricted-aws-aws-c-cal PUBLIC
   ${CMAKE_SOURCE_DIR}/contrib/restricted/aws/aws-c-cal/include
 )
 target_link_libraries(restricted-aws-aws-c-cal PUBLIC

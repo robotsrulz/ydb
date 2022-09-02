@@ -6,6 +6,27 @@
 # original buildsystem will not be accepted.
 
 
-if (UNIX)
-  include(CMakeLists.linux.txt)
-endif()
+
+add_library(abseil-cpp-absl-status)
+target_compile_options(abseil-cpp-absl-status PRIVATE
+  -DNOMINMAX
+  -Wno-everything
+)
+target_include_directories(abseil-cpp-absl-status PUBLIC
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp
+)
+target_link_libraries(abseil-cpp-absl-status PUBLIC
+  contrib-libs-cxxsupp
+  abseil-cpp-absl-base
+  abseil-cpp-absl-debugging
+  abseil-cpp-absl-numeric
+  abseil-cpp-absl-profiling
+  abseil-cpp-absl-strings
+  abseil-cpp-absl-synchronization
+  abseil-cpp-absl-time
+  abseil-cpp-absl-types
+)
+target_sources(abseil-cpp-absl-status PRIVATE
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/status/status.cc
+  ${CMAKE_SOURCE_DIR}/contrib/restricted/abseil-cpp/absl/status/status_payload_printer.cc
+)

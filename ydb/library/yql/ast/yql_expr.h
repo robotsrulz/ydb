@@ -12,6 +12,8 @@
 #include <ydb/library/yql/public/issue/yql_issue_manager.h>
 #include <ydb/library/yql/public/udf/udf_data_type.h>
 
+#include <library/cpp/yson/node/node.h>
+
 #include <library/cpp/string_utils/levenshtein_diff/levenshtein_diff.h>
 #include <library/cpp/enumbitset/enumbitset.h>
 #include <library/cpp/containers/stack_vector/stack_vec.h>
@@ -23,6 +25,7 @@
 #include <util/generic/cast.h>
 #include <util/generic/hash.h>
 #include <util/generic/maybe.h>
+#include <util/generic/set.h>
 #include <util/generic/bt_exception.h>
 #include <util/generic/algorithm.h>
 #include <util/digest/murmur.h>
@@ -1429,7 +1432,7 @@ public:
         Result = std::move(result);
     }
 
-    bool IsCallable(const TStringBuf& name) const {
+    bool IsCallable(const std::string_view& name) const {
         ENSURE_NOT_DELETED
         return Type() == TExprNode::Callable && Content() == name;
     }
@@ -1460,9 +1463,14 @@ public:
         return Type() == TExprNode::World;
     }
 
-    bool IsAtom(const TStringBuf& content) const {
+    bool IsAtom(const std::string_view& content) const {
         ENSURE_NOT_DELETED
         return Type() == TExprNode::Atom && Content() == content;
+    }
+
+    bool IsAtom(const std::initializer_list<std::string_view>& names) const {
+        ENSURE_NOT_DELETED
+        return Type() == TExprNode::Atom && names.end() != std::find(names.begin(), names.end(), Content());
     }
 
     bool IsList() const {
@@ -2074,6 +2082,7 @@ public:
 
 struct TExprStep {
     enum ELevel {
+        Params,
         ExpandApplyForLambdas,
         ValidateProviders,
         Configure,
@@ -2109,7 +2118,7 @@ struct TExprStep {
     }
 
 private:
-    TEnumBitSet<ELevel, ExpandApplyForLambdas, LastLevel> Steps_;
+    TEnumBitSet<ELevel, Params, LastLevel> Steps_;
 };
 
 template <typename T>
@@ -2616,6 +2625,8 @@ TAstParseResult ConvertToAst(const TExprNode& root, TExprContext& ctx, const TCo
 TAstParseResult ConvertToAst(const TExprNode& root, TExprContext& ctx, ui32 annotationFlags, bool refAtoms);
 
 TExprNode::TListType GetLambdaBody(const TExprNode& lambda);
+
+TString SubstParameters(const TString& str, const TMaybe<NYT::TNode>& params, TSet<TString>* usedNames);
 
 } // namespace NYql
 

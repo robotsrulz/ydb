@@ -14,15 +14,13 @@ target_link_libraries(internal-proxies-avx2 PUBLIC
   argonish-internal-argon2
   argonish-internal-blake2b
 )
-target_sources(internal-proxies-avx2 PRIVATE
+target_sources_custom(internal-proxies-avx2
+  .avx2
+  SRCS
   ${CMAKE_SOURCE_DIR}/library/cpp/digest/argonish/internal/proxies/avx2/proxy_avx2.cpp
-)
-set_property(
-  SOURCE
-  ${CMAKE_SOURCE_DIR}/library/cpp/digest/argonish/internal/proxies/avx2/proxy_avx2.cpp
-  APPEND
-  PROPERTY
-  COMPILE_OPTIONS
+  CUSTOM_FLAGS
   -mavx2
   -mfma
+  -mbmi
+  -mbmi2
 )

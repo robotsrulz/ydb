@@ -18,6 +18,7 @@ class TBlobStorageGroupMirror3of4DiscoverRequest
     const bool ReadBody;
     const bool DiscoverBlockedGeneration;
     const ui32 ForceBlockedGeneration;
+    const bool FromLeader;
 
 public:
     static const auto& ActiveCounter(const TIntrusivePtr<TBlobStorageGroupProxyMon>& mon) {
@@ -35,7 +36,7 @@ public:
             TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters)
         : TBlobStorageGroupRequestActor(std::move(info), std::move(state), std::move(mon), source, cookie,
                 std::move(traceId), NKikimrServices::BS_PROXY_DISCOVER, false, {}, now, storagePoolCounters,
-                ev->RestartCounter)
+                ev->RestartCounter, "DSProxy.Discover(mirror-3of4)")
         , TabletId(ev->TabletId)
         , MinGeneration(ev->MinGeneration)
         , StartTime(now)
@@ -43,6 +44,7 @@ public:
         , ReadBody(ev->ReadBody)
         , DiscoverBlockedGeneration(ev->DiscoverBlockedGeneration)
         , ForceBlockedGeneration(ev->ForceBlockedGeneration)
+        , FromLeader(ev->FromLeader)
     {
         for (size_t i = 0; i < DiskState.size(); ++i) {
             TDiskState& disk = DiskState[i];
@@ -54,7 +56,7 @@ public:
     std::unique_ptr<IEventBase> RestartQuery(ui32 counter) {
         ++*Mon->NodeMon->RestartDiscover;
         auto ev = std::make_unique<TEvBlobStorage::TEvDiscover>(TabletId, MinGeneration, ReadBody,
-            DiscoverBlockedGeneration, Deadline, ForceBlockedGeneration);
+            DiscoverBlockedGeneration, Deadline, ForceBlockedGeneration, FromLeader);
         ev->RestartCounter = counter;
         return ev;
     }
@@ -67,6 +69,7 @@ public:
             << " ReadBody# " << (ReadBody ? "true" : "false")
             << " DiscoverBlockedGeneration# " << (DiscoverBlockedGeneration ? "true" : "false")
             << " ForceBlockedGeneration# " << ForceBlockedGeneration
+            << " FromLeader# " << (FromLeader ? "true" : "false")
             << " RestartCounter# " << RestartCounter);
 
         Become(&TThis::StateFunc);
@@ -153,7 +156,7 @@ public:
         const TLogoBlobID to = TLogoBlobID(TabletId, MinGeneration, 0, 0, 0, 0);
         SendToQueue(TEvBlobStorage::TEvVGet::CreateRangeIndexQuery(state.VDiskId, Deadline, HandleClass,
             TEvBlobStorage::TEvVGet::EFlags::None, Nothing(), state.From, to, MaxBlobsAtOnce, nullptr,
-            ForceBlockedGeneration), 0, {} /*traceId*/);
+            ForceBlockedGeneration), 0);
         const EDiskState prev = std::exchange(state.State, EDiskState::READ_PENDING);
         Y_VERIFY(prev == EDiskState::IDLE);
     }
@@ -283,7 +286,7 @@ public:
                     // we have to process this blob
                     auto query = std::make_unique<TEvBlobStorage::TEvGet>(id, 0, 0, Deadline, HandleClass, true, !ReadBody, ForceBlockedGeneration);
                     query->IsInternal = true;
-                    SendToBSProxy(SelfId(), Info->GroupID, query.release());
+                    SendToProxy(std::move(query));
                     GetIssuedFor = id;
                     return;
                 }

@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(tx-columnshard-engines)
 target_compile_options(tx-columnshard-engines PRIVATE
@@ -21,6 +22,7 @@ target_link_libraries(tx-columnshard-engines PUBLIC
   ydb-core-scheme
   ydb-core-tablet
   ydb-core-tablet_flat
+  udf-service-exception_policy
 )
 target_sources(tx-columnshard-engines PRIVATE
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/columnshard/engines/column_engine_logs.cpp

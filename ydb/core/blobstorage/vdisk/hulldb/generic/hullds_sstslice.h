@@ -3,11 +3,9 @@
 #include "defs.h"
 #include <ydb/core/blobstorage/vdisk/hulldb/fresh/fresh_data.h>
 #include "hullds_sstvec.h"
-// FIXME: don't depend on hulldb* (i.e. ActorSystem, events, actors)
-#include "hulldb_events.h"
 #include <ydb/core/blobstorage/vdisk/hulldb/hulldb_bulksstmngr.h>
 
-#include <ydb/core/blobstorage/vdisk/huge/blobstorage_hullhugedelete.h>
+#include <ydb/core/blobstorage/vdisk/hullop/blobstorage_hullcompdelete.h>
 
 namespace NKikimr {
 
@@ -166,6 +164,10 @@ namespace NKikimr {
         void OutputHtml(ui32 &index, ui32 level, IOutputStream &str, TIdxDiskPlaceHolder::TInfo &sum) const {
             Segs->OutputHtml(index, level, str, sum);
         }
+
+        void OutputProto(ui32 level, google::protobuf::RepeatedPtrField<NKikimrVDisk::LevelStat> *rows) const {
+            Segs->OutputProto(level, rows);
+        }
     };
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -187,9 +189,6 @@ namespace NKikimr {
         TSortedLevels SortedLevels;
         std::shared_ptr<TLevelIndexCtx> Ctx;
 
-        // when slice is destroyed we notify CommitterId about this event (i.e. ChunksToDelete are not used anymore)
-        TActorSystem * /*const*/ ActorSystem;
-        TActorId CommitterId;
         // In ChunksToDelete we store chunks that are old and subject for deletion,
         // but previous snapshot can still use them
         TVector<ui32> ChunksToDelete;
@@ -204,8 +203,6 @@ namespace NKikimr {
             : Level0(settings, ctx)
             , SortedLevels()
             , Ctx(ctx)
-            , ActorSystem(nullptr)
-            , CommitterId()
             , ChunksToDelete()
             , BulkFormedSegments()
         {}
@@ -216,8 +213,6 @@ namespace NKikimr {
             : Level0(settings, ctx, pb.GetLevel0())
             , SortedLevels()
             , Ctx(ctx)
-            , ActorSystem(nullptr)
-            , CommitterId()
             , ChunksToDelete()
             , BulkFormedSegments(pb.GetBulkFormedSstInfoSet())
         {
@@ -235,17 +230,8 @@ namespace NKikimr {
             }
         }
 
-        ~TLevelSlice() {
-            if (ActorSystem) {
-                Y_VERIFY_DEBUG(ChunksToDelete.empty());
-                ActorSystem->Send(CommitterId, new THullFreeSlice());
-            }
-        }
-
-        void SetUpCommitter(TActorSystem * /*const*/ system, const TActorId &id) {
-            ActorSystem = system;
-            CommitterId = id;
-        }
+        ~TLevelSlice()
+        {}
 
         void SerializeToProto(NKikimrVDiskData::TLevelIndex &pb) const {
             // write chunks to delete
@@ -328,6 +314,7 @@ namespace NKikimr {
         }
 
         void OutputHtml(IOutputStream &str) const;
+        void OutputProto(google::protobuf::RepeatedPtrField<NKikimrVDisk::LevelStat> *rows) const;
 
         ui32 GetLevelXNumber() const {
             return SortedLevels.size();

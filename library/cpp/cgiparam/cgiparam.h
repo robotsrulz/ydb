@@ -9,13 +9,6 @@
 
 #include <initializer_list>
 
-struct TStringLess {
-    template <class T1, class T2>
-    inline bool operator()(const T1& t1, const T2& t2) const noexcept {
-        return TStringBuf(t1) < TStringBuf(t2);
-    }
-};
-
 class TCgiParameters: public TMultiMap<TString, TString> {
 public:
     TCgiParameters() = default;
@@ -121,6 +114,7 @@ public:
 
     bool Erase(const TStringBuf name, size_t numOfValue = 0);
     bool Erase(const TStringBuf name, const TStringBuf val);
+    bool ErasePattern(const TStringBuf name, const TStringBuf pat);
 
     inline const char* FormField(const TStringBuf name, size_t numOfValue = 0) const {
         const_iterator it = Find(name, numOfValue);

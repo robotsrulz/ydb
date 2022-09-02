@@ -1,34 +1,34 @@
 #include "dq_compute_actor_async_io_factory.h"
 
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_output.h>
-#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_sources.h>
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_async_io.h>
 #include <ydb/library/yql/dq/common/dq_common.h>
+#include <ydb/library/yql/minikql/mkql_program_builder.h>
 
 namespace NYql::NDq {
 
-std::pair<IDqSourceActor*, NActors::IActor*> TDqSourceFactory::CreateDqSourceActor(IDqSourceActorFactory::TArguments&& args) const
+std::pair<IDqComputeActorAsyncInput*, NActors::IActor*> TDqAsyncIoFactory::CreateDqSource(TSourceArguments&& args) const
 {
     const TString& type = args.InputDesc.GetSource().GetType();
-    YQL_ENSURE(!type.empty(), "Attempt to create source actor of empty type");
-    const TCreatorFunction* creatorFunc = CreatorsByType.FindPtr(type);
-    YQL_ENSURE(creatorFunc, "Unknown type of source actor: \"" << type << "\"");
-    std::pair<IDqSourceActor*, NActors::IActor*> actor = (*creatorFunc)(std::move(args));
+    YQL_ENSURE(!type.empty(), "Attempt to create source of empty type");
+    const TSourceCreatorFunction* creatorFunc = SourceCreatorsByType.FindPtr(type);
+    YQL_ENSURE(creatorFunc, "Unknown type of source: \"" << type << "\"");
+    std::pair<IDqComputeActorAsyncInput*, NActors::IActor*> actor = (*creatorFunc)(std::move(args));
     Y_VERIFY(actor.first);
     Y_VERIFY(actor.second);
     return actor;
 }
 
-void TDqSourceFactory::Register(const TString& type, TCreatorFunction creator)
+void TDqAsyncIoFactory::RegisterSource(const TString& type, TSourceCreatorFunction creator)
 {
-    auto [_, registered] = CreatorsByType.emplace(type, std::move(creator));
+    auto [_, registered] = SourceCreatorsByType.emplace(type, std::move(creator));
     Y_VERIFY(registered);
 }
 
-std::pair<IDqComputeActorAsyncOutput*, NActors::IActor*> TDqSinkFactory::CreateDqSink(IDqSinkFactory::TArguments&& args) const
+std::pair<IDqComputeActorAsyncOutput*, NActors::IActor*> TDqAsyncIoFactory::CreateDqSink(TSinkArguments&& args) const
 {
     const TString& type = args.OutputDesc.GetSink().GetType();
     YQL_ENSURE(!type.empty(), "Attempt to create sink of empty type");
-    const TCreatorFunction* creatorFunc = CreatorsByType.FindPtr(type);
+    const TSinkCreatorFunction* creatorFunc = SinkCreatorsByType.FindPtr(type);
     YQL_ENSURE(creatorFunc, "Unknown type of sink: \"" << type << "\"");
     std::pair<IDqComputeActorAsyncOutput*, NActors::IActor*> actor = (*creatorFunc)(std::move(args));
     Y_VERIFY(actor.first);
@@ -36,9 +36,45 @@ std::pair<IDqComputeActorAsyncOutput*, NActors::IActor*> TDqSinkFactory::CreateD
     return actor;
 }
 
-void TDqSinkFactory::Register(const TString& type, TCreatorFunction creator)
+void TDqAsyncIoFactory::RegisterSink(const TString& type, TSinkCreatorFunction creator)
 {
-    auto [_, registered] = CreatorsByType.emplace(type, std::move(creator));
+    auto [_, registered] = SinkCreatorsByType.emplace(type, std::move(creator));
+    Y_VERIFY(registered);
+}
+
+std::pair<IDqComputeActorAsyncInput*, NActors::IActor*> TDqAsyncIoFactory::CreateDqInputTransform(TInputTransformArguments&& args)
+{
+    const TString& type = args.InputDesc.GetTransform().GetType();
+    YQL_ENSURE(!type.empty(), "Attempt to create input transform of empty type");
+    const TInputTransformCreatorFunction* creatorFunc = InputTransformCreatorsByType.FindPtr(type);
+    YQL_ENSURE(creatorFunc, "Unknown type of input transform: \"" << type << "\"");
+    std::pair<IDqComputeActorAsyncInput*, NActors::IActor*> actor = (*creatorFunc)(std::move(args));
+    Y_VERIFY(actor.first);
+    Y_VERIFY(actor.second);
+    return actor;
+}
+
+void TDqAsyncIoFactory::RegisterInputTransform(const TString& type, TInputTransformCreatorFunction creator)
+{
+    auto [_, registered] = InputTransformCreatorsByType.emplace(type, std::move(creator));
+    Y_VERIFY(registered);
+}
+
+std::pair<IDqComputeActorAsyncOutput*, NActors::IActor*> TDqAsyncIoFactory::CreateDqOutputTransform(TOutputTransformArguments&& args)
+{
+    const TString& type = args.OutputDesc.GetTransform().GetType();
+    YQL_ENSURE(!type.empty(), "Attempt to create output transform of empty type");
+    const TOutputTransformCreatorFunction* creatorFunc = OutputTransformCreatorsByType.FindPtr(type);
+    YQL_ENSURE(creatorFunc, "Unknown type of output transform: \"" << type << "\"");
+    std::pair<IDqComputeActorAsyncOutput*, NActors::IActor*> actor = (*creatorFunc)(std::move(args));
+    Y_VERIFY(actor.first);
+    Y_VERIFY(actor.second);
+    return actor;
+}
+
+void TDqAsyncIoFactory::RegisterOutputTransform(const TString& type, TOutputTransformCreatorFunction creator)
+{
+    auto [_, registered] = OutputTransformCreatorsByType.emplace(type, std::move(creator));
     Y_VERIFY(registered);
 }
 

@@ -63,6 +63,7 @@ namespace NYq {
 #define MEMORY_ALLOCATED_COLUMN_NAME "memory_allocated"
 #define INTERCONNECT_PORT_COLUMN_NAME "interconnect_port"
 #define NODE_ADDRESS_COLUMN_NAME "node_address"
+#define DATA_CENTER_COLUMN_NAME "data_center"
 
 #define HOST_NAME_COLUMN_NAME "hostname"
 #define OWNER_COLUMN_NAME "owner"
@@ -73,6 +74,9 @@ namespace NYq {
 #define SUBJECT_TYPE_COLUMN_NAME "subject_type"
 #define SUBJECT_ID_COLUMN_NAME "subject_id"
 #define METRIC_NAME_COLUMN_NAME "metric_name"
-#define METRIC_VALUE_COLUMN_NAME "metric_value"
+#define METRIC_LIMIT_COLUMN_NAME "metric_limit"
+#define LIMIT_UPDATED_AT_COLUMN_NAME "limit_updated_at"
+#define METRIC_USAGE_COLUMN_NAME "metric_usage"
+#define USAGE_UPDATED_AT_COLUMN_NAME "usage_updated_at"
 
 } // namespace NYq

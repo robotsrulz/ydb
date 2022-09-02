@@ -7,6 +7,7 @@
 
 
 find_package(OpenSSL REQUIRED)
+add_subdirectory(mock)
 
 add_library(cpp-actors-interconnect)
 target_link_libraries(cpp-actors-interconnect PUBLIC
@@ -21,6 +22,7 @@ target_link_libraries(cpp-actors-interconnect PUBLIC
   cpp-actors-prof
   cpp-actors-protos
   cpp-actors-util
+  cpp-actors-wilson
   cpp-digest-crc32c
   library-cpp-json
   library-cpp-lwtrace

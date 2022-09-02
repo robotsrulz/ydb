@@ -1,10 +1,13 @@
 #include "result_formatter.h"
 
+#include <ydb/library/mkql_proto/mkql_proto.h>
 #include <ydb/library/yql/providers/common/schema/mkql/yql_mkql_schema.h>
 #include <ydb/library/yql/providers/common/schema/expr/yql_expr_schema.h>
 #include <ydb/library/yql/providers/common/codec/yql_codec.h>
+#include <ydb/library/yql/providers/common/codec/yql_json_codec.h>
 #include <ydb/library/yql/public/udf/udf_data_type.h>
 #include <ydb/library/yql/ast/yql_expr.h>
+#include <ydb/library/yql/ast/yql_type_string.h>
 #include <ydb/library/yql/minikql/mkql_node.h>
 #include <ydb/library/yql/minikql/computation/mkql_computation_node_holders.h>
 
@@ -26,23 +29,34 @@ const NYql::TTypeAnnotationNode* MakePrimitiveType(NYdb::TTypeParser& parser, NY
     return ctx.MakeType<NYql::TDataExprType>(dataSlot);
 }
 
-const NYql::TTypeAnnotationNode* MakeDecimalType(NYdb::TTypeParser& parser, NYql::TExprContext& ctx)
-{
-    auto decimal = parser.GetDecimal();
-    auto dataSlot = NYql::NUdf::GetDataSlot(TStringBuilder() << "Decimal(" << (ui32)decimal.Precision << ',' << (ui32)decimal.Scale << ")");
-    return ctx.MakeType<NYql::TDataExprType>(dataSlot);
-}
-
 NKikimr::NMiniKQL::TType* MakePrimitiveType(NYdb::TTypeParser& parser, NKikimr::NMiniKQL::TTypeEnvironment& env)
 {
     auto dataSlot = NYql::NUdf::GetDataSlot(TStringBuilder() << parser.GetPrimitive());
     return TDataType::Create(GetDataTypeInfo(dataSlot).TypeId, env);
 }
 
+const NYql::TTypeAnnotationNode* MakeDecimalType(NYdb::TTypeParser& parser, NYql::TExprContext& ctx)
+{
+    auto decimal = parser.GetDecimal();
+    return ctx.MakeType<NYql::TDataExprParamsType>(NYql::EDataSlot::Decimal, ctx.AppendString(ToString(decimal.Precision)), ctx.AppendString(ToString(decimal.Scale)));
+}
+
 NKikimr::NMiniKQL::TType* MakeDecimalType(NYdb::TTypeParser& parser, NKikimr::NMiniKQL::TTypeEnvironment& env)
 {
     auto decimal = parser.GetDecimal();
     return TDataDecimalType::Create((ui8)decimal.Precision, (ui8)decimal.Scale, env);
+}
+
+const NYql::TTypeAnnotationNode* MakePgType(NYdb::TTypeParser& parser, NYql::TExprContext& ctx)
+{
+    auto pgType = parser.GetPg();
+    return ctx.MakeType<NYql::TPgExprType>(pgType.Oid);
+}
+
+NKikimr::NMiniKQL::TType* MakePgType(NYdb::TTypeParser& parser, NKikimr::NMiniKQL::TTypeEnvironment& env)
+{
+    auto pgType = parser.GetPg();
+    return TPgType::Create(pgType.Oid, env);
 }
 
 const NYql::TTypeAnnotationNode* MakeOptionalType(const NYql::TTypeAnnotationNode* underlying, NYql::TExprContext& ctx)
@@ -184,6 +198,9 @@ TType MakeType(NYdb::TTypeParser& parser, TContext& env)
     case NYdb::TTypeParser::ETypeKind::Decimal: {
         return MakeDecimalType(parser, env);
     }
+    case NYdb::TTypeParser::ETypeKind::Pg: {
+        return MakePgType(parser, env);
+    }
     case NYdb::TTypeParser::ETypeKind::Optional: {
         parser.OpenOptional();
         auto underlying = MakeType<TType>(parser, env);
@@ -288,9 +305,10 @@ struct TTypePair {
 
 TTypePair FormatColumnType(
     NJson::TJsonValue& root,
-    NYdb::TType type,
+    const NYdb::TType& type,
     NKikimr::NMiniKQL::TTypeEnvironment& typeEnv,
-    NYql::TExprContext& ctx)
+    NYql::TExprContext& ctx,
+    bool typeNameAsString)
 {
     TTypePair result;
     NYdb::TTypeParser parser(type);
@@ -304,9 +322,10 @@ TTypePair FormatColumnType(
         return result;
     }
 
-    //NJson::ReadJsonTree(
-    //    NJson2Yson::ConvertYson2Json(NYql::NCommon::WriteTypeToYson(result.MiniKQLType)),
-    //    &root);
+    if (typeNameAsString) {
+        root = NYql::FormatType(result.TypeAnnotation);
+        return result;
+    }
 
     NJson::ReadJsonTree(
         NJson2Yson::ConvertYson2Json(NYql::NCommon::WriteTypeToYson(result.TypeAnnotation)),
@@ -315,22 +334,70 @@ TTypePair FormatColumnType(
     return result;
 }
 
-void FormatColumnValue(
-    NJson::TJsonValue& root,
+template <typename F>
+NJson::TJsonValue GenericFormatColumnValue(
     const NYdb::TValue& value,
     NKikimr::NMiniKQL::TType* type,
-    const THolderFactory& holderFactory)
+    const THolderFactory& holderFactory,
+    F f)
 {
+    if (type->GetKind() == TType::EKind::Pg) {
+        NYdb::TValueParser parser(value);
+        auto pgValue = parser.GetPg();
+        if (pgValue.IsNull()) {
+            return NJson::TJsonValue(NJson::JSON_NULL);
+        }
+
+        if (pgValue.IsText()) {
+            return NJson::TJsonValue(pgValue.Content_);
+        }
+
+        return NJson::TJsonValue("<binary pg value>");
+    }
+
     const Ydb::Value& rawProtoValue = NYdb::TProtoAccessor::GetProto(value);
 
-    NYql::NUdf::TUnboxedValue unboxed = ImportValueFromProto(
+    auto unboxed = ImportValueFromProto(
         type,
         rawProtoValue,
         holderFactory);
 
-    NJson::ReadJsonTree(
-        NJson2Yson::ConvertYson2Json(NYql::NCommon::WriteYsonValue(unboxed, type)),
-        &root);
+    return f(unboxed);
+}
+
+NJson::TJsonValue FormatColumnValue(
+    const NYdb::TValue& value,
+    NKikimr::NMiniKQL::TType* type,
+    const THolderFactory& holderFactory)
+{
+    return GenericFormatColumnValue(value, type, holderFactory, [type](auto unboxed) {
+        NJson::TJsonValue v;
+        NJson::ReadJsonTree(
+            NJson2Yson::ConvertYson2Json(NYql::NCommon::WriteYsonValue(unboxed, type)),
+            &v);
+        return v;
+    });
+}
+
+NJson::TJsonValue FormatColumnPrettyValue(
+    const NYdb::TValue& value,
+    NKikimr::NMiniKQL::TType* type,
+    const THolderFactory& holderFactory)
+{
+
+    using namespace NYql::NCommon::NJsonCodec;
+
+    static const TValueConvertPolicy convertPolicy{ NUMBER_AS_STRING };
+
+    return GenericFormatColumnValue(value, type, holderFactory, [type](auto unboxed) {
+        NJson::TJsonValue v;
+        TStringStream out;
+        NJson::TJsonWriter jsonWriter(&out, MakeJsonConfig());
+        WriteValueToJson(jsonWriter, unboxed, type, convertPolicy);
+        jsonWriter.Flush();
+        NJson::ReadJsonTree(out.Str(), &v);
+        return v;
+    });
 }
 
 } // namespace
@@ -349,7 +416,7 @@ TString FormatSchema(const YandexQuery::Schema& schema)
     return NYql::NCommon::WriteTypeToYson(MakeStructType(typedColumns, ctx), NYson::EYsonFormat::Text);
 }
 
-void FormatResultSet(NJson::TJsonValue& root, const NYdb::TResultSet& resultSet)
+void FormatResultSet(NJson::TJsonValue& root, const NYdb::TResultSet& resultSet, bool typeNameAsString, bool prettyValueFormat)
 {
     NYql::TExprContext ctx;
     NKikimr::NMiniKQL::TScopedAlloc alloc;
@@ -357,7 +424,6 @@ void FormatResultSet(NJson::TJsonValue& root, const NYdb::TResultSet& resultSet)
 
     TMemoryUsageInfo memInfo("BuildYdbResultSet");
     THolderFactory holderFactory(alloc.Ref(), memInfo);
-
 
     NJson::TJsonValue& columns = root["columns"];
     const auto& columnsMeta = resultSet.GetColumnsMeta();
@@ -369,7 +435,7 @@ void FormatResultSet(NJson::TJsonValue& root, const NYdb::TResultSet& resultSet)
     for (const NYdb::TColumn& columnMeta : columnsMeta) {
         NJson::TJsonValue& column = columns.AppendValue(NJson::TJsonValue());
         column["name"] = columnMeta.Name;
-        columnTypes[i++] = FormatColumnType(column["type"], columnMeta.Type, typeEnv, ctx);
+        columnTypes[i++] = FormatColumnType(column["type"], columnMeta.Type, typeEnv, ctx, typeNameAsString);
     }
 
     NJson::TJsonValue& data = root["data"];
@@ -380,11 +446,9 @@ void FormatResultSet(NJson::TJsonValue& root, const NYdb::TResultSet& resultSet)
         NJson::TJsonValue& row = data.AppendValue(NJson::TJsonValue());
         for (size_t columnNum = 0; columnNum < columnsMeta.size(); ++columnNum) {
             const NYdb::TColumn& columnMeta = columnsMeta[columnNum];
-            FormatColumnValue(
-                row[columnMeta.Name],
-                rsParser.GetValue(columnNum),
-                columnTypes[columnNum].MiniKQLType,
-                holderFactory);
+            row[columnMeta.Name] = prettyValueFormat
+                ? FormatColumnPrettyValue(rsParser.GetValue(columnNum), columnTypes[columnNum].MiniKQLType, holderFactory)
+                : FormatColumnValue(rsParser.GetValue(columnNum), columnTypes[columnNum].MiniKQLType, holderFactory);
         }
     }
 }

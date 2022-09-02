@@ -1,4 +1,5 @@
 #include "yql_co.h"
+#include "yql_co_pgselect.h"
 
 #include <ydb/library/yql/core/yql_opt_utils.h>
 #include <ydb/library/yql/core/yql_expr_csee.h>
@@ -13,7 +14,7 @@ namespace {
 using namespace NNodes;
 
 bool HasTotalOrder(const TTypeAnnotationNode& type) {
-    if (type.GetKind() == ETypeAnnotationKind::Optional) {
+    if (type.GetKind() == ETypeAnnotationKind::Optional || type.GetKind() == ETypeAnnotationKind::Pg) {
         return false; // may be null
     }
 
@@ -498,6 +499,8 @@ void RegisterCoSimpleCallables2(TCallableOptimizerMap& map) {
 
         return node;
     };
+
+    map["PgGrouping"] = ExpandPgGrouping;
 }
 
 }

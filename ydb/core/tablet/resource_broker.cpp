@@ -84,7 +84,7 @@ void TTask::OutputState(IOutputStream &os, const TString &prefix) const
            << prefix << "  FinishTime: " << FinishTime.ToStringLocalUpToSeconds() << Endl;
 }
 
-TBaseCounters::TBaseCounters(const NMonitoring::TDynamicCounterPtr &counters)
+TBaseCounters::TBaseCounters(const ::NMonitoring::TDynamicCounterPtr &counters)
 {
     Consumption[CPU] = counters->GetCounter("CPUConsumption");
     Consumption[MEMORY] = counters->GetCounter("MemoryConsumption");
@@ -105,12 +105,12 @@ void TBaseCounters::ReleaseResources(const TResourceValues &values)
         *Consumption[i] -= values[i];
 }
 
-TQueueCounters::TQueueCounters(const NMonitoring::TDynamicCounterPtr &counters)
+TQueueCounters::TQueueCounters(const ::NMonitoring::TDynamicCounterPtr &counters)
     : TBaseCounters(counters)
 {
 }
 
-TTaskCounters::TTaskCounters(const NMonitoring::TDynamicCounterPtr &counters)
+TTaskCounters::TTaskCounters(const ::NMonitoring::TDynamicCounterPtr &counters)
     : TBaseCounters(counters)
 {
 }
@@ -156,7 +156,7 @@ bool TTaskQueue::TTaskEarlier::operator()(const TTaskPtr &l,
 }
 
 TTaskQueue::TTaskQueue(const NKikimrResourceBroker::TQueueConfig &config,
-                       const NMonitoring::TDynamicCounterPtr &counters,
+                       const ::NMonitoring::TDynamicCounterPtr &counters,
                        TResourceLimitPtr totalLimit,
                        TQueueCountersPtr totalCounters)
     : Name(config.GetName())
@@ -360,7 +360,7 @@ TScheduler::TTaskConfig::TTaskConfig(const TString &name,
 {
 }
 
-TScheduler::TScheduler(const NMonitoring::TDynamicCounterPtr &counters)
+TScheduler::TScheduler(const ::NMonitoring::TDynamicCounterPtr &counters)
     : Counters(counters)
     , TotalCounters(new TQueueCounters(counters->GetSubgroup("queue", "total")))
     , MissingTaskTypeCounter(counters->GetCounter("MissingTaskType", true))
@@ -800,7 +800,7 @@ void TScheduler::OutputState(IOutputStream &os) const
 }
 
 TResourceBroker::TResourceBroker(const TResourceBrokerConfig &config,
-                                 const NMonitoring::TDynamicCounterPtr &counters,
+                                 const ::NMonitoring::TDynamicCounterPtr &counters,
                                  TActorSystem *actorSystem)
     : Config(config)
     , Scheduler(counters)
@@ -1096,7 +1096,7 @@ void TResourceBroker::OutputState(TStringStream& str)
 }
 
 TResourceBrokerActor::TResourceBrokerActor(const TResourceBrokerConfig &config,
-                                           const NMonitoring::TDynamicCounterPtr &counters)
+                                           const ::NMonitoring::TDynamicCounterPtr &counters)
     : Config(config)
     , Counters(counters)
 {
@@ -1340,6 +1340,16 @@ NKikimrResourceBroker::TResourceBrokerConfig MakeDefaultConfig()
     queue->SetWeight(100);
     queue->MutableLimit()->SetCpu(10);
 
+    queue = config.AddQueues();
+    queue->SetName("queue_ttl");
+    queue->SetWeight(100);
+    queue->MutableLimit()->SetCpu(2);
+
+    queue = config.AddQueues();
+    queue->SetName("queue_datashard_build_stats");
+    queue->SetWeight(100);
+    queue->MutableLimit()->SetCpu(1);
+
     auto task = config.AddTasks();
     task->SetName(NLocalDb::UnknownTaskName);
     task->SetQueueName(NLocalDb::DefaultQueueName);
@@ -1424,6 +1434,16 @@ NKikimrResourceBroker::TResourceBrokerConfig MakeDefaultConfig()
     task->SetName("build_index");
     task->SetQueueName("queue_build_index");
     task->SetDefaultDuration(TDuration::Minutes(10).GetValue());
+
+    task = config.AddTasks();
+    task->SetName("ttl");
+    task->SetQueueName("queue_ttl");
+    task->SetDefaultDuration(TDuration::Minutes(5).GetValue());
+
+    task = config.AddTasks();
+    task->SetName("datashard_build_stats");
+    task->SetQueueName("queue_datashard_build_stats");
+    task->SetDefaultDuration(TDuration::Seconds(5).GetValue());
 
     config.MutableResourceLimit()->SetCpu(TotalCPU);
     config.MutableResourceLimit()->SetMemory(TotalMemory);
@@ -1538,7 +1558,7 @@ void MergeConfigUpdates(
 
 
 IActor* CreateResourceBrokerActor(const NKikimrResourceBroker::TResourceBrokerConfig &config,
-                                  const NMonitoring::TDynamicCounterPtr &counters)
+                                  const ::NMonitoring::TDynamicCounterPtr &counters)
 {
     return new TResourceBrokerActor(config, counters);
 }

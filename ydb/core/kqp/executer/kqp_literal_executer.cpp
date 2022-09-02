@@ -7,6 +7,9 @@
 #include <ydb/core/kqp/runtime/kqp_tasks_runner.h>
 #include <ydb/core/kqp/runtime/kqp_transport.h>
 #include <ydb/core/kqp/prepare/kqp_query_plan.h>
+#include <ydb/library/yql/minikql/computation/mkql_computation_node.h>
+
+#include <ydb/core/base/wilson.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -31,10 +34,11 @@ TDqTaskRunnerContext CreateTaskRunnerContext(NMiniKQL::TKqpComputeContextBase* c
     return context;
 }
 
-TDqTaskRunnerSettings CreateTaskRunnerSettings(NDqProto::EDqStatsMode statsMode) {
+TDqTaskRunnerSettings CreateTaskRunnerSettings(Ydb::Table::QueryStatsCollection::Mode statsMode) {
     TDqTaskRunnerSettings settings;
-    settings.CollectBasicStats = statsMode >= NDqProto::DQ_STATS_MODE_BASIC;
-    settings.CollectProfileStats = statsMode >= NDqProto::DQ_STATS_MODE_PROFILE;
+    // Always collect basic stats for system views / request unit computation.
+    settings.CollectBasicStats = true;
+    settings.CollectProfileStats = CollectProfileStats(statsMode);
     settings.OptLLVM = "OFF";
     settings.TerminateOnError = false;
     settings.AllowGeneratorsInUnboxedValues = false;
@@ -64,12 +68,12 @@ public:
     TKqpLiteralExecuter(IKqpGateway::TExecPhysicalRequest&& request, TKqpRequestCounters::TPtr counters)
         : Request(std::move(request))
         , Counters(counters)
+        , LiteralExecuterSpan(TWilsonKqp::LiteralExecuter, std::move(Request.TraceId), "LiteralExecuter")
     {
         ResponseEv = std::make_unique<TEvKqpExecuter::TEvTxResponse>();
-        if (Request.StatsMode >= NDqProto::DQ_STATS_MODE_BASIC) {
-            Stats = std::make_unique<TQueryExecutionStats>(Request.StatsMode, &TasksGraph,
-                ResponseEv->Record.MutableResponse()->MutableResult()->MutableStats());
-        }
+        ResponseEv->Orbit = std::move(Request.Orbit);
+        Stats = std::make_unique<TQueryExecutionStats>(Request.StatsMode, &TasksGraph,
+            ResponseEv->Record.MutableResponse()->MutableResult()->MutableStats());
     }
 
     void Bootstrap() {
@@ -108,6 +112,7 @@ private:
     }
 
     void Handle(TEvKqpExecuter::TEvTxRequest::TPtr& ev) {
+        NWilson::TSpan prepareTasksSpan(TWilsonKqp::LiteralExecuterPrepareTasks, LiteralExecuterSpan.GetTraceId(), "PrepareTasks", NWilson::EFlags::AUTO_END);
         if (Stats) {
             Stats->StartTs = TInstant::Now();
         }
@@ -154,19 +159,27 @@ private:
         NMiniKQL::TMemoryUsageInfo memInfo("KqpLocalExecuter");
         NMiniKQL::THolderFactory holderFactory(alloc.Ref(), memInfo, funcRegistry);
 
-        auto rmConfig = GetKqpResourceManager()->GetConfig();
-        ui64 limit = Request.MkqlMemoryLimit > 0
-            ? std::min(Request.MkqlMemoryLimit, rmConfig.GetMkqlLightProgramMemoryLimit())
-            : rmConfig.GetMkqlLightProgramMemoryLimit();
-        alloc.SetLimit(limit);
+        ui64 mkqlMemoryLimit = Request.MkqlMemoryLimit > 0
+            ? Request.MkqlMemoryLimit
+            : 1_GB;
 
-        alloc.Ref().SetIncreaseMemoryLimitCallback([this, &alloc](ui64 limit, ui64 required) {
-            if (required < 100_MB) {
-                LOG_D("Increase memory limit from " << limit << " to " << required);
+        auto rmConfig = GetKqpResourceManager()->GetConfig();
+        ui64 mkqlInitialLimit = std::min(mkqlMemoryLimit, rmConfig.GetMkqlLightProgramMemoryLimit());
+        alloc.SetLimit(mkqlInitialLimit);
+
+        // TODO: KIKIMR-15350
+        alloc.Ref().SetIncreaseMemoryLimitCallback([this, &alloc, mkqlMemoryLimit](ui64 currentLimit, ui64 required) {
+            if (required < mkqlMemoryLimit) {
+                LOG_D("Increase memory limit from " << currentLimit << " to " << required);
                 alloc.SetLimit(required);
             }
         });
 
+        if (prepareTasksSpan) {
+            prepareTasksSpan.EndOk();
+        }
+
+        NWilson::TSpan runTasksSpan(TWilsonKqp::LiteralExecuterRunTasks, LiteralExecuterSpan.GetTraceId(), "RunTasks", NWilson::EFlags::AUTO_END);
 
         // task runner settings
         NMiniKQL::TKqpComputeContextBase computeCtx;
@@ -185,6 +198,10 @@ private:
             if (TerminateIfTimeout()) {
                 return;
             }
+        }
+
+        if (runTasksSpan) {
+            runTasksSpan.End();
         }
 
         Finalize(context, holderFactory);
@@ -251,8 +268,28 @@ private:
 
         auto taskRunner = CreateKqpTaskRunner(context, settings, log);
         TaskRunners.emplace_back(taskRunner);
+
+        std::shared_ptr<NMiniKQL::TPatternWithEnv> patternEnv;
+        bool useCache = AppData()->FeatureFlags.GetEnableKqpPatternCacheLiteral();
+        bool foundInCache = false;
+        if (useCache) {
+            auto *cache = Singleton<NMiniKQL::TComputationPatternLRUCache>();
+
+            patternEnv = cache->Find(protoTask.GetProgram().GetRaw());
+            if (patternEnv) {
+                foundInCache = true;
+            } else {
+                patternEnv = cache->CreateEnv();
+            }
+        }
+
         taskRunner->Prepare(protoTask, CreateTaskRunnerMemoryLimits(), CreateTaskRunnerExecutionContext(),
-                            parameterProvider);
+            parameterProvider, patternEnv);
+
+        if (useCache && !foundInCache) {
+            auto *cache = Singleton<NMiniKQL::TComputationPatternLRUCache>();
+            cache->EmplacePattern(protoTask.GetProgram().GetRaw(), std::move(patternEnv));
+        }
 
         auto status = taskRunner->Run();
         YQL_ENSURE(status == ERunStatus::Finished);
@@ -300,7 +337,7 @@ private:
                 auto taskCpuTime = stats->BuildCpuTime + stats->ComputeCpuTime;
                 executerCpuTime -= taskCpuTime;
                 NYql::NDq::FillTaskRunnerStats(taskRunner->GetTaskId(), TaskId2StageId[taskRunner->GetTaskId()],
-                    *stats, fakeComputeActorStats.AddTasks(), Request.StatsMode >= NYql::NDqProto::DQ_STATS_MODE_PROFILE);
+                    *stats, fakeComputeActorStats.AddTasks(), CollectProfileStats(Request.StatsMode));
                 fakeComputeActorStats.SetCpuTimeUs(fakeComputeActorStats.GetCpuTimeUs() + taskCpuTime.MicroSeconds());
             }
 
@@ -315,13 +352,19 @@ private:
 
             Stats->Finish();
 
-            if (Y_UNLIKELY(Request.StatsMode >= NDqProto::DQ_STATS_MODE_PROFILE)) {
+            if (Y_UNLIKELY(CollectFullStats(Request.StatsMode))) {
                 for (ui32 txId = 0; txId < Request.Transactions.size(); ++txId) {
                     const auto& tx = Request.Transactions[txId].Body;
                     auto planWithStats = AddExecStatsToTxPlan(tx->GetPlan(), response.GetResult().GetStats());
                     response.MutableResult()->MutableStats()->AddTxPlansWithStats(planWithStats);
                 }
             }
+        }
+
+        LWTRACK(KqpLiteralExecuterFinalize, ResponseEv->Orbit, TxId);
+
+        if (LiteralExecuterSpan) {
+            LiteralExecuterSpan.EndOk();
         }
 
         LOG_D("Sending response to: " << Target << ", results: " << Results.size());
@@ -386,6 +429,12 @@ private:
         response.SetStatus(status);
         response.MutableIssues()->Swap(issues);
 
+        LWTRACK(KqpLiteralExecuterReplyErrorAndDie, ResponseEv->Orbit, TxId);
+
+        if (LiteralExecuterSpan) {
+            LiteralExecuterSpan.EndError(response.DebugString());
+        }
+
         Send(Target, ResponseEv.release());
         PassAway();
     }
@@ -411,6 +460,7 @@ private:
     TVector<TIntrusivePtr<IDqTaskRunner>> TaskRunners;
     std::unordered_map<ui64, ui32> TaskId2StageId;
     std::unique_ptr<TEvKqpExecuter::TEvTxResponse> ResponseEv;
+    NWilson::TSpan LiteralExecuterSpan;
 };
 
 } // anonymous namespace

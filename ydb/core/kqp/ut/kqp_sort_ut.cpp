@@ -128,7 +128,7 @@ Y_UNIT_TEST_SUITE(KqpSort) {
 
         TString query = Q_(R"(
             SELECT Group, Name, Amount, Comment
-            FROM [/Root/Test]
+            FROM `/Root/Test`
             ORDER BY Group DESC;
         )");
 
@@ -575,8 +575,8 @@ Y_UNIT_TEST_SUITE(KqpSort) {
 
         {
             TString query = Q_(R"(
-                DECLARE $x AS "Uint32";
-                DECLARE $y AS "String?";
+                DECLARE $x AS Uint32;
+                DECLARE $y AS String?;
 
                 SELECT *
                 FROM `/Root/Join2`
@@ -625,8 +625,8 @@ Y_UNIT_TEST_SUITE(KqpSort) {
 
         {
             TString query = Q_(R"(
-                DECLARE $x AS "Uint32";
-                DECLARE $y AS "String?";
+                DECLARE $x AS Uint32;
+                DECLARE $y AS String?;
 
                 SELECT *
                 FROM `/Root/Join2`
@@ -681,8 +681,8 @@ Y_UNIT_TEST_SUITE(KqpSort) {
 
         {
             TString query = Q_(R"(
-                DECLARE $x AS "Uint32";
-                DECLARE $y AS "String?";
+                DECLARE $x AS Uint32;
+                DECLARE $y AS String?;
 
                 SELECT *
                 FROM `/Root/Join2`
@@ -731,8 +731,8 @@ Y_UNIT_TEST_SUITE(KqpSort) {
 
         {
             TString query = Q_(R"(
-                DECLARE $x AS "Uint32";
-                DECLARE $y AS "String?";
+                DECLARE $x AS Uint32;
+                DECLARE $y AS String?;
 
                 SELECT *
                 FROM `/Root/Join2`
@@ -908,13 +908,13 @@ Y_UNIT_TEST_SUITE(KqpSort) {
 
             auto result = session.ExecuteDataQuery(R"(
                 DECLARE $rows AS
-                    'List<Struct<
+                    List<Struct<
                         Key: Uint64,
                         Value1: Int32,
                         Value2: String,
-                        Value3: Uint32>>';
+                        Value3: Uint32>>;
 
-                REPLACE INTO [/Root/TopSortTest]
+                REPLACE INTO `/Root/TopSortTest`
                 SELECT * FROM AS_TABLE($rows);
             )", TTxControl::BeginTx().CommitTx(), paramsBuilder.Build(),
                 TExecDataQuerySettings().KeepInQueryCache(true)).ExtractValueSync();
@@ -930,7 +930,7 @@ Y_UNIT_TEST_SUITE(KqpSort) {
             DECLARE $limit AS Uint64;
             DECLARE $offset AS Uint64;
 
-            SELECT * FROM [/Root/TopSortTest]
+            SELECT * FROM `/Root/TopSortTest`
             WHERE Value1 != $filter
             ORDER BY Value2 DESC, Value3, Key DESC
             LIMIT $limit OFFSET $offset;
@@ -1146,6 +1146,115 @@ Y_UNIT_TEST_SUITE(KqpSort) {
             UNIT_ASSERT(!lookupOp.contains("ReadLimit"));
         } else {
             UNIT_ASSERT(result.GetAst().Contains("(Sort (KiPartialTake (Filter"));
+        }
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(Offset) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto result = session.ExecuteDataQuery(Q1_(R"(
+            $data = SELECT * FROM EightShard WHERE Text = "Value1" LIMIT 7;
+
+            SELECT * FROM $data LIMIT 3 OFFSET 0;
+            SELECT * FROM $data LIMIT 3 OFFSET 3;
+            SELECT * FROM $data LIMIT 3 OFFSET 6;
+        )"), TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSet(0).RowsCount(), 3);
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSet(1).RowsCount(), 3);
+        UNIT_ASSERT_VALUES_EQUAL(result.GetResultSet(2).RowsCount(), 1);
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(OffsetPk) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto result = session.ExecuteDataQuery(Q1_(R"(
+            $data = SELECT * FROM EightShard WHERE Text = "Value1" ORDER BY Key LIMIT 7;
+
+            SELECT * FROM $data ORDER BY Key LIMIT 3 OFFSET 0;
+            SELECT * FROM $data ORDER BY Key LIMIT 3 OFFSET 3;
+            SELECT * FROM $data ORDER BY Key LIMIT 3 OFFSET 6;
+        )"), TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        CompareYson(R"([
+            [[1];[101u];["Value1"]];
+            [[2];[201u];["Value1"]];
+            [[3];[301u];["Value1"]]
+        ])", FormatResultSetYson(result.GetResultSet(0)));
+
+        CompareYson(R"([
+            [[1];[401u];["Value1"]];
+            [[2];[501u];["Value1"]];
+            [[3];[601u];["Value1"]]
+        ])", FormatResultSetYson(result.GetResultSet(1)));
+
+        CompareYson(R"([
+            [[1];[701u];["Value1"]]
+        ])", FormatResultSetYson(result.GetResultSet(2)));
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(OffsetTopSort) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto result = session.ExecuteDataQuery(Q1_(R"(
+            $data = SELECT * FROM EightShard WHERE Text = "Value1" ORDER BY Data LIMIT 7;
+
+            SELECT * FROM $data ORDER BY Data LIMIT 3 OFFSET 0;
+            SELECT * FROM $data ORDER BY Data LIMIT 3 OFFSET 3;
+            SELECT * FROM $data ORDER BY Data LIMIT 3 OFFSET 6;
+        )"), TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        CompareYson(R"([
+            [[1];[101u];["Value1"]];
+            [[1];[401u];["Value1"]];
+            [[1];[701u];["Value1"]]
+        ])", FormatResultSetYson(result.GetResultSet(0)));
+
+        CompareYson(R"([
+            [[2];[201u];["Value1"]];
+            [[2];[501u];["Value1"]];
+            [[2];[801u];["Value1"]]
+        ])", FormatResultSetYson(result.GetResultSet(1)));
+
+        CompareYson(R"([
+            [[3];[301u];["Value1"]]
+        ])", FormatResultSetYson(result.GetResultSet(2)));
+    }
+
+    Y_UNIT_TEST_TWIN(UnionAllSortLimit, UseNewEngine) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto result = session.ExplainDataQuery(Q1_(R"(
+            SELECT * FROM Logs WHERE App = "nginx" AND Ts >= 2
+
+            UNION ALL
+
+            SELECT * FROM Logs WHERE App >= "kikimr-db"
+
+            ORDER BY App, Ts, Host
+            LIMIT 3;
+        )")).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        // Cerr << result.GetPlan() << Endl;
+
+        NJson::TJsonValue plan;
+        NJson::ReadJsonTree(result.GetPlan(), &plan, true);
+
+        for (auto& read : plan["tables"][0]["reads"].GetArraySafe()) {
+            UNIT_ASSERT(read.Has("limit"));
+            UNIT_ASSERT_VALUES_EQUAL(read["limit"], UseNewEngine ? "3" : "\"3\"");
         }
     }
 }

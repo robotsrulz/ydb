@@ -36,11 +36,11 @@
 
 #define ARROW_COMPUTE
 #define ARROW_CSV
-/* #undef ARROW_DATASET */
-/* #undef ARROW_FILESYSTEM */
+#define ARROW_DATASET
+#define ARROW_FILESYSTEM
 /* #undef ARROW_FLIGHT */
 #define ARROW_IPC
-/* #undef ARROW_JSON */
+#define ARROW_JSON
 
 /* #undef ARROW_S3 */
 #ifdef __GNUC__

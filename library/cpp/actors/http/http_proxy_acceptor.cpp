@@ -13,7 +13,7 @@ public:
     NActors::TPollerToken::TPtr PollerToken;
     THashSet<TActorId> Connections;
     TDeque<THttpIncomingRequestPtr> RecycledRequests;
-    TEndpointInfo Endpoint;
+    std::shared_ptr<TPrivateEndpointInfo> Endpoint;
 
     TAcceptorActor(const TActorId& owner, const TActorId& poller)
         : NActors::TActor<TAcceptorActor>(&TAcceptorActor::StateInit)
@@ -22,11 +22,13 @@ public:
         , Socket(new TSocketDescriptor())
     {
         // for unit tests :(
-        CheckedSetSockOpt(Socket->Socket, SOL_SOCKET, SO_REUSEADDR, (int)true, "reuse address");
+        SetSockOpt(Socket->Socket, SOL_SOCKET, SO_REUSEADDR, (int)true);
 #ifdef SO_REUSEPORT
-        CheckedSetSockOpt(Socket->Socket, SOL_SOCKET, SO_REUSEPORT, (int)true, "reuse port");
+        SetSockOpt(Socket->Socket, SOL_SOCKET, SO_REUSEPORT, (int)true);
 #endif
     }
+
+    static constexpr char ActorName[] = "HTTP_ACCEPTOR_ACTOR";
 
 protected:
     STFUNC(StateListening) {
@@ -45,38 +47,40 @@ protected:
     }
 
     void HandleInit(TEvHttpProxy::TEvAddListeningPort::TPtr event, const NActors::TActorContext& ctx) {
-        SocketAddressType bindAddress("::", event->Get()->Port);
-        Endpoint.Owner = ctx.SelfID;
-        Endpoint.Proxy = Owner;
-        Endpoint.WorkerName = event->Get()->WorkerName;
-        Endpoint.Secure = event->Get()->Secure;
+        SocketAddressType bindAddress(Socket->Socket.MakeAddress(event->Get()->Address,event->Get()->Port));
+        Endpoint = std::make_shared<TPrivateEndpointInfo>(event->Get()->CompressContentTypes);
+        Endpoint->Owner = ctx.SelfID;
+        Endpoint->Proxy = Owner;
+        Endpoint->WorkerName = event->Get()->WorkerName;
+        Endpoint->Secure = event->Get()->Secure;
         int err = 0;
-        if (Endpoint.Secure) {
+        if (Endpoint->Secure) {
             if (!event->Get()->SslCertificatePem.empty()) {
-                Endpoint.SecureContext = TSslHelpers::CreateServerContext(event->Get()->SslCertificatePem);
+                Endpoint->SecureContext = TSslHelpers::CreateServerContext(event->Get()->SslCertificatePem);
             } else {
-                Endpoint.SecureContext = TSslHelpers::CreateServerContext(event->Get()->CertificateFile, event->Get()->PrivateKeyFile);
+                Endpoint->SecureContext = TSslHelpers::CreateServerContext(event->Get()->CertificateFile, event->Get()->PrivateKeyFile);
             }
-            if (Endpoint.SecureContext == nullptr) {
+            if (Endpoint->SecureContext == nullptr) {
                 err = -1;
                 LOG_WARN_S(ctx, HttpLog, "Failed to construct server security context");
             }
         }
         if (err == 0) {
-            err = Socket->Socket.Bind(&bindAddress);
+            err = Socket->Socket.Bind(bindAddress.get());
         }
+        TStringBuf schema = Endpoint->Secure ? "https://" : "http://";
         if (err == 0) {
             err = Socket->Socket.Listen(LISTEN_QUEUE);
             if (err == 0) {
-                LOG_INFO_S(ctx, HttpLog, "Listening on " << bindAddress.ToString());
+                LOG_INFO_S(ctx, HttpLog, "Listening on " << schema << bindAddress->ToString());
                 SetNonBlock(Socket->Socket);
                 ctx.Send(Poller, new NActors::TEvPollerRegister(Socket, SelfId(), SelfId()));
                 TBase::Become(&TAcceptorActor::StateListening);
-                ctx.Send(event->Sender, new TEvHttpProxy::TEvConfirmListen(bindAddress), 0, event->Cookie);
+                ctx.Send(event->Sender, new TEvHttpProxy::TEvConfirmListen(bindAddress, Endpoint), 0, event->Cookie);
                 return;
             }
         }
-        LOG_WARN_S(ctx, HttpLog, "Failed to listen on " << bindAddress.ToString() << " - retrying...");
+        LOG_WARN_S(ctx, HttpLog, "Failed to listen on " << schema << bindAddress->ToString() << " - retrying...");
         ctx.ExecutorThread.Schedule(TDuration::Seconds(1), event.Release());
     }
 
@@ -93,10 +97,13 @@ protected:
     }
 
     void Handle(NActors::TEvPollerReady::TPtr, const NActors::TActorContext& ctx) {
-        TIntrusivePtr<TSocketDescriptor> socket = new TSocketDescriptor();
-        SocketAddressType addr;
-        int err;
-        while ((err = Socket->Socket.Accept(&socket->Socket, &addr)) == 0) {
+        for (;;) {
+            SocketAddressType addr;
+            std::optional<SocketType> s = Socket->Socket.Accept(addr);
+            if (!s) {
+                break;
+            }
+            TIntrusivePtr<TSocketDescriptor> socket = new TSocketDescriptor(std::move(s).value());
             NActors::IActor* connectionSocket = nullptr;
             if (RecycledRequests.empty()) {
                 connectionSocket = CreateIncomingConnectionActor(Endpoint, socket, addr);
@@ -107,9 +114,9 @@ protected:
             NActors::TActorId connectionId = ctx.Register(connectionSocket);
             ctx.Send(Poller, new NActors::TEvPollerRegister(socket, connectionId, connectionId));
             Connections.emplace(connectionId);
-            socket = new TSocketDescriptor();
         }
-        if (err == -EAGAIN || err == -EWOULDBLOCK) { // request poller for further connection polling
+        int err = errno;
+        if (err == EAGAIN || err == EWOULDBLOCK) { // request poller for further connection polling
             Y_VERIFY(PollerToken);
             PollerToken->Request(true, false);
         }

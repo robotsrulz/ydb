@@ -1025,7 +1025,11 @@ TExprNode::TPtr RebuildAsRangeRest(const TStructExprType& rowType, const TExprNo
 struct TIndexRange {
     size_t Begin = 0;
     size_t End = 0;
-    bool IsPoint = false;
+    size_t PointPrefixLen = 0;
+
+    bool IsPoint() const {
+        return !IsEmpty() && PointPrefixLen == (End - Begin);
+    }
 
     bool IsEmpty() const {
         return Begin >= End;
@@ -1058,9 +1062,15 @@ TIndexRange ExtractIndexRangeFromKeys(const TVector<TString>& keys, const THashM
     TIndexRange result;
     result.Begin = firstIt->second;
     result.End = lastIt->second + 1;
-    result.IsPoint = isPoint;
+    YQL_ENSURE(result.Begin < result.End);
+    result.PointPrefixLen = isPoint ? (result.End - result.Begin) : 0;
 
     return result;
+}
+
+TExprNode::TPtr MakeRangeAnd(TPositionHandle pos, TExprNodeList&& children, TExprContext& ctx) {
+    YQL_ENSURE(!children.empty());
+    return children.size() == 1 ? children.front() : ctx.NewCallable(pos, "RangeAnd", std::move(children));
 }
 
 TExprNode::TPtr DoRebuildRangeForIndexKeys(const TStructExprType& rowType, const TExprNode::TPtr& range, const THashMap<TString, size_t>& indexKeysOrder,
@@ -1131,53 +1141,48 @@ TExprNode::TPtr DoRebuildRangeForIndexKeys(const TStructExprType& rowType, const
 
 
         TExprNodeList rests;
-        TVector<TExprNodeList> childrenChains;
-        THashMap<size_t, TSet<size_t>> chainIdxByEndIdx;
-
+        TMap<TIndexRange, TExprNodeList> children;
         for (auto& current : toRebuild) {
             if (current.IndexRange.IsEmpty()) {
                 YQL_ENSURE(current.Node->IsCallable("RangeRest"));
                 rests.emplace_back(std::move(current.Node));
+            } else {
+                children[current.IndexRange].push_back(current.Node);
+            }
+        }
+
+        TVector<TExprNodeList> childrenChains;
+        for (auto it = children.begin(); it != children.end(); ++it) {
+            if (!commonIndexRange) {
+                commonIndexRange = it->first;
+                childrenChains.emplace_back(std::move(it->second));
                 continue;
             }
-            const size_t beginIdx = current.IndexRange.Begin;
-            const size_t endIdx = current.IndexRange.End;
-            if (!commonIndexRange || beginIdx == commonIndexRange->Begin) {
-                if (!commonIndexRange) {
-                    commonIndexRange = current.IndexRange;
-                } else {
-                    commonIndexRange->End = std::max(commonIndexRange->End, endIdx);
+            if (commonIndexRange->Begin == it->first.Begin) {
+                YQL_ENSURE(it->first.End > commonIndexRange->End);
+                for (auto& asRest : childrenChains) {
+                    rests.push_back(RebuildAsRangeRest(rowType, *MakeRangeAnd(range->Pos(), std::move(asRest), ctx), ctx));
                 }
-                chainIdxByEndIdx[endIdx].insert(childrenChains.size());
-                childrenChains.emplace_back();
-                childrenChains.back().push_back(current.Node);
+                childrenChains.clear();
+                childrenChains.push_back(std::move(it->second));
+                commonIndexRange = it->first;
+                continue;
+            }
+
+            if (commonIndexRange->End == it->first.Begin) {
+                commonIndexRange->End = it->first.End;
+                childrenChains.push_back(std::move(it->second));
             } else {
-                auto it = chainIdxByEndIdx.find(beginIdx);
-                if (it == chainIdxByEndIdx.end()) {
-                    rests.emplace_back(RebuildAsRangeRest(rowType, *current.Node, ctx));
-                    continue;
-                }
-
-                YQL_ENSURE(!it->second.empty());
-                const size_t tgtChainIdx = *it->second.begin();
-                it->second.erase(tgtChainIdx);
-                if (it->second.empty()) {
-                    chainIdxByEndIdx.erase(it);
-                }
-
-                childrenChains[tgtChainIdx].push_back(current.Node);
-                chainIdxByEndIdx[endIdx].insert(tgtChainIdx);
-                commonIndexRange->End = std::max(commonIndexRange->End, endIdx);
+                rests.push_back(RebuildAsRangeRest(rowType, *MakeRangeAnd(range->Pos(), std::move(it->second), ctx), ctx));
             }
         }
 
         for (auto& chain : childrenChains) {
-            YQL_ENSURE(!chain.empty());
-            rebuilt.push_back(ctx.NewCallable(range->Pos(), "RangeAnd", std::move(chain)));
+            rebuilt.push_back(MakeRangeAnd(range->Pos(), std::move(chain), ctx));
         }
 
         if (!rests.empty()) {
-            rebuilt.push_back(RebuildAsRangeRest(rowType, *ctx.NewCallable(range->Pos(), "RangeAnd", std::move(rests)), ctx));
+            rebuilt.push_back(RebuildAsRangeRest(rowType, *MakeRangeAnd(range->Pos(), std::move(rests), ctx), ctx));
         }
     }
 
@@ -1358,7 +1363,7 @@ TExprNode::TPtr DoBuildMultiColumnComputeNode(const TStructExprType& rowType, co
         prunedRange = BuildRestTrue(pos, rowType, ctx);
         resultIndexRange.Begin = 0;
         resultIndexRange.End = 1;
-        resultIndexRange.IsPoint = false;
+        resultIndexRange.PointPrefixLen = 0;
         return ctx.Builder(pos)
             .Callable("If")
                 .Add(0, range->HeadPtr())
@@ -1384,7 +1389,7 @@ TExprNode::TPtr DoBuildMultiColumnComputeNode(const TStructExprType& rowType, co
             } else {
                 YQL_ENSURE(childIndexRange.Begin == resultIndexRange.Begin);
                 resultIndexRange.End = std::max(resultIndexRange.End, childIndexRange.End);
-                resultIndexRange.IsPoint = resultIndexRange.IsPoint && childIndexRange.IsPoint;
+                resultIndexRange.PointPrefixLen = std::min(resultIndexRange.PointPrefixLen, childIndexRange.PointPrefixLen);
             }
         }
 
@@ -1412,13 +1417,15 @@ TExprNode::TPtr DoBuildMultiColumnComputeNode(const TStructExprType& rowType, co
                 resultIndexRange = childIndexRange;
             } else {
                 if (childIndexRange.Begin != resultIndexRange.Begin)  {
+                    YQL_ENSURE(childIndexRange.Begin == resultIndexRange.End);
                     needAlign = false;
-                    if (!resultIndexRange.IsPoint) {
+                    if (!resultIndexRange.IsPoint()) {
                         prunedOutput.back() = RebuildAsRangeRest(rowType, *child, ctx);
+                    } else {
+                        resultIndexRange.PointPrefixLen += childIndexRange.PointPrefixLen;
                     }
-                    resultIndexRange.IsPoint = resultIndexRange.IsPoint && childIndexRange.IsPoint;
                 } else {
-                    resultIndexRange.IsPoint = resultIndexRange.IsPoint || childIndexRange.IsPoint;
+                    resultIndexRange.PointPrefixLen = std::max(resultIndexRange.PointPrefixLen, childIndexRange.PointPrefixLen);
                 }
                 resultIndexRange.End = std::max(resultIndexRange.End, childIndexRange.End);
             }
@@ -1456,10 +1463,12 @@ TExprNode::TPtr DoBuildMultiColumnComputeNode(const TStructExprType& rowType, co
 
 TExprNode::TPtr BuildMultiColumnComputeNode(const TStructExprType& rowType, const TExprNode::TPtr& range,
     const TVector<TString>& indexKeys, const THashMap<TString, size_t>& indexKeysOrder,
-    TExprNode::TPtr& prunedRange, const TPredicateExtractorSettings& settings, size_t usedPrefixLen, TExprContext& ctx)
+    TExprNode::TPtr& prunedRange, const TPredicateExtractorSettings& settings, size_t usedPrefixLen, size_t& pointPrefixLen, TExprContext& ctx)
 {
     TIndexRange resultIndexRange;
     auto result = DoBuildMultiColumnComputeNode(rowType, range, indexKeys, indexKeysOrder, prunedRange, resultIndexRange, settings, usedPrefixLen, ctx);
+    pointPrefixLen = resultIndexRange.PointPrefixLen;
+    YQL_ENSURE(pointPrefixLen <= usedPrefixLen);
     YQL_ENSURE(prunedRange);
     if (result) {
         YQL_ENSURE(!resultIndexRange.IsEmpty());
@@ -1591,7 +1600,7 @@ TPredicateRangeExtractor::TBuildResult TPredicateRangeExtractor::BuildComputeNod
     TExprNode::TPtr rebuiltRange = RebuildRangeForIndexKeys(*RowType, Range, indexKeysOrder, result.UsedPrefixLen, ctx);
     TExprNode::TPtr prunedRange;
     result.ComputeNode = BuildMultiColumnComputeNode(*RowType, rebuiltRange, effectiveIndexKeys, indexKeysOrder,
-        prunedRange, Settings, result.UsedPrefixLen, ctx);
+        prunedRange, Settings, result.UsedPrefixLen, result.PointPrefixLen, ctx);
     if (result.ComputeNode) {
         result.ExpectedMaxRanges = CalcMaxRanges(rebuiltRange, indexKeysOrder);
         if (result.ExpectedMaxRanges && *result.ExpectedMaxRanges < Settings.MaxRanges) {

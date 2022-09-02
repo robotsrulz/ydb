@@ -119,6 +119,14 @@ NConfig::TControlPlaneStorageConfig FillDefaultParameters(NConfig::TControlPlane
             policy.SetRetryPeriod("1m");
             policy.SetBackoffPeriod("1s");
         }
+        {
+            auto& policyMapping = *config.AddRetryPolicyMapping();
+            policyMapping.AddStatusCode(NYql::NDqProto::StatusIds::CLUSTER_OVERLOADED);
+            auto& policy = *policyMapping.MutablePolicy();
+            policy.SetRetryCount(3);
+            policy.SetRetryPeriod("1d");
+            policy.SetBackoffPeriod("2s");
+        }
     }
 
     if (!config.GetStorage().GetToken() && config.GetStorage().GetOAuthFile()) {
@@ -132,25 +140,26 @@ NConfig::TControlPlaneStorageConfig FillDefaultParameters(NConfig::TControlPlane
     return config;
 }
 
-bool DoesPingTaskUpdateQueriesTable(const TEvControlPlaneStorage::TEvPingTaskRequest* request) {
-    if (!request) {
-        return false;
-    }
-    return request->Status ||
-        request->Issues ||
-        request->TransientIssues ||
-        request->Statistics ||
-        request->ResultSetMetas ||
-        request->Ast ||
-        request->Plan ||
-        request->StartedAt ||
-        request->FinishedAt ||
-        request->ResignQuery ||
-        !request->CreatedTopicConsumers.empty() ||
-        !request->DqGraphs.empty() ||
-        request->DqGraphIndex ||
-        request->StateLoadMode ||
-        request->StreamingDisposition;
+bool DoesPingTaskUpdateQueriesTable(const Fq::Private::PingTaskRequest& request) {
+    return request.status() != YandexQuery::QueryMeta::COMPUTE_STATUS_UNSPECIFIED
+        || !request.issues().empty()
+        || !request.transient_issues().empty()
+        || request.statistics()
+        || !request.result_set_meta().empty()
+        || request.ast()
+        || request.ast_compressed().data()
+        || request.plan()
+        || request.plan_compressed().data()
+        || request.has_started_at()
+        || request.has_finished_at()
+        || request.resign_query()
+        || !request.created_topic_consumers().empty()
+        || !request.dq_graph().empty()
+        || !request.dq_graph_compressed().empty()
+        || request.dq_graph_index()
+        || request.state_load_mode()
+        || request.has_disposition()
+    ;
 }
 
 NYdb::TValue PackItemsToList(const TVector<NYdb::TValue>& items) {
@@ -167,6 +176,19 @@ std::pair<TString, TString> SplitId(const TString& id, char delim) {
     auto it = std::find(id.begin(), id.end(), delim);
     return std::make_pair(id.substr(0, it - id.begin()),
         (it != id.end() ? id.substr(it - id.begin() + 1) : TString{""}));
+}
+
+bool IsValidIntervalUnit(const TString& unit) {
+    static constexpr std::array<std::string_view, 10> IntervalUnits = {
+        "MICROSECONDS"sv,
+        "MILLISECONDS"sv,
+        "SECONDS"sv,
+        "MINUTES"sv,
+        "HOURS"sv,
+        "DAYS"sv,
+        "WEEKS"sv
+    };
+    return IsIn(IntervalUnits, unit);
 }
 
 } //namespace NYq

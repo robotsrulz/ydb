@@ -1488,7 +1488,7 @@ struct Schema : NIceDb::Schema {
         using TColumns = TableColumns<PathId, AlterVersion, Description, Sharding, AlterBody>;
     };
 
-    struct OlapTables : Table<90> {
+    struct ColumnTables : Table<90> {
         struct PathId : Column<1, NScheme::NTypeIds::Uint64> { using Type = TLocalPathId; };
         struct AlterVersion : Column<2, NScheme::NTypeIds::Uint64> {};
         struct Description : Column<3, NScheme::NTypeIds::String> {}; // TColumnTableDescription
@@ -1498,12 +1498,12 @@ struct Schema : NIceDb::Schema {
         using TColumns = TableColumns<PathId, AlterVersion, Description, Sharding>;
     };
 
-    struct OlapTablesAlters : Table<91> {
+    struct ColumnTablesAlters : Table<91> {
         struct PathId : Column<1, NScheme::NTypeIds::Uint64> { using Type = TLocalPathId; };
         struct AlterVersion : Column<2, NScheme::NTypeIds::Uint64> {};
         struct Description : Column<3, NScheme::NTypeIds::String> {}; // TColumnTableDescription
         struct Sharding : Column<4, NScheme::NTypeIds::String> {}; // TColumnTableSharding
-        struct AlterBody : Column<5, NScheme::NTypeIds::String> {}; // TAlterOlapTable
+        struct AlterBody : Column<5, NScheme::NTypeIds::String> {}; // TAlterColumnTable
 
         using TKey = TableKey<PathId>;
         using TColumns = TableColumns<PathId, AlterVersion, Description, Sharding, AlterBody>;
@@ -1589,6 +1589,15 @@ struct Schema : NIceDb::Schema {
     };
 
     struct ReplicationsAlterData : Table<100> {
+        struct PathId : Column<1, NScheme::NTypeIds::Uint64> { using Type = TLocalPathId; };
+        struct AlterVersion : Column<2, NScheme::NTypeIds::Uint64> {};
+        struct Description : Column<3, NScheme::NTypeIds::String> {};
+
+        using TKey = TableKey<PathId>;
+        using TColumns = TableColumns<PathId, AlterVersion, Description>;
+    };
+
+    struct BlobDepots : Table<102> {
         struct PathId : Column<1, NScheme::NTypeIds::Uint64> { using Type = TLocalPathId; };
         struct AlterVersion : Column<2, NScheme::NTypeIds::Uint64> {};
         struct Description : Column<3, NScheme::NTypeIds::String> {};
@@ -1687,8 +1696,8 @@ struct Schema : NIceDb::Schema {
         TxShardStatus,
         OlapStores,
         OlapStoresAlters,
-        OlapTables,
-        OlapTablesAlters,
+        ColumnTables,
+        ColumnTablesAlters,
         LoginKeys,
         LoginSids,
         LoginSidMembers,
@@ -1697,7 +1706,8 @@ struct Schema : NIceDb::Schema {
         Sequences,
         SequencesAlters,
         Replications,
-        ReplicationsAlterData
+        ReplicationsAlterData,
+        BlobDepots
     >;
 
     static constexpr ui64 SysParam_NextPathId = 1;
@@ -1710,6 +1720,11 @@ struct Schema : NIceDb::Schema {
     static constexpr ui64 SysParam_ParentDomainEffectiveACLVersion = 8;
     static constexpr ui64 SysParam_TenantInitState = 9;
     static constexpr ui64 SysParam_ServerlessStorageLastBillTime = 10;
+    static constexpr ui64 SysParam_MaxIncompatibleChange = 11;
+
+    // List of incompatible changes:
+    // * Change 1: store migrated shards of local tables (e.g. after a rename) as a migrated record
+    static constexpr ui64 MaxIncompatibleChangeSupported = 1;
 };
 
 }

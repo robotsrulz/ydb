@@ -10,8 +10,8 @@ using namespace NYdb::NScripting;
 using namespace NYdb::NTable;
 
 Y_UNIT_TEST_SUITE(KqpYql) {
-    Y_UNIT_TEST(RefSelect) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(RefSelect, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -26,8 +26,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(TableConcat) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(TableConcat, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -42,8 +42,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(TableRange) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(TableRange, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -58,8 +58,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(TableUseBeforeCreate) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(TableUseBeforeCreate, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -81,8 +81,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(ColumnNameConflict) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(ColumnNameConflict, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -101,8 +101,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(TableNameConflict) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(TableNameConflict, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -130,8 +130,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(DdlDmlMix) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(DdlDmlMix, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -145,8 +145,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::KIKIMR_MIXED_SCHEME_DATA_TX));
     }
 
-    Y_UNIT_TEST(ScriptUdf) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(ScriptUdf, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -167,8 +167,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(UpdatePk) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(UpdatePk, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -184,8 +184,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(UpdateBadType) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(UpdateBadType, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -200,8 +200,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::DEFAULT_ERROR));
     }
 
-    Y_UNIT_TEST(InsertCV) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(InsertCV, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -215,8 +215,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::KIKIMR_CONSTRAINT_VIOLATION));
     }
 
-    Y_UNIT_TEST(InsertCVList) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(InsertCVList, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -232,8 +232,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::KIKIMR_CONSTRAINT_VIOLATION));
     }
 
-    Y_UNIT_TEST(InsertIgnore) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(InsertIgnore, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -266,8 +266,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         UNIT_ASSERT(HasIssue(result.GetIssues(), NYql::TIssuesIds::KIKIMR_READ_MODIFIED_TABLE));
     }
 
-    Y_UNIT_TEST(UnwrapReadTableValues) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(UnwrapReadTableValues, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -282,8 +282,8 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         ])", FormatResultSetYson(result.GetResultSet(0)));
     }
 
-    Y_UNIT_TEST(CreateUseTable) {
-        TKikimrRunner kikimr;
+    Y_UNIT_TEST_TWIN(CreateUseTable, UseSessionActor) {
+        auto kikimr = KikimrRunnerEnableSessionActor(UseSessionActor);
         TScriptingClient client(kikimr.GetDriver());
 
         auto result = client.ExecuteYqlScript(R"(
@@ -307,6 +307,88 @@ Y_UNIT_TEST_SUITE(KqpYql) {
         CompareYson(R"([
             [[1u];["One"]];
             [[2u];["Two"]]
+        ])", FormatResultSetYson(result.GetResultSet(0)));
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(ColumnTypeMismatch) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto params = TParamsBuilder()
+            .AddParam("$key").Uint64(1).Build()
+            .AddParam("$value").Uint64(2).Build()
+            .Build();
+
+        TExecDataQuerySettings settings;
+        auto req = session.ExecuteDataQuery(Q_(R"(
+            DECLARE $key AS Uint64;
+            DECLARE $value AS Uint64;
+
+            REPLACE INTO `KeyValue`
+                    (Key, Value)
+            VALUES
+                    ($key, $value);
+        )"), TTxControl::BeginTx().CommitTx(), params).ExtractValueSync();
+
+        req.GetIssues().PrintTo(Cerr);
+        UNIT_ASSERT_VALUES_EQUAL(req.GetStatus(), EStatus::GENERIC_ERROR);
+        UNIT_ASSERT_STRING_CONTAINS(req.GetIssues().ToString(), "Failed to convert 'Value': Uint64 to Optional<String>");
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(FlexibleTypes) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto params = TParamsBuilder()
+            .AddParam("$text").Utf8("Some text").Build()
+            .AddParam("$data").String("Some bytes").Build()
+            .Build();
+
+        auto result = session.ExecuteDataQuery(Q1_(R"(
+            DECLARE $text AS Text;
+            DECLARE $data AS Bytes;
+
+            SELECT $text, $data;
+        )"), TTxControl::BeginTx().CommitTx(), params).ExtractValueSync();
+
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        CompareYson(R"([["Some text";"Some bytes"]])", FormatResultSetYson(result.GetResultSet(0)));
+    }
+
+    Y_UNIT_TEST_NEW_ENGINE(JsonNumberPrecision) {
+        TKikimrRunner kikimr;
+        auto db = kikimr.GetTableClient();
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        auto result = session.ExecuteDataQuery(Q1_(R"(
+            SELECT
+                JsonDocument("-0.5"),
+                JsonDocument("0.5"),
+                JsonDocument("-16777216"),
+                JsonDocument("16777216"),
+                JsonDocument("-9007199254740992"),
+                JsonDocument("9007199254740992"),
+                JsonDocument("-9223372036854775808"),
+                JsonDocument("9223372036854775807"),
+                JsonDocument("18446744073709551615");
+        )"), TTxControl::BeginTx().CommitTx()).ExtractValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        // Cerr << FormatResultSetYson(result.GetResultSet(0)) << Endl;
+
+        CompareYson(R"([[
+            "-0.5";
+            "0.5";
+            "-16777216";
+            "16777216";
+            "-9007199254740992";
+            "9007199254740992";
+            "-9.223372036854776e+18";
+            "9.223372036854776e+18";
+            "1.844674407370955e+19"]
         ])", FormatResultSetYson(result.GetResultSet(0)));
     }
 }

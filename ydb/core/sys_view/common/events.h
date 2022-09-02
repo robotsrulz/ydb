@@ -66,6 +66,15 @@ struct TEvSysView {
         EvGetStorageStatsRequest,
         EvGetStorageStatsResponse,
 
+        EvSendTopPartitions,
+        EvGetTopPartitionsRequest,
+        EvGetTopPartitionsResponse,
+
+        EvInitPartitionStatsCollector,
+
+        EvCalculateStorageStatsRequest,
+        EvCalculateStorageStatsResponse,
+
         EvEnd,
     };
 
@@ -361,6 +370,38 @@ struct TEvSysView {
     struct TEvGetStorageStatsResponse
         : TEventPB<TEvGetStorageStatsResponse, NKikimrSysView::TEvGetStorageStatsResponse, EvGetStorageStatsResponse>
     {};
+
+    struct TEvSendTopPartitions : public TEventPB<
+        TEvSendTopPartitions,
+        NKikimrSysView::TEvSendTopPartitions,
+        EvSendTopPartitions>
+    {};
+
+    struct TEvGetTopPartitionsRequest : public TEventPB<
+        TEvGetTopPartitionsRequest,
+        NKikimrSysView::TEvGetTopPartitionsRequest,
+        EvGetTopPartitionsRequest>
+    {};
+
+    struct TEvGetTopPartitionsResponse : public TEventPB<
+        TEvGetTopPartitionsResponse,
+        NKikimrSysView::TEvGetTopPartitionsResponse,
+        EvGetTopPartitionsResponse>
+    {};
+
+
+    struct TEvInitPartitionStatsCollector : public TEventLocal<
+        TEvInitPartitionStatsCollector,
+        EvInitPartitionStatsCollector>
+    {
+        TPathId DomainKey;
+        ui64 SysViewProcessorId = 0;
+
+        TEvInitPartitionStatsCollector(TPathId domainKey, ui64 sysViewProcessorId)
+            : DomainKey(domainKey)
+            , SysViewProcessorId(sysViewProcessorId)
+        {}
+    };
 };
 
 } // NSysView

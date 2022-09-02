@@ -72,6 +72,7 @@ namespace NKikimr::NTestShard {
             if (ev->Get()->Connected) {
                 IssueNextStateServerQuery();
             } else {
+                STLOG(PRI_ERROR, TEST_SHARD, TS05, "state server disconnected", (TabletId, TabletId));
                 TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, TabletActorId, SelfId(), nullptr, 0));
                 PassAway();
             }
@@ -211,7 +212,7 @@ namespace NKikimr::NTestShard {
             Y_VERIFY(inserted);
             Y_VERIFY_S(MD5::Calc(value) == key, "TabletId# " << TabletId << " Key# " << key << " digest mismatch"
                 " actual# " << MD5::Calc(value) << " len# " << value.size());
-            STLOG(PRI_DEBUG, TEST_SHARD, TS16, "read key", (TabletId, TabletId), (Key, key));
+            STLOG(PRI_DEBUG, TEST_SHARD, TS25, "read key", (TabletId, TabletId), (Key, key));
             FinishIfPossible();
         }
 
@@ -220,7 +221,7 @@ namespace NKikimr::NTestShard {
             auto& record = ev->Get()->Record;
             const NKikimrKeyValue::Statuses::ReplyStatus status = record.status();
 
-            if (status != NKikimrKeyValue::Statuses::RSTATUS_TIMEOUT) {
+            if (status == NKikimrKeyValue::Statuses::RSTATUS_TIMEOUT) {
                 STLOG(PRI_ERROR, TEST_SHARD, TS19, "CmdRangeRead failed", (TabletId, TabletId), (Status, status),
                     (ErrorReason, record.msg()));
                 return IssueNextReadRangeQuery();
@@ -347,7 +348,7 @@ namespace NKikimr::NTestShard {
                         Y_VERIFY(info.ConfirmedState == info.PendingState);
                         Y_VERIFY(info.ConfirmedState == ::NTestShard::TStateServer::CONFIRMED);
                     }
-                    Send(ParentId, new TEvValidationFinished(std::move(Keys)));
+                    Send(ParentId, new TEvValidationFinished(std::move(Keys), InitialCheck));
                     PassAway();
                 }
             }
@@ -594,6 +595,11 @@ namespace NKikimr::NTestShard {
             BytesOfData += info.Len;
         }
         Action();
+
+        if (Settings.RestartPeriodsSize() && ev->Get()->InitialCheck) {
+            TActivationContext::Schedule(GenerateRandomInterval(Settings.GetRestartPeriods()), new IEventHandle(
+                TEvents::TSystem::Wakeup, 0, SelfId(), {}, nullptr, 0));
+        }
     }
 
 } // NKikimr::NTestShard

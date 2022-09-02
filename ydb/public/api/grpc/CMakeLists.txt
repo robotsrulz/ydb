@@ -6,6 +6,7 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(draft)
 
 add_library(api-grpc)
 set_property(TARGET api-grpc PROPERTY
@@ -19,18 +20,20 @@ target_link_libraries(api-grpc PUBLIC
   contrib-libs-protobuf
 )
 target_proto_messages(api-grpc PRIVATE
+  ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/fq_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_auth_v1.proto
+  ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_cms_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_coordination_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_discovery_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_export_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_import_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_monitoring_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_operation_v1.proto
-  ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_cms_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_rate_limiter_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_scheme_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_scripting_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_table_v1.proto
+  ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/ydb_topic_v1.proto
   ${CMAKE_SOURCE_DIR}/ydb/public/api/grpc/yq_v1.proto
 )
 target_proto_addincls(api-grpc

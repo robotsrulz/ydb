@@ -6,7 +6,7 @@
 #include <ydb/core/protos/pqconfig.pb.h>
 #include <ydb/core/tablet/tablet_counters.h>
 #include <ydb/core/persqueue/key.h>
-
+#include <ydb/core/persqueue/metering_sink.h>
 #include <library/cpp/actors/core/event_local.h>
 #include <library/cpp/actors/core/actorid.h>
 
@@ -85,7 +85,6 @@ struct TEvPQ {
         EvBlobResponse,
         EvInitComplete,
         EvChangeOwner,
-        EvChangeConfig,
         EvChangePartitionConfig,
         EvChangeCacheConfig,
         EvPartitionCounters,
@@ -113,6 +112,7 @@ struct TEvPQ {
         EvCreateConsumer,
         EvRequestPartitionStatus,
         EvReaderEventArrived,
+        EvMetering,
         EvEnd
     };
 
@@ -441,16 +441,6 @@ struct TEvPQ {
         bool LastRequest;
     };
 
-
-    struct TEvChangeConfig : public TEventLocal<TEvChangeConfig, EvChangeConfig> {
-        TEvChangeConfig(const TString& topicName, const NKikimrPQ::TPQTabletConfig& config)
-        : TopicName(topicName)
-        , Config(config)
-        {}
-
-        TString TopicName;
-        NKikimrPQ::TPQTabletConfig Config;
-    };
     struct TEvChangePartitionConfig : public TEventLocal<TEvChangePartitionConfig, EvChangePartitionConfig> {
         TEvChangePartitionConfig(const NPersQueue::TTopicConverterPtr& topicConverter, const NKikimrPQ::TPQTabletConfig& config)
             : TopicConverter(topicConverter)
@@ -633,6 +623,16 @@ struct TEvPQ {
         {}
 
         ui64 Id;
+    };
+
+    struct TEvMetering : public TEventLocal<TEvMetering, EvMetering> {
+        TEvMetering(NPQ::EMeteringJson type, ui64 quantity)
+        : Type (type)
+        , Quantity(quantity)
+        {}
+
+        NPQ::EMeteringJson Type;
+        ui64 Quantity;
     };
 };
 

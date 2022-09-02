@@ -20,11 +20,11 @@
 #include <string.h>
 #include "error/s2n_errno.h"
 
-#include <s2n.h>
+#include "api/s2n.h"
 #include "utils/s2n_map.h"
 #include "utils/s2n_safety.h"
 
-#if S2N_HAVE_EXECINFO
+#ifdef S2N_STACKTRACE
 #   include <execinfo.h>
 #endif
 
@@ -94,7 +94,11 @@ static const char *no_such_error = "Internal s2n error";
     ERR_ENTRY(S2N_ERR_NON_EMPTY_RENEGOTIATION_INFO, "renegotiation_info should be empty") \
     ERR_ENTRY(S2N_ERR_RECORD_LIMIT, "TLS record limit reached") \
     ERR_ENTRY(S2N_ERR_CERT_UNTRUSTED, "Certificate is untrusted") \
+    ERR_ENTRY(S2N_ERR_CERT_REVOKED, "Certificate has been revoked by the CA") \
+    ERR_ENTRY(S2N_ERR_CERT_EXPIRED, "Certificate has expired") \
     ERR_ENTRY(S2N_ERR_CERT_TYPE_UNSUPPORTED, "Certificate Type is unsupported") \
+    ERR_ENTRY(S2N_ERR_CERT_INVALID, "Certificate is invalid") \
+    ERR_ENTRY(S2N_ERR_CERT_MAX_CHAIN_DEPTH_EXCEEDED, "The maximum certificate chain depth has been exceeded") \
     ERR_ENTRY(S2N_ERR_INVALID_MAX_FRAG_LEN, "invalid Maximum Fragmentation Length encountered") \
     ERR_ENTRY(S2N_ERR_MAX_FRAG_LEN_MISMATCH, "Negotiated Maximum Fragmentation Length from server does not match the requested length by client") \
     ERR_ENTRY(S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED, "TLS protocol version is not supported by configuration") \
@@ -176,7 +180,8 @@ static const char *no_such_error = "Internal s2n error";
     ERR_ENTRY(S2N_ERR_ASYNC_CALLBACK_FAILED, "Callback associated with async private keys function has failed") \
     ERR_ENTRY(S2N_ERR_ASYNC_MORE_THAN_ONE, "Only one asynchronous operation can be in-progress at the same time") \
     ERR_ENTRY(S2N_ERR_NO_ALERT, "No Alert present") \
-    ERR_ENTRY(S2N_ERR_CLIENT_MODE, "operation not allowed in client mode") \
+    ERR_ENTRY(S2N_ERR_SERVER_MODE, "Operation not allowed in server mode") \
+    ERR_ENTRY(S2N_ERR_CLIENT_MODE, "Operation not allowed in client mode") \
     ERR_ENTRY(S2N_ERR_CLIENT_MODE_DISABLED, "client connections not allowed") \
     ERR_ENTRY(S2N_ERR_TOO_MANY_CERTIFICATES, "only 1 certificate is supported in client mode") \
     ERR_ENTRY(S2N_ERR_TOO_MANY_SIGNATURE_SCHEMES, "Max supported length of SignatureAlgorithms/SignatureSchemes list is 32") \
@@ -193,7 +198,7 @@ static const char *no_such_error = "Internal s2n error";
     ERR_ENTRY(S2N_ERR_NUM_DEFAULT_CERTIFICATES, "exceeded max default certificates or provided no default") \
     ERR_ENTRY(S2N_ERR_MULTIPLE_DEFAULT_CERTIFICATES_PER_AUTH_TYPE, "setting multiple default certificates per auth type is not allowed") \
     ERR_ENTRY(S2N_ERR_INVALID_CIPHER_PREFERENCES, "Invalid Cipher Preferences version") \
-    ERR_ENTRY(S2N_ERR_APPLICATION_PROTOCOL_TOO_LONG, "Application protocol name is too long") \
+    ERR_ENTRY(S2N_ERR_INVALID_APPLICATION_PROTOCOL, "The supplied application protocol name is invalid") \
     ERR_ENTRY(S2N_ERR_KEY_MISMATCH, "public and private key do not match") \
     ERR_ENTRY(S2N_ERR_SEND_SIZE, "Retried s2n_send() size is invalid") \
     ERR_ENTRY(S2N_ERR_CORK_SET_ON_UNMANAGED, "Attempt to set connection cork management on unmanaged IO") \
@@ -236,10 +241,9 @@ static const char *no_such_error = "Internal s2n error";
     ERR_ENTRY(S2N_ERR_INVALID_SECURITY_POLICY, "Invalid security policy") \
     ERR_ENTRY(S2N_ERR_INVALID_KEM_PREFERENCES, "Invalid kem preferences version") \
     ERR_ENTRY(S2N_ERR_INVALID_PARSED_EXTENSIONS, "Invalid parsed extension data") \
-    ERR_ENTRY(S2N_ERR_ASYNC_ALREADY_PERFORMED, "Async operation was already performed, cannot perfom it again") \
+    ERR_ENTRY(S2N_ERR_ASYNC_ALREADY_PERFORMED, "Async operation was already performed, cannot perform it again") \
     ERR_ENTRY(S2N_ERR_ASYNC_NOT_PERFORMED, "Async operation is not performed, cannot apply its result") \
     ERR_ENTRY(S2N_ERR_ASYNC_WRONG_CONNECTION, "Async private key operation can only be consumed by connection which initiated it") \
-    ERR_ENTRY(S2N_ERR_ASYNC_APPLY_WHILE_INVOKING, "Async private key operation cannot consumed inside async pkey callback") \
     ERR_ENTRY(S2N_ERR_ASYNC_ALREADY_APPLIED, "Async operation was already applied to connection, cannot apply it again") \
     ERR_ENTRY(S2N_ERR_INVALID_HELLO_RETRY, "Invalid hello retry request") \
     ERR_ENTRY(S2N_ERR_INVALID_STATE, "Invalid state, this is the result of invalid use of an API. Check the API documentation for the function that raised this error for more info") \
@@ -247,8 +251,31 @@ static const char *no_such_error = "Internal s2n error";
     ERR_ENTRY(S2N_ERR_PQ_CRYPTO, "An error occurred in a post-quantum crypto function") \
     ERR_ENTRY(S2N_ERR_PQ_DISABLED, "Post-quantum crypto is disabled") \
     ERR_ENTRY(S2N_ERR_DUPLICATE_PSK_IDENTITIES, "The list of pre-shared keys provided contains duplicate psk identities") \
+    ERR_ENTRY(S2N_ERR_OFFERED_PSKS_TOO_LONG, "The total pre-shared key data is too long to send over the wire") \
+    ERR_ENTRY(S2N_ERR_INVALID_SESSION_TICKET, "Session ticket data is not valid") \
     ERR_ENTRY(S2N_ERR_REENTRANCY, "Original execution must complete before method can be called again") \
-
+    ERR_ENTRY(S2N_ERR_INVALID_CERT_STATE, "Certificate validation entered an invalid state and is not able to continue") \
+    ERR_ENTRY(S2N_ERR_INVALID_EARLY_DATA_STATE, "Early data in invalid state") \
+    ERR_ENTRY(S2N_ERR_EARLY_DATA_NOT_ALLOWED, "Early data is not allowed by the connection") \
+    ERR_ENTRY(S2N_ERR_NO_CERT_FOUND, "Certificate not found") \
+    ERR_ENTRY(S2N_ERR_NO_PRIVATE_KEY, "Certificate found, but no corresponding private key") \
+    ERR_ENTRY(S2N_ERR_CERT_NOT_VALIDATED, "Certificate not validated") \
+    ERR_ENTRY(S2N_ERR_MAX_EARLY_DATA_SIZE, "Maximum early data bytes exceeded") \
+    ERR_ENTRY(S2N_ERR_EARLY_DATA_BLOCKED, "Blocked on early data") \
+    ERR_ENTRY(S2N_ERR_PSK_MODE, "Mixing resumption and external PSKs is not supported") \
+    ERR_ENTRY(S2N_ERR_X509_EXTENSION_VALUE_NOT_FOUND, "X509 extension value not found") \
+    ERR_ENTRY(S2N_ERR_INVALID_X509_EXTENSION_TYPE, "Invalid X509 extension type") \
+    ERR_ENTRY(S2N_ERR_INSUFFICIENT_MEM_SIZE, "The provided buffer size is not large enough to contain the output data. Try increasing the allocation size.") \
+    ERR_ENTRY(S2N_ERR_KEYING_MATERIAL_EXPIRED, "The lifetime of the connection keying material has exceeded the limit. Perform a new full handshake.") \
+    ERR_ENTRY(S2N_ERR_EARLY_DATA_TRIAL_DECRYPT, "Unable to decrypt rejected early data") \
+    ERR_ENTRY(S2N_ERR_PKEY_CTX_INIT, "Unable to initialize the libcrypto pkey context") \
+    ERR_ENTRY(S2N_ERR_FORK_DETECTION_INIT, "Fork detection initialization failed") \
+    ERR_ENTRY(S2N_ERR_RETRIEVE_FORK_GENERATION_NUMBER, "Retrieving fork generation number failed") \
+    ERR_ENTRY(S2N_ERR_SECRET_SCHEDULE_STATE, "Correct inputs to secret calculation not available") \
+    ERR_ENTRY(S2N_ERR_LIBCRYPTO_VERSION_NUMBER_MISMATCH, "The libcrypto major version number seen at compile-time is different from the major version number seen at run-time") \
+    ERR_ENTRY(S2N_ERR_LIBCRYPTO_VERSION_NAME_MISMATCH, "The libcrypto major version name seen at compile-time is different from the major version name seen at run-time") \
+    ERR_ENTRY(S2N_ERR_CERT_OWNERSHIP, "The ownership of the certificate chain is incompatible with the operation") \
+    ERR_ENTRY(S2N_ERR_INTERNAL_LIBCRYPTO_ERROR, "An internal error has occurred in the libcrypto API")
 /* clang-format on */
 
 #define ERR_STR_CASE(ERR, str) case ERR: return str;
@@ -346,7 +373,7 @@ int s2n_stack_traces_enabled_set(bool newval)
     return S2N_SUCCESS;
 }
 
-#ifdef S2N_HAVE_EXECINFO
+#ifdef S2N_STACKTRACE
 
 #define MAX_BACKTRACE_DEPTH 20
 __thread struct s2n_stacktrace tl_stacktrace = {0};
@@ -368,7 +395,7 @@ int s2n_calculate_stacktrace(void)
     }
 
     int old_errno = errno;
-    GUARD(s2n_free_stacktrace());
+    POSIX_GUARD(s2n_free_stacktrace());
     void *array[MAX_BACKTRACE_DEPTH];
     tl_stacktrace.trace_size = backtrace(array, MAX_BACKTRACE_DEPTH);
     tl_stacktrace.trace = backtrace_symbols(array, tl_stacktrace.trace_size);
@@ -386,7 +413,7 @@ int s2n_print_stacktrace(FILE *fptr)
     if (!s_s2n_stack_traces_enabled) {
       fprintf(fptr, "%s\n%s\n",
 	      "NOTE: Some details are omitted, run with S2N_PRINT_STACKTRACE=1 for a verbose backtrace.",
-	      "See https://github.com/awslabs/s2n/blob/main/docs/USAGE-GUIDE.md");
+	      "See https://github.com/aws/s2n-tls/blob/main/docs/USAGE-GUIDE.md");
         return S2N_SUCCESS;
     }
 
@@ -397,7 +424,7 @@ int s2n_print_stacktrace(FILE *fptr)
     return S2N_SUCCESS;
 }
 
-#else /* !S2N_HAVE_EXECINFO */
+#else /* !S2N_STACKTRACE */
 int s2n_free_stacktrace(void)
 {
     S2N_ERROR(S2N_ERR_UNIMPLEMENTED);
@@ -422,4 +449,4 @@ int s2n_print_stacktrace(FILE *fptr)
 {
     S2N_ERROR(S2N_ERR_UNIMPLEMENTED);
 }
-#endif /* S2N_HAVE_EXECINFO */
+#endif /* S2N_STACKTRACE */

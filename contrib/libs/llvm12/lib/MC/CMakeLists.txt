@@ -6,8 +6,13 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(MCDisassembler)
+add_subdirectory(MCParser)
 
 add_library(llvm12-lib-MC)
+target_compile_options(llvm12-lib-MC PRIVATE
+  -Wno-everything
+)
 target_include_directories(llvm12-lib-MC PRIVATE
   ${CMAKE_SOURCE_DIR}/contrib/libs/llvm12/lib/MC
 )

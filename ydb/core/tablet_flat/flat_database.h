@@ -68,19 +68,40 @@ public:
     /*_ Call Next() before accessing each row including the 1st row. */
 
     TAutoPtr<TTableIt> Iterate(ui32 table, TRawVals key, TTagsRef tags, ELookup) const noexcept;
-    TAutoPtr<TTableIt> IterateExact(ui32 table, TRawVals key, TTagsRef tags, TRowVersion snapshot = TRowVersion::Max()) const noexcept;
-    TAutoPtr<TTableIt> IterateRange(ui32 table, const TKeyRange& range, TTagsRef tags, TRowVersion snapshot = TRowVersion::Max()) const noexcept;
-    TAutoPtr<TTableReverseIt> IterateRangeReverse(ui32 table, const TKeyRange& range, TTagsRef tags, TRowVersion snapshot = TRowVersion::Max()) const noexcept;
+    TAutoPtr<TTableIt> IterateExact(ui32 table, TRawVals key, TTagsRef tags,
+            TRowVersion snapshot = TRowVersion::Max(),
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
+    TAutoPtr<TTableIt> IterateRange(ui32 table, const TKeyRange& range, TTagsRef tags,
+            TRowVersion snapshot = TRowVersion::Max(),
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
+    TAutoPtr<TTableReverseIt> IterateRangeReverse(ui32 table, const TKeyRange& range, TTagsRef tags,
+            TRowVersion snapshot = TRowVersion::Max(),
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
 
     template<class TIteratorType>
-    TAutoPtr<TIteratorType> IterateRangeGeneric(ui32 table, const TKeyRange& range, TTagsRef tags, TRowVersion snapshot = TRowVersion::Max()) const noexcept;
+    TAutoPtr<TIteratorType> IterateRangeGeneric(ui32 table, const TKeyRange& range, TTagsRef tags,
+            TRowVersion snapshot = TRowVersion::Max(),
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
 
     // NOTE: the row refeneces data in some internal buffers that get invalidated on the next Select() or Commit() call
     EReady Select(ui32 table, TRawVals key, TTagsRef tags, TRowState& row,
-                        ui64 readFlags = 0, TRowVersion snapshot = TRowVersion::Max()) const noexcept;
+                  ui64 readFlags = 0, TRowVersion snapshot = TRowVersion::Max(),
+                  const ITransactionMapPtr& visible = nullptr,
+                  const ITransactionObserverPtr& observer = nullptr) const noexcept;
 
     EReady Select(ui32 table, TRawVals key, TTagsRef tags, TRowState& row, TSelectStats& stats,
-                  ui64 readFlags = 0, TRowVersion snapshot = TRowVersion::Max()) const noexcept;
+                  ui64 readFlags = 0, TRowVersion snapshot = TRowVersion::Max(),
+                  const ITransactionMapPtr& visible = nullptr,
+                  const ITransactionObserverPtr& observer = nullptr) const noexcept;
+
+    TSelectRowVersionResult SelectRowVersion(
+            ui32 table, TRawVals key, ui64 readFlags = 0,
+            const ITransactionMapPtr& visible = nullptr,
+            const ITransactionObserverPtr& observer = nullptr) const noexcept;
 
     bool Precharge(ui32 table, TRawVals minKey, TRawVals maxKey,
                         TTagsRef tags, ui64 readFlags, ui64 itemsLimit, ui64 bytesLimit,
@@ -97,6 +118,14 @@ public:
     void UpdateTx(ui32 table, ERowOp, TRawVals key, TArrayRef<const TUpdateOp>, ui64 txId);
     void RemoveTx(ui32 table, ui64 txId);
     void CommitTx(ui32 table, ui64 txId, TRowVersion rowVersion = TRowVersion::Min());
+
+    /**
+     * Returns true when table has an open transaction that is not committed or removed yet
+     */
+    bool HasOpenTx(ui32 table, ui64 txId) const;
+    bool HasTxData(ui32 table, ui64 txId) const;
+    bool HasCommittedTx(ui32 table, ui64 txId) const;
+    bool HasRemovedTx(ui32 table, ui64 txId) const;
 
     /**
      * Remove row versions [lower, upper) from the given table
@@ -118,7 +147,7 @@ public:
 
     TAlter& Alter(); /* Begin DDL ALTER script */
 
-    ui32 TxSnapTable(ui32 table);
+    TEpoch TxSnapTable(ui32 table);
 
     const TScheme& GetScheme() const noexcept;
 
@@ -133,6 +162,7 @@ public:
     void EnumerateTxStatusParts(const std::function<void(const TIntrusiveConstPtr<TTxStatusPart>&)>& callback) const;
     ui64 GetTableMemSize(ui32 table, TEpoch epoch = TEpoch::Max()) const;
     ui64 GetTableMemRowCount(ui32 tableId) const;
+    ui64 GetTableMemOpsCount(ui32 tableId) const;
     ui64 GetTableIndexSize(ui32 table) const;
     ui64 GetTableSearchHeight(ui32 table) const;
     ui64 EstimateRowSize(ui32 table) const;
@@ -142,6 +172,8 @@ public:
     TAutoPtr<TSubset> Subset(ui32 table, TArrayRef<const TLogoBlobID> bundle, TEpoch before) const;
     TAutoPtr<TSubset> Subset(ui32 table, TEpoch before, TRawVals from, TRawVals to) const;
     TAutoPtr<TSubset> ScanSnapshot(ui32 table, TRowVersion snapshot = TRowVersion::Max());
+
+    bool HasBorrowed(ui32 table, ui64 selfTabletId) const;
 
     TBundleSlicesMap LookupSlices(ui32 table, TArrayRef<const TLogoBlobID> bundles) const;
     void ReplaceSlices(ui32 table, TBundleSlicesMap slices);
@@ -170,17 +202,20 @@ public:
 
 private:
     TTable* Require(ui32 tableId) const noexcept;
+    TTable* RequireForUpdate(ui32 tableId) const noexcept;
 
 private:
     const THolder<TDatabaseImpl> DatabaseImpl;
 
-    ui64 Stamp = Max<ui64>();
     bool NoMoreReadsFlag;
     IPages* Env = nullptr;
     THolder<TChange> Change;
     TAutoPtr<TAlter> Alter_;
     TAutoPtr<TAnnex> Annex;
     TAutoPtr<NRedo::TWriter> Redo;
+
+    TVector<ui32> ModifiedRefs;
+    TVector<TUpdateOp> ModifiedOps;
 
     mutable TDeque<TPartSimpleIt> TempIterators; // Keeps the last result of Select() valid
     mutable THashSet<ui32> IteratedTables;

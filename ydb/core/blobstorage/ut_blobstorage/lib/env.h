@@ -9,6 +9,7 @@
 struct TEnvironmentSetup {
     std::unique_ptr<TTestActorSystem> Runtime;
     static constexpr ui32 DrivesPerNode = 5;
+    const TString DomainName = "Root";
     const ui32 DomainId = 1;
     const ui64 TabletId = MakeBSControllerID(DomainId);
     const ui32 GroupId = 0;
@@ -31,6 +32,7 @@ struct TEnvironmentSetup {
         const bool Cache = false;
         const ui32 NumDataCenters = 0;
         const std::function<TNodeLocation(ui32)> LocationGenerator;
+        const bool SetupHive = false;
     };
 
     const TSettings Settings;
@@ -95,20 +97,40 @@ struct TEnvironmentSetup {
         Cerr << "RandomSeed# " << seed << Endl;
     }
 
+    TString GenerateRandomString(ui32 len) {
+        TString res = TString::Uninitialized(len);
+        char *p = res.Detach();
+        char *end = p + len;
+        TReallyFastRng32 rng(RandomNumber<ui64>());
+        for (; p + sizeof(ui32) < end; p += sizeof(ui32)) {
+            *reinterpret_cast<ui32*>(p) = rng();
+        }
+        for (; p < end; ++p) {
+            *p = rng();
+        }
+        return res;
+    }
+
     ui32 GetNumDataCenters() const {
         return Settings.NumDataCenters ? Settings.NumDataCenters :
             Settings.Erasure.GetErasure() == TBlobStorageGroupType::ErasureMirror3dc ? 3 : 1;
     }
 
     void Initialize() {
-        Runtime = std::make_unique<TTestActorSystem>(Settings.NodeCount);
+        Runtime = std::make_unique<TTestActorSystem>(Settings.NodeCount, NLog::PRI_ERROR);
         if (Settings.PrepareRuntime) {
             Settings.PrepareRuntime(*Runtime);
         }
         SetupLogging();
         Runtime->Start();
         auto *appData = Runtime->GetAppData();
-        appData->DomainsInfo->AddDomain(TDomainsInfo::TDomain::ConstructEmptyDomain("dom", DomainId).Release());
+
+        auto domain = TDomainsInfo::TDomain::ConstructEmptyDomain(DomainName, DomainId);
+        appData->DomainsInfo->AddDomain(domain.Get());
+        if (Settings.SetupHive) {
+            appData->DomainsInfo->AddHive(domain->DefaultHiveUid, MakeDefaultHiveID(domain->DefaultStateStorageGroup));
+        }
+
         if (Settings.LocationGenerator) {
             Runtime->SetupTabletRuntime(Settings.LocationGenerator, Settings.ControllerNodeId);
         } else {
@@ -225,6 +247,10 @@ struct TEnvironmentSetup {
 //            NKikimrServices::BS_PROXY_INDEXRESTOREGET,
 //            NKikimrServices::BS_PROXY_STATUS,
             NActorsServices::TEST,
+//            NKikimrServices::BLOB_DEPOT,
+//            NKikimrServices::BLOB_DEPOT_AGENT,
+//            NKikimrServices::HIVE,
+//            NKikimrServices::LOCAL,
 //            NActorsServices::INTERCONNECT,
 //            NActorsServices::INTERCONNECT_SESSION,
         };
@@ -235,7 +261,9 @@ struct TEnvironmentSetup {
 
     void SetupStaticStorage() {
         const TActorId proxyId = MakeBlobStorageProxyID(GroupId);
-        Runtime->RegisterService(proxyId, Runtime->Register(CreateBlobStorageGroupProxyMockActor(Group0), Settings.ControllerNodeId));
+        for (const ui32 nodeId : Runtime->GetNodes()) {
+            Runtime->RegisterService(proxyId, Runtime->Register(CreateBlobStorageGroupProxyMockActor(Group0), nodeId));
+        }
     }
 
     void SetupStorage(ui32 targetNodeId = 0) {
@@ -275,16 +303,54 @@ struct TEnvironmentSetup {
     }
 
     void SetupTablet() {
-        Runtime->CreateTestBootstrapper(
-            TTestActorSystem::CreateTestTabletInfo(TabletId, TTabletTypes::FLAT_BS_CONTROLLER, Settings.Erasure.GetErasure(), GroupId),
-            &CreateFlatBsController,
-            Settings.ControllerNodeId);
+        struct TTabletInfo {
+            ui64 TabletId;
+            TTabletTypes::EType Type;
+            IActor* (*Create)(const TActorId&, TTabletStorageInfo*);
+            ui32 NumChannels = 3;
+        };
+        std::vector<TTabletInfo> tablets{
+            {MakeBSControllerID(DomainId), TTabletTypes::BSController, &CreateFlatBsController},
+        };
 
-        bool working = true;
-        Runtime->Sim([&] { return working; }, [&](IEventHandle& event) { working = event.GetTypeRewrite() != TEvTablet::EvBoot; });
+        auto *appData = Runtime->GetAppData();
+
+        for (const auto& [uid, tabletId] : appData->DomainsInfo->HivesByHiveUid) {
+            tablets.push_back(TTabletInfo{tabletId, TTabletTypes::Hive, &CreateDefaultHive});
+        }
+
+        for (const TTabletInfo& tablet : tablets) {
+            Runtime->CreateTestBootstrapper(
+                TTestActorSystem::CreateTestTabletInfo(tablet.TabletId, tablet.Type, Settings.Erasure.GetErasure(), GroupId, tablet.NumChannels),
+                tablet.Create, Settings.ControllerNodeId);
+
+            bool working = true;
+            Runtime->Sim([&] { return working; }, [&](IEventHandle& event) { working = event.GetTypeRewrite() != TEvTablet::EvBoot; });
+        }
+
+        auto localConfig = MakeIntrusive<TLocalConfig>();
+
+        localConfig->TabletClassInfo[TTabletTypes::BlobDepot] = TLocalConfig::TTabletClassInfo(new TTabletSetupInfo(
+            &NBlobDepot::CreateBlobDepot, TMailboxType::ReadAsFilled, appData->SystemPoolId, TMailboxType::ReadAsFilled,
+            appData->SystemPoolId));
+
+        auto tenantPoolConfig = MakeIntrusive<TTenantPoolConfig>(localConfig);
+        tenantPoolConfig->AddStaticSlot(DomainName);
+
+        if (Settings.SetupHive) {
+            for (ui32 nodeId : Runtime->GetNodes()) {
+                Runtime->RegisterService(MakeTenantPoolRootID(),
+                    Runtime->Register(CreateTenantPool(tenantPoolConfig), nodeId));
+                Runtime->RegisterService(NSysView::MakeSysViewServiceID(nodeId),
+                    Runtime->Register(NSysView::CreateSysViewServiceForTests().Release(), nodeId));
+                Runtime->Register(CreateTenantNodeEnumerationPublisher(), nodeId);
+                Runtime->Register(CreateLabelsMaintainer({}), nodeId);
+            }
+        }
     }
 
-    void CreateBoxAndPool(ui32 numDrivesPerNode = 0, ui32 numGroups = 0, ui32 numStorageNodes = 0) {
+    void CreateBoxAndPool(ui32 numDrivesPerNode = 0, ui32 numGroups = 0, ui32 numStorageNodes = 0,
+            NKikimrBlobStorage::EPDiskType pdiskType = NKikimrBlobStorage::EPDiskType::ROT) {
         NKikimrBlobStorage::TConfigRequest request;
 
         auto *cmd = request.AddCommand()->MutableDefineHostConfig();
@@ -292,7 +358,7 @@ struct TEnvironmentSetup {
         for (ui32 j = 0; j < (numDrivesPerNode ? numDrivesPerNode : DrivesPerNode); ++j) {
             auto *drive = cmd->AddDrive();
             drive->SetPath(Sprintf("SectorMap:%" PRIu32 ":1000", j));
-            drive->SetType(NKikimrBlobStorage::EPDiskType::ROT);
+            drive->SetType(pdiskType);
         }
 
         cmd = request.AddCommand()->MutableDefineHostConfig();
@@ -312,12 +378,33 @@ struct TEnvironmentSetup {
         cmd2->SetBoxId(1);
         cmd2->SetStoragePoolId(1);
         cmd2->SetName(StoragePoolName);
+        cmd2->SetKind(StoragePoolName);
         cmd2->SetErasureSpecies(TBlobStorageGroupType::ErasureSpeciesName(Settings.Erasure.GetErasure()));
         cmd2->SetVDiskKind("Default");
         cmd2->SetNumGroups(numGroups ? numGroups : NumGroups);
-        cmd2->AddPDiskFilter()->AddProperty()->SetType(NKikimrBlobStorage::EPDiskType::ROT);
+        cmd2->AddPDiskFilter()->AddProperty()->SetType(pdiskType);
         if (Settings.Encryption) {
             cmd2->SetEncryptionMode(TBlobStorageGroupInfo::EEncryptionMode::EEM_ENC_V1);
+        }
+
+        auto response = Invoke(request);
+        UNIT_ASSERT_C(response.GetSuccess(), response.GetErrorDescription());
+    }
+
+    void CreatePoolInBox(ui32 boxId, ui32 poolId, TString poolName) {
+        NKikimrBlobStorage::TConfigRequest request;
+
+        auto *cmd = request.AddCommand()->MutableDefineStoragePool();
+        cmd->SetBoxId(boxId);
+        cmd->SetStoragePoolId(poolId);
+        cmd->SetName(poolName);
+        cmd->SetKind(poolName);
+        cmd->SetErasureSpecies(TBlobStorageGroupType::ErasureSpeciesName(Settings.Erasure.GetErasure()));
+        cmd->SetVDiskKind("Default");
+        cmd->SetNumGroups(1);
+        cmd->AddPDiskFilter()->AddProperty()->SetType(NKikimrBlobStorage::EPDiskType::ROT);
+        if (Settings.Encryption) {
+            cmd->SetEncryptionMode(TBlobStorageGroupInfo::EEncryptionMode::EEM_ENC_V1);
         }
 
         auto response = Invoke(request);
@@ -394,11 +481,11 @@ struct TEnvironmentSetup {
     }
 
     TActorId CreateQueueActor(const TVDiskID& vdiskId, NKikimrBlobStorage::EVDiskQueueId queueId, ui32 index) {
-        TBSProxyContextPtr bspctx = MakeIntrusive<TBSProxyContext>(MakeIntrusive<NMonitoring::TDynamicCounters>());
+        TBSProxyContextPtr bspctx = MakeIntrusive<TBSProxyContext>(MakeIntrusive<::NMonitoring::TDynamicCounters>());
         auto flowRecord = MakeIntrusive<NBackpressure::TFlowRecord>();
         auto groupInfo = GetGroupInfo(vdiskId.GroupID);
         std::unique_ptr<IActor> actor(CreateVDiskBackpressureClient(groupInfo, vdiskId, queueId,
-            MakeIntrusive<NMonitoring::TDynamicCounters>(), bspctx,
+            MakeIntrusive<::NMonitoring::TDynamicCounters>(), bspctx,
             NBackpressure::TQueueClientId(NBackpressure::EQueueClientType::DSProxy, index), TStringBuilder()
             << "test# " << index, 0, false, TDuration::Seconds(60), flowRecord, NMonitoring::TCountableBase::EVisibility::Private));
         const ui32 nodeId = Settings.ControllerNodeId;

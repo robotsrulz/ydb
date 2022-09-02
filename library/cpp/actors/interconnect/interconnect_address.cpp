@@ -59,9 +59,9 @@ namespace NInterconnect {
 
     TAddress::TAddress(const char* addr, ui16 port) {
         memset(&Addr, 0, sizeof(Addr));
-        if (inet_pton(Addr.Ipv6.sin6_family = AF_INET6, addr, &Addr.Ipv6.sin6_addr)) {
+        if (inet_pton(Addr.Ipv6.sin6_family = AF_INET6, addr, &Addr.Ipv6.sin6_addr) > 0) {
             Addr.Ipv6.sin6_port = htons(port);
-        } else if (inet_pton(Addr.Ipv4.sin_family = AF_INET, addr, &Addr.Ipv4.sin_addr)) {
+        } else if (inet_pton(Addr.Ipv4.sin_family = AF_INET, addr, &Addr.Ipv4.sin_addr) > 0) {
             Addr.Ipv4.sin_port = htons(port);
         }
     }
@@ -69,6 +69,18 @@ namespace NInterconnect {
     TAddress::TAddress(const TString& addr, ui16 port)
         : TAddress(addr.data(), port)
     {}
+
+    TAddress::TAddress(in_addr addr, ui16 port) {
+        Addr.Ipv4.sin_family = AF_INET;
+        Addr.Ipv4.sin_port = htons(port);
+        Addr.Ipv4.sin_addr = addr;
+    }
+
+    TAddress::TAddress(in6_addr addr, ui16 port) {
+        Addr.Ipv6.sin6_family = AF_INET6;
+        Addr.Ipv6.sin6_port = htons(port);
+        Addr.Ipv6.sin6_addr = addr;
+    }
 
     TString TAddress::GetAddress() const {
         const void *src;

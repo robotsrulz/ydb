@@ -2,7 +2,7 @@
 
 namespace NKikimr::NBsQueue {
 
-TBlobStorageQueue::TBlobStorageQueue(const TIntrusivePtr<NMonitoring::TDynamicCounters>& counters, TString& logPrefix,
+TBlobStorageQueue::TBlobStorageQueue(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, TString& logPrefix,
         const TBSProxyContextPtr& bspctx, const NBackpressure::TQueueClientId& clientId, ui32 interconnectChannel,
         const TBlobStorageGroupType& gType, NMonitoring::TCountableBase::EVisibility visibility)
     : Queues(bspctx)
@@ -115,7 +115,7 @@ void TBlobStorageQueue::SetItemQueue(TItem& item, EItemQueue newQueue) {
     }
 }
 
-void TBlobStorageQueue::SendToVDisk(const TActorContext& ctx, const TActorId& remoteVDisk, IActor *actor) {
+void TBlobStorageQueue::SendToVDisk(const TActorContext& ctx, const TActorId& remoteVDisk, ui32 vdiskOrderNumber) {
     const TInstant now = ctx.Now();
 
     const bool sendMeCostSettings = now >= CostSettingsUpdate;
@@ -155,6 +155,7 @@ void TBlobStorageQueue::SendToVDisk(const TActorContext& ctx, const TActorId& re
                 TYPE_CASE(TEvBlobStorage::TEvVCollectGarbage)
                 TYPE_CASE(TEvBlobStorage::TEvVGetBarrier)
                 TYPE_CASE(TEvBlobStorage::TEvVStatus)
+                TYPE_CASE(TEvBlobStorage::TEvVAssimilate)
 #undef TYPE_CASE
                 default:
                     return Sprintf("0x%08" PRIx32, item.Event.GetType());
@@ -198,10 +199,11 @@ void TBlobStorageQueue::SendToVDisk(const TActorContext& ctx, const TActorId& re
         ++*QueueItemsSent;
 
         // send item
-        WILSON_TRACE_FROM_ACTOR(ctx, *actor, &item.TraceId, EvBlobStorageQueueForward,
-            InQueueWaitingItems = GetItemsWaiting(), InQueueWaitingBytes = GetBytesWaiting());
+        item.Span.Event("SendToVDisk", {{
+            {"VDiskOrderNumber", vdiskOrderNumber}
+        }});
         item.Event.SendToVDisk(ctx, remoteVDisk, item.QueueCookie, item.MsgId, item.SequenceId, sendMeCostSettings,
-                item.TraceId.Clone(), ClientId, item.ProcessingTimer);
+            item.Span.GetTraceId(), ClientId, item.ProcessingTimer);
 
         // update counters as far as item got sent
         ++NextMsgId;
@@ -216,6 +218,9 @@ void TBlobStorageQueue::ReplyWithError(TItem& item, NKikimrProto::EReplyStatus s
         << " errorReason# " << '"' << EscapeC(errorReason) << '"'
         << " cookie# " << item.Event.GetCookie()
         << " processingTime# " << processingTime);
+
+    item.Span.EndError(TStringBuilder() << NKikimrProto::EReplyStatus_Name(status) << ": " << errorReason);
+    item.Span = {};
 
     ctx.Send(item.Event.GetSender(), item.Event.MakeErrorReply(status, errorReason, QueueDeserializedItems,
             QueueDeserializedBytes), 0, item.Event.GetCookie());
@@ -247,6 +252,8 @@ bool TBlobStorageQueue::OnResponse(ui64 msgId, ui64 sequenceId, ui64 cookie, TAc
             it->Event.GetByteSize(), !relevant);
 
     InFlightLookup.erase(lookupIt);
+    auto span = std::exchange(it->Span, {});
+    span.EndOk();
     EraseItem(Queues.InFlight, it);
 
     // unpause execution when InFlight queue gets empty
@@ -323,6 +330,7 @@ void TBlobStorageQueue::OnConnect() {
 
 TBlobStorageQueue::TItemList::iterator TBlobStorageQueue::EraseItem(TItemList& queue, TItemList::iterator it) {
     SetItemQueue(*it, EItemQueue::NotSet);
+    it->Span.EndError("EraseItem called");
     TItemList::iterator nextIter = std::next(it);
     if (Queues.Unused.size() < MaxUnusedItems) {
         Queues.Unused.splice(Queues.Unused.end(), queue, it);

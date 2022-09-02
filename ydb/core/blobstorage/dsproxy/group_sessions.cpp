@@ -41,7 +41,7 @@ TGroupSessions::TGroupSessions(const TIntrusivePtr<TBlobStorageGroupInfo>& info,
         auto& stateVDisk = GroupQueues->FailDomains[vdisk.FailDomainOrderNumber].VDisks[vd.VDisk];
         const ui32 targetNodeId = info->GetActorId(vdisk.OrderNumber).NodeId();
 
-        TIntrusivePtr<NMonitoring::TDynamicCounters> counters = GetServiceCounters(AppData()->Counters, "dsproxy_queue");
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters = GetServiceCounters(AppData()->Counters, "dsproxy_queue");
 
         for (NKikimrBlobStorage::EVDiskQueueId queueId : VDiskQueues) {
             ui32 interconnectChannel = 0;
@@ -85,6 +85,7 @@ TGroupSessions::TGroupSessions(const TIntrusivePtr<TBlobStorageGroupInfo>& info,
             auto& q = stateVDisk.Queues.GetQueue(queueId);
             q.ActorId = queue;
             q.FlowRecord = std::move(flowRecord);
+            q.ExtraBlockChecksSupport.reset();
         }
     }
 }
@@ -114,11 +115,18 @@ bool TGroupSessions::GoodToGo(const TBlobStorageGroupInfo::TTopology& topology, 
         : topology.GetQuorumChecker().CheckQuorumForGroup(connected);
 }
 
-void TGroupSessions::QueueConnectUpdate(ui32 orderNumber, NKikimrBlobStorage::EVDiskQueueId queueId, bool connected) {
+void TGroupSessions::QueueConnectUpdate(ui32 orderNumber, NKikimrBlobStorage::EVDiskQueueId queueId, bool connected,
+        bool extraGroupChecksSupport, const TBlobStorageGroupInfo::TTopology& topology) {
+    const auto v = topology.GetVDiskId(orderNumber);
+    const ui32 fdom = topology.GetFailDomainOrderNumber(v);
+    auto& q = GroupQueues->FailDomains[fdom].VDisks[v.VDisk].Queues.GetQueue(queueId);
+
     if (connected) {
         ConnectedQueuesMask[orderNumber] |= 1 << queueId;
+        q.ExtraBlockChecksSupport = extraGroupChecksSupport;
     } else {
         ConnectedQueuesMask[orderNumber] &= ~(1 << queueId);
+        q.ExtraBlockChecksSupport.reset();
     }
 }
 

@@ -38,7 +38,7 @@ struct TFreeMemory
 {
     static void Do(void* ptr)
     {
-        NYTAlloc::FreeNonNull(ptr);
+        ::free(ptr);
     }
 };
 
@@ -65,13 +65,13 @@ public:
     int GetRefCount() const noexcept;
 
     //! Increments the strong reference counter.
-    void Ref() const noexcept;
+    void Ref(int n = 1) const noexcept;
 
     //! Increments the strong reference counter if it is not null.
     bool TryRef() const noexcept;
 
     //! Decrements the strong reference counter.
-    bool Unref() const;
+    bool Unref(int n = 1) const;
 
     //! Returns current number of weak references to the object.
     int GetWeakRefCount() const noexcept;
@@ -103,10 +103,10 @@ void DeallocateRefCounted(const T* obj);
 // API
 
 template <class T>
-void Ref(T* obj);
+void Ref(T* obj, int n = 1);
 
 template <class T>
-void Unref(T* obj);
+void Unref(T* obj, int n = 1);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -149,9 +149,9 @@ using TRefCountedPtr = TIntrusivePtr<TRefCounted>;
 #define DECLARE_REFCOUNTED_TYPE(type) \
     using type ## Ptr = ::NYT::TIntrusivePtr<type>; \
     \
-    [[maybe_unused]] ATTRIBUTE_USED const ::NYT::TRefCounter* GetRefCounter(const type* obj); \
-    [[maybe_unused]] ATTRIBUTE_USED void DestroyRefCounted(const type* obj); \
-    [[maybe_unused]] ATTRIBUTE_USED void DeallocateRefCounted(const type* obj);
+    [[maybe_unused]] YT_ATTRIBUTE_USED const ::NYT::TRefCounter* GetRefCounter(const type* obj); \
+    [[maybe_unused]] YT_ATTRIBUTE_USED void DestroyRefCounted(const type* obj); \
+    [[maybe_unused]] YT_ATTRIBUTE_USED void DeallocateRefCounted(const type* obj);
 
 //! Forward-declares a class type, defines an intrusive pointer for it, and finally
 //! declares Ref/Unref overloads. Use this macro in |public.h|-like files.
@@ -168,15 +168,15 @@ using TRefCountedPtr = TIntrusivePtr<TRefCounted>;
 //! Provides implementations for Ref/Unref overloads. Use this macro right
 //! after the type's full definition.
 #define DEFINE_REFCOUNTED_TYPE(type) \
-    [[maybe_unused]] ATTRIBUTE_USED Y_FORCE_INLINE const ::NYT::TRefCounter* GetRefCounter(const type* obj) \
+    [[maybe_unused]] YT_ATTRIBUTE_USED Y_FORCE_INLINE const ::NYT::TRefCounter* GetRefCounter(const type* obj) \
     { \
         return ::NYT::TRefCountedHelper<type>::GetRefCounter(obj); \
     } \
-    [[maybe_unused]] ATTRIBUTE_USED Y_FORCE_INLINE void DestroyRefCounted(const type* obj) \
+    [[maybe_unused]] YT_ATTRIBUTE_USED Y_FORCE_INLINE void DestroyRefCounted(const type* obj) \
     { \
         ::NYT::TRefCountedHelper<type>::Destroy(obj); \
     } \
-    [[maybe_unused]] ATTRIBUTE_USED Y_FORCE_INLINE void DeallocateRefCounted(const type* obj) \
+    [[maybe_unused]] YT_ATTRIBUTE_USED Y_FORCE_INLINE void DeallocateRefCounted(const type* obj) \
     { \
         ::NYT::TRefCountedHelper<type>::Deallocate(obj); \
     }

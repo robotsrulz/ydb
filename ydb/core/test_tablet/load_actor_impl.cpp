@@ -2,9 +2,11 @@
 
 namespace NKikimr::NTestShard {
 
-    TLoadActor::TLoadActor(ui64 tabletId, ui32 generation, const NKikimrClient::TTestShardControlRequest::TCmdInitialize& settings)
+    TLoadActor::TLoadActor(ui64 tabletId, ui32 generation, TActorId tablet,
+            const NKikimrClient::TTestShardControlRequest::TCmdInitialize& settings)
         : TabletId(tabletId)
         , Generation(generation)
+        , Tablet(tablet)
         , Settings(settings)
         , StateServerWriteLatency(1024)
         , WriteLatency(1024)
@@ -26,6 +28,11 @@ namespace NKikimr::NTestShard {
         TActorBootstrapped::PassAway();
     }
 
+    void TLoadActor::HandleWakeup() {
+        STLOG(PRI_NOTICE, TEST_SHARD, TS00, "voluntary restart", (TabletId, TabletId));
+        TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, Tablet, TabletActorId, nullptr, 0));
+    }
+
     void TLoadActor::Action() {
         if (ValidationActorId) { // do nothing while validation is in progress
             return;
@@ -37,7 +44,11 @@ namespace NKikimr::NTestShard {
                 return;
             }
         }
-        if (BytesProcessed > 2 * Settings.GetMaxDataBytes()) { // time to perform validation
+        ui64 barrier = 2 * Settings.GetMaxDataBytes();
+        if (Settings.HasValidateAfterBytes()) {
+            barrier = Settings.GetValidateAfterBytes();
+        }
+        if (BytesProcessed > barrier) { // time to perform validation
             if (WritesInFlight.empty() && DeletesInFlight.empty() && TransitionInFlight.empty()) {
                 RunValidation(false);
             }
@@ -96,13 +107,13 @@ namespace NKikimr::NTestShard {
         Y_VERIFY(!ValidationActorId); // no requests during validation
         auto& record = ev->Get()->Record;
         if (record.GetStatus() != NMsgBusProxy::MSTATUS_OK) {
-            STLOG(PRI_ERROR, TEST_SHARD, TS18, "TEvKeyValue::TEvRequest failed", (TabletId, TabletId),
+            STLOG(PRI_ERROR, TEST_SHARD, TS26, "TEvKeyValue::TEvRequest failed", (TabletId, TabletId),
                 (Status, record.GetStatus()), (ErrorReason, record.GetErrorReason()));
             if (const auto it = WritesInFlight.find(record.GetCookie()); it != WritesInFlight.end()) {
                 for (const TString& key : it->second.KeysInQuery) {
                     const auto it = Keys.find(key);
                     Y_VERIFY_S(it != Keys.end(), "Key# " << key << " not found in Keys dict");
-                    STLOG(PRI_WARN, TEST_SHARD, TS19, "write failed", (TabletId, TabletId), (Key, key));
+                    STLOG(PRI_WARN, TEST_SHARD, TS27, "write failed", (TabletId, TabletId), (Key, key));
                     RegisterTransition(*it, ::NTestShard::TStateServer::WRITE_PENDING, ::NTestShard::TStateServer::DELETED);
                 }
                 WritesInFlight.erase(it);
@@ -111,7 +122,7 @@ namespace NKikimr::NTestShard {
                 for (const TString& key : it->second.KeysInQuery) {
                     const auto it = Keys.find(key);
                     Y_VERIFY_S(it != Keys.end(), "Key# " << key << " not found in Keys dict");
-                    STLOG(PRI_WARN, TEST_SHARD, TS20, "delete failed", (TabletId, TabletId), (Key, key));
+                    STLOG(PRI_WARN, TEST_SHARD, TS28, "delete failed", (TabletId, TabletId), (Key, key));
                     RegisterTransition(*it, ::NTestShard::TStateServer::DELETE_PENDING, ::NTestShard::TStateServer::CONFIRMED);
                     BytesOfData += it->second.Len;
                 }
@@ -127,7 +138,7 @@ namespace NKikimr::NTestShard {
 
     void TTestShard::StartActivities() {
         if (!ActivityActorId && Settings) {
-            ActivityActorId = Register(new TLoadActor(TabletID(), Executor()->Generation(), *Settings),
+            ActivityActorId = Register(new TLoadActor(TabletID(), Executor()->Generation(), Tablet(), *Settings),
                 TMailboxType::ReadAsFilled, AppData()->UserPoolId);
         }
     }

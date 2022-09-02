@@ -6,12 +6,14 @@
 # original buildsystem will not be accepted.
 
 
+add_subdirectory(ut)
 
 add_library(vdisk-hulldb-compstrat)
 target_link_libraries(vdisk-hulldb-compstrat PUBLIC
   contrib-libs-cxxsupp
   yutil
   vdisk-hulldb-base
+  vdisk-hulldb-generic
   ydb-core-protos
 )
 target_sources(vdisk-hulldb-compstrat PRIVATE

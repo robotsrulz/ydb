@@ -14,7 +14,6 @@
 #include "blobstorage_pdisk_util_countedqueueoneone.h"
 #include "blobstorage_pdisk_writer.h"
 
-#include <ydb/core/blobstorage/base/wilson_events.h>
 #include <ydb/core/blobstorage/lwtrace_probes/blobstorage_probes.h>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
 #include <ydb/core/util/queue_oneone_inplace.h>
@@ -57,7 +56,7 @@ void FormatPDisk(TString path, ui64 diskSizeBytes, ui32 sectorSizeBytes, ui32 us
     TActorSystemCreator creator;
 
     bool isBlockDevice = false;
-    TPDiskCategory::EDeviceType deviceType = TPDiskCategory::DEVICE_TYPE_ROT;
+    NPDisk::EDeviceType deviceType = NPDisk::DEVICE_TYPE_ROT;
     if (sectorMap) {
         if (diskSizeBytes) {
             sectorMap->ForceSize(diskSizeBytes);
@@ -69,7 +68,7 @@ void FormatPDisk(TString path, ui64 diskSizeBytes, ui32 sectorSizeBytes, ui32 us
         }
     } else {
         if (path.StartsWith("PCIe:")) {
-            deviceType = TPDiskCategory::DEVICE_TYPE_NVME;
+            deviceType = NPDisk::DEVICE_TYPE_NVME;
         }
         if (diskSizeBytes == 0) {
             creator.GetActorSystem()->AppData<TAppData>()->IoContextFactory
@@ -100,7 +99,7 @@ void FormatPDisk(TString path, ui64 diskSizeBytes, ui32 sectorSizeBytes, ui32 us
         file.Close();
     }
 
-    const TIntrusivePtr<NMonitoring::TDynamicCounters> counters(new NMonitoring::TDynamicCounters);
+    const TIntrusivePtr<::NMonitoring::TDynamicCounters> counters(new ::NMonitoring::TDynamicCounters);
 
     THolder<NPDisk::TPDisk> pDisk(new NPDisk::TPDisk(cfg, counters));
 
@@ -115,7 +114,7 @@ void FormatPDisk(TString path, ui64 diskSizeBytes, ui32 sectorSizeBytes, ui32 us
 
 bool ReadPDiskFormatInfo(const TString &path, const NPDisk::TKey &mainKey, TPDiskInfo &outInfo,
         const bool doLock, TIntrusivePtr<NPDisk::TSectorMap> sectorMap) {
-    const TIntrusivePtr<NMonitoring::TDynamicCounters> counters(new NMonitoring::TDynamicCounters);
+    const TIntrusivePtr<::NMonitoring::TDynamicCounters> counters(new ::NMonitoring::TDynamicCounters);
     auto mon = std::make_unique<TPDiskMon>(counters, 0, nullptr);
 
     bool useSdpkNvmeDriver = path.StartsWith("PCIe:");

@@ -35,7 +35,7 @@ namespace NKikimr {
             TBatchedVec<TItem> Items;
             ui64 ReceivedResults;
             TActorIDPtr SkeletonFrontIDPtr;
-            NMonitoring::TDynamicCounters::TCounterPtr MultiPutResMsgsPtr;
+            ::NMonitoring::TDynamicCounters::TCounterPtr MultiPutResMsgsPtr;
 
             TEvBlobStorage::TEvVMultiPut::TPtr Event;
             TActorId LeaderId;
@@ -46,7 +46,7 @@ namespace NKikimr {
         public:
             TBufferVMultiPutActor(TActorId leaderId, const TBatchedVec<NKikimrProto::EReplyStatus> &statuses,
                     TOutOfSpaceStatus oosStatus, TEvBlobStorage::TEvVMultiPut::TPtr &ev,
-                    TActorIDPtr skeletonFrontIDPtr, NMonitoring::TDynamicCounters::TCounterPtr multiPutResMsgsPtr,
+                    TActorIDPtr skeletonFrontIDPtr, ::NMonitoring::TDynamicCounters::TCounterPtr multiPutResMsgsPtr,
                     ui64 incarnationGuid)
                 : TActorBootstrapped()
                 , Items(ev->Get()->Record.ItemsSize())
@@ -80,7 +80,7 @@ namespace NKikimr {
                 const ui64 bufferSizeBytes = Event->Get()->GetBufferBytes();
                 auto vMultiPutResult = std::make_unique<TEvBlobStorage::TEvVMultiPutResult>(NKikimrProto::OK, vdisk, cookie,
                     now, Event->Get()->GetCachedByteSize(), &vMultiPutRecord, SkeletonFrontIDPtr, MultiPutResMsgsPtr,
-                    nullptr, bufferSizeBytes, std::move(Event->TraceId), IncarnationGuid, TString());
+                    nullptr, bufferSizeBytes, IncarnationGuid, TString());
 
                 for (ui64 idx = 0; idx < Items.size(); ++idx) {
                     TItem &result = Items[idx];
@@ -90,7 +90,7 @@ namespace NKikimr {
 
                 vMultiPutResult->Record.SetStatusFlags(OOSStatus.Flags);
 
-                SendVDiskResponse(ctx, Event->Sender, vMultiPutResult.release(), *this, Event->Cookie);
+                SendVDiskResponse(ctx, Event->Sender, vMultiPutResult.release(), Event->Cookie);
                 PassAway();
             }
 
@@ -174,7 +174,7 @@ namespace NKikimr {
 
     IActor* CreateSkeletonVMultiPutActor(TActorId leaderId, const TBatchedVec<NKikimrProto::EReplyStatus> &statuses,
             TOutOfSpaceStatus oosStatus, TEvBlobStorage::TEvVMultiPut::TPtr &ev,
-            TActorIDPtr skeletonFrontIDPtr, NMonitoring::TDynamicCounters::TCounterPtr counterPtr,
+            TActorIDPtr skeletonFrontIDPtr, ::NMonitoring::TDynamicCounters::TCounterPtr counterPtr,
             ui64 incarnationGuid) {
         return new NPrivate::TBufferVMultiPutActor(leaderId, statuses, oosStatus, ev,
                 skeletonFrontIDPtr, counterPtr, incarnationGuid);
